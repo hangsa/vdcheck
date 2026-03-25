@@ -12,7 +12,9 @@ This is a **视频码率检查器** (Video Bitrate Checker) - a Chinese-language
 python video_checker.py
 ```
 
-**External dependency:** `ffprobe` must be installed and available in PATH (part of ffmpeg).
+**External dependencies:**
+- `ffprobe` - must be installed and available in PATH (part of ffmpeg)
+- `tkinterdnd2` - Python package for drag-and-drop file support
 
 ## Building the Executable
 
@@ -20,7 +22,13 @@ python video_checker.py
 pyinstaller video_checker.spec
 ```
 
-The spec file is configured for a Windows GUI app (no console window). Output goes to `build/video_checker/`.
+On Windows, you can also use the provided build script:
+
+```bash
+build.bat
+```
+
+The spec file is configured for a Windows GUI app (no console window). Output goes to `dist/视频码率检查器.exe`.
 
 ## Architecture
 
@@ -33,4 +41,5 @@ Single-file application (`video_checker.py`) with three main layers:
    - Bitrate threshold input (default 30000 kbps)
    - Treeview table showing all video stats with color-coded pass/fail results
    - File mover to copy passing files to a destination folder
+   - Drag-and-drop file support via tkinterdnd2
    - Worker thread for non-blocking scans (`_scan_worker` + queue-based IPC)

@@ -6,10 +6,113 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 import tkinter as tk
+import urllib.request
+import zipfile
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import TkinterDnD
+
+# ffprobe 路径（自动安装后保存绝对路径，None 表示使用 PATH）
+FFPROBE_PATH: str | None = None
+
+
+def check_ffprobe() -> str | None:
+    """检查 ffprobe 是否可用，返回路径或 None"""
+    global FFPROBE_PATH
+    if FFPROBE_PATH:
+        return FFPROBE_PATH
+    path = shutil.which('ffprobe')
+    return path
+
+
+def download_ffmpeg(download_dir: str, progress_callback) -> str | None:
+    """下载并解压 ffmpeg 到 download_dir，返回 ffprobe.exe 路径或 None"""
+    url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+    zip_path = os.path.join(download_dir, 'ffmpeg.zip')
+
+    try:
+        # 确保目录存在
+        os.makedirs(download_dir, exist_ok=True)
+
+        # 获取文件大小
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            total_size = int(resp.headers.get('Content-Length', 0))
+
+        # 下载文件
+        start_time = time.time()
+        downloaded = 0
+
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            with open(zip_path, 'wb') as f:
+                while True:
+                    chunk = resp.read(1024 * 64)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    elapsed = time.time() - start_time
+                    speed = downloaded / elapsed if elapsed > 0 else 0
+                    speed_str = _format_speed(speed)
+                    progress_callback(downloaded, total_size, speed_str)
+
+        # 解压
+        extract_dir = os.path.join(download_dir, 'ffmpeg')
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(download_dir)
+
+        # 查找 ffprobe.exe（可能在 ffmpeg/bin/ 下）
+        probe_path = os.path.join(download_dir, 'ffmpeg', 'bin', 'ffprobe.exe')
+        if os.path.exists(probe_path):
+            os.remove(zip_path)
+            return probe_path
+
+        # 备用搜索
+        for _dir, _, files in os.walk(download_dir):
+            if 'ffprobe.exe' in files:
+                probe_path = os.path.join(_dir, 'ffprobe.exe')
+                os.remove(zip_path)
+                return probe_path
+
+        os.remove(zip_path)
+        return None
+
+    except Exception:
+        try:
+            os.remove(zip_path)
+        except FileNotFoundError:
+            pass
+        return None
+
+
+def _format_speed(bytes_per_sec: float) -> str:
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.0f} B/s"
+    elif bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    else:
+        return f"{bytes_per_sec / 1024 / 1024:.2f} MB/s"
+
+
+def add_to_user_path(new_dir: str) -> bool:
+    """将目录添加到用户 PATH（仅影响未来会话）"""
+    try:
+        current_path = os.environ.get('PATH', '')
+        if new_dir.lower() in current_path.lower():
+            return True
+        result = subprocess.run(
+            ['setx', 'PATH', f'{current_path};{new_dir}'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
 
 # 视频扩展名集合
 VIDEO_EXTENSIONS = {
@@ -66,9 +169,10 @@ def run_ffprobe(file_path: str) -> dict | None:
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0  # SW_HIDE
 
+        ffprobe_cmd = FFPROBE_PATH if FFPROBE_PATH else 'ffprobe'
         result = subprocess.run(
             [
-                'ffprobe', '-v', 'quiet',
+                ffprobe_cmd, '-v', 'quiet',
                 '-print_format', 'json',
                 '-show_format', '-show_streams',
                 file_path,
@@ -221,6 +325,7 @@ class VideoCheckerApp:
 
         self.video_results: list[VideoInfo] = []
         self.scanning = False
+        self._downloading = False
         self.result_queue: queue.Queue = queue.Queue()
 
         self._create_widgets()
@@ -343,6 +448,10 @@ class VideoCheckerApp:
         if self.scanning:
             return
 
+        # 检查 ffprobe 是否可用
+        if not self._ensure_ffprobe():
+            return
+
         directory = self.path_var.get().strip()
         if not directory or not os.path.isdir(directory):
             messagebox.showerror("错误", "请输入有效的文件夹路径。")
@@ -411,11 +520,128 @@ class VideoCheckerApp:
                 elif msg_type == 'done':
                     self._scan_complete()
                     return
+                elif msg_type == 'download_progress':
+                    self._update_download_progress(*payload)
+                elif msg_type == 'download_done':
+                    self._download_complete_success(payload)
+                    return
         except queue.Empty:
             pass
 
-        if self.scanning:
+        if self.scanning or self._downloading:
             self.root.after(100, self._check_queue)
+
+    def _ensure_ffprobe(self) -> bool:
+        """确保 ffprobe 可用，返回 True 表示可以扫描"""
+        if check_ffprobe():
+            return True
+
+        # 未找到，询问用户
+        response = messagebox.askyesno(
+            "ffprobe 未找到",
+            "未检测到 ffmpeg/ffprobe，是否下载并安装？\n\n"
+            "这将下载约 70MB 的 ffmpeg 文件到您的用户目录。",
+            icon='warning'
+        )
+        if not response:
+            return False
+
+        # 显示下载进度对话框（返回时下载仍在进行）
+        self._show_ffmpeg_download_dialog()
+        return False
+
+    def _show_ffmpeg_download_dialog(self):
+        """显示 ffmpeg 下载进度对话框"""
+        self._downloading = True
+        self._download_cancelled = False
+
+        # 创建对话框
+        self._dlg = tk.Toplevel(self.root)
+        self._dlg.title("正在下载 ffmpeg...")
+        self._dlg.geometry("450x180")
+        self._dlg.resizable(False, False)
+        self._dlg.transient(self.root)
+        self._dlg.grab_set()
+
+        # 居中
+        self._dlg.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (self._dlg.winfo_width() // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (self._dlg.winfo_height() // 2)
+        self._dlg.geometry(f"+{x}+{y}")
+
+        frame = ttk.Frame(self._dlg, padding=15)
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame, text="正在下载并安装 ffmpeg，请稍候...", font=('Microsoft YaHei', 10)).pack(anchor='w')
+
+        self._dlg_status_var = tk.StringVar(value="正在连接服务器...")
+        ttk.Label(frame, textvariable=self._dlg_status_var, font=('Microsoft YaHei', 9)).pack(anchor='w', pady=(5, 0))
+
+        self._dlg_progress = ttk.Progressbar(frame, mode='determinate', length=400)
+        self._dlg_progress.pack(fill='x', pady=(10, 5))
+
+        self._dlg_percent_var = tk.StringVar(value="0%")
+        ttk.Label(frame, textvariable=self._dlg_percent_var, font=('Microsoft YaHei', 9)).pack(anchor='w')
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill='x', pady=(10, 0))
+        ttk.Button(btn_frame, text="取消", command=self._cancel_download).pack(side='right')
+
+        # 启动下载线程
+        download_dir = os.path.join(os.path.expanduser('~'), 'ffmpeg')
+        t = threading.Thread(
+            target=self._ffmpeg_download_worker,
+            args=(download_dir,),
+            daemon=True,
+        )
+        t.start()
+        self._check_queue()
+
+    def _ffmpeg_download_worker(self, download_dir: str):
+        """下载 ffmpeg 的工作线程"""
+        def progress_callback(bytes_dl, total, speed_str):
+            self.result_queue.put(('download_progress', (bytes_dl, total, speed_str)))
+
+        result = download_ffmpeg(download_dir, progress_callback)
+        self.result_queue.put(('download_done', result))
+
+    def _update_download_progress(self, bytes_dl: int, total: int, speed_str: str):
+        """更新下载进度对话框"""
+        if not hasattr(self, '_dlg') or not self._dlg.winfo_exists():
+            return
+        if total > 0:
+            pct = bytes_dl * 100 // total
+            self._dlg_progress['value'] = pct
+            self._dlg_percent_var.set(f"{pct}% ({speed_str})")
+            self._dlg_status_var.set(f"已下载 {bytes_dl / 1024 / 1024:.1f} MB / {total / 1024 / 1024:.1f} MB")
+
+    def _download_complete_success(self, probe_path: str | None):
+        """下载完成处理"""
+        self._downloading = False
+        if hasattr(self, '_dlg') and self._dlg.winfo_exists():
+            self._dlg.grab_release()
+            self._dlg.destroy()
+
+        if probe_path:
+            global FFPROBE_PATH
+            FFPROBE_PATH = probe_path
+            add_to_user_path(os.path.dirname(probe_path))
+            self.status_var.set("ffmpeg 安装完成，正在开始检测...")
+            # 重试扫描
+            self._start_scan()
+        else:
+            if not self._download_cancelled:
+                messagebox.showerror("安装失败", "ffmpeg 下载或解压失败，请检查网络后重试。")
+            self.status_var.set("就绪")
+
+    def _cancel_download(self):
+        """用户取消下载"""
+        self._download_cancelled = True
+        if hasattr(self, '_dlg') and self._dlg.winfo_exists():
+            self._dlg.grab_release()
+            self._dlg.destroy()
+        self._downloading = False
+        self.status_var.set("就绪")
 
     def _add_result(self, info: VideoInfo):
         """添加一条结果到表格"""
