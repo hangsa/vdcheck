@@ -15,11 +15,28 @@ def get_tkinterdnd2_data():
     return datas
 
 
+def get_ffprobe_data():
+    """获取项目中的 ffprobe 二进制路径"""
+    datas = []
+    # 获取 spec 文件所在目录（项目根目录）
+    spec_dir = os.path.dirname(os.path.abspath(SPEC))
+    ffprobe_src = os.path.join(spec_dir, 'ffprobe', 'ffprobe.exe')
+    if os.path.exists(ffprobe_src):
+        datas.append((ffprobe_src, 'ffprobe'))
+    return datas
+
+
+def get_all_datas():
+    """合并所有需要打包的数据"""
+    datas = get_tkinterdnd2_data() + get_ffprobe_data()
+    return datas
+
+
 a = Analysis(
     ['video_checker.py'],
     pathex=[],
     binaries=[],
-    datas=get_tkinterdnd2_data(),
+    datas=get_all_datas(),
     hiddenimports=['tkinterdnd2', 'tkdnd'],
     hookspath=[],
     hooksconfig={},

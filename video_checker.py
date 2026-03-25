@@ -5,6 +5,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -21,6 +22,18 @@ VIDEO_EXTENSIONS = {
 }
 
 DEFAULT_BITRATE_KBPS = 30000
+
+
+def get_ffprobe_path() -> str:
+    """获取 ffprobe 路径（优先使用打包的，fallback 到 PATH）"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包环境
+        base_dir = sys._MEIPASS
+        local_ffprobe = os.path.join(base_dir, 'ffprobe', 'ffprobe.exe')
+        if os.path.exists(local_ffprobe):
+            return local_ffprobe
+    # 回退到 PATH
+    return 'ffprobe'
 
 
 @dataclass
@@ -62,13 +75,14 @@ def format_file_size(size_bytes: int) -> str:
 def run_ffprobe(file_path: str) -> dict | None:
     """调用 ffprobe 获取视频文件信息"""
     try:
+        ffprobe_path = get_ffprobe_path()
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0  # SW_HIDE
 
         result = subprocess.run(
             [
-                'ffprobe', '-v', 'quiet',
+                ffprobe_path, '-v', 'quiet',
                 '-print_format', 'json',
                 '-show_format', '-show_streams',
                 file_path,
