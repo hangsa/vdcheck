@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from functools import lru_cache
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
@@ -24,16 +25,17 @@ VIDEO_EXTENSIONS = {
 DEFAULT_BITRATE_KBPS = 30000
 
 
+@lru_cache(maxsize=1)
 def get_ffprobe_path() -> str:
     """获取 ffprobe 路径（优先使用打包的，fallback 到 PATH）"""
     if getattr(sys, 'frozen', False):
-        # PyInstaller 打包环境
+        # PyInstaller 打包环境，sys._MEIPASS 是内部属性
         base_dir = sys._MEIPASS
         local_ffprobe = os.path.join(base_dir, 'ffprobe', 'ffprobe.exe')
         if os.path.exists(local_ffprobe):
             return local_ffprobe
-    # 回退到 PATH
-    return 'ffprobe'
+    # 回退到 PATH（shutil.which 返回 None 若不存在）
+    return shutil.which('ffprobe') or 'ffprobe'
 
 
 @dataclass
