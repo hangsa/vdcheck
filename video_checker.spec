@@ -1,12 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import sys
+import site
+
+
+def get_tkinterdnd2_data():
+    """获取 tkinterdnd2 包的数据路径"""
+    datas = []
+    for p in site.getsitepackages():
+        src = os.path.join(p, 'tkinterdnd2')
+        if os.path.exists(src):
+            datas.append((src, 'tkinterdnd2'))
+            break
+    return datas
 
 
 a = Analysis(
     ['video_checker.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=['tkinterdnd2'],
+    datas=get_tkinterdnd2_data(),
+    hiddenimports=['tkinterdnd2', 'tkdnd'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
