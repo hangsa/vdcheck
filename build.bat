@@ -17,25 +17,24 @@ if errorlevel 1 (
 echo [1/4] 检查 ffprobe...
 if not exist ffprobe mkdir ffprobe
 if not exist ffprobe\ffprobe.exe (
-    echo     ffprobe 未找到，正在下载...
-    :: 使用 winget 安装 ffmpeg（包含 ffprobe）
-    winget install ffmpeg --accept-package-agreements --accept-source-agreements -h
-    :: 复制 ffprobe.exe 到项目目录
-    set FFPROBE_PATH=
-    for /r "%LOCALAPPDATA%\Microsoft\WindowsApps" %%i in (ffprobe.exe) do (
-        if exist "%%i" (
-            copy "%%i" ffprobe\ffprobe.exe >nul
-            goto :ffprobe_copied
-        )
+    echo     ffprobe 未找到，正在下载 FFmpeg...
+    :: 下载 FFmpeg（包含所有 DLL）
+    curl -L -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+    powershell -Command "Expand-Archive -Path ffmpeg.zip -DestinationPath . -Force"
+    :: 复制 ffprobe.exe 和所有 DLL
+    for /r "ffmpeg-master-latest-win64-gpl\bin" %%i in (*.*) do (
+        copy "%%i" ffprobe\ >nul
     )
-    :ffprobe_copied
+    :: 清理
+    rmdir /s /q ffmpeg-master-latest-win64-gpl 2>nul
+    del ffmpeg.zip 2>nul
     if not exist ffprobe\ffprobe.exe (
-        echo [错误] ffprobe 下载失败，请手动下载并放入 ffprobe\ffprobe.exe
+        echo [错误] FFmpeg 下载失败，请手动下载并放入 ffprobe\ffprobe.exe
         echo     下载地址: https://ffmpeg.org/download.html
         pause
         exit /b 1
     )
-    echo     ffprobe 下载完成
+    echo     FFmpeg 下载完成
 )
 
 :: 安装依赖
