@@ -9,6 +9,7 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
+from tkinterdnd2 import TkinterDnD
 
 # 视频扩展名集合
 VIDEO_EXTENSIONS = {
@@ -259,15 +260,14 @@ class VideoCheckerApp:
         tree_frame.pack(fill='both', expand=True, padx=5, pady=5)
 
         columns = (
-            'rel_path', 'title', 'resolution', 'frame_rate', 'bitrate',
+            'title', 'resolution', 'frame_rate', 'bitrate',
             'video_codec', 'audio_codec', 'audio_channels', 'duration',
             'file_size', 'result',
         )
         self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings', selectmode='extended')
 
         headers = {
-            'rel_path': ('文件夹', 200),
-            'title': ('标题', 150),
+            'title': ('标题', 350),
             'resolution': ('分辨率', 90),
             'frame_rate': ('帧率', 80),
             'bitrate': ('码率(kbps)', 90),
@@ -282,7 +282,7 @@ class VideoCheckerApp:
         for col, (heading, width) in headers.items():
             self.tree.heading(col, text=heading)
             anchor = 'center'
-            if col in ('rel_path', 'title'):
+            if col == 'title':
                 anchor = 'w'
             elif col in ('bitrate', 'file_size'):
                 anchor = 'e'
@@ -321,6 +321,10 @@ class VideoCheckerApp:
 
         self.move_btn = ttk.Button(bottom_frame, text="移动达标文件", command=self._move_passing_files)
         self.move_btn.pack(side='left', padx=(10, 0))
+
+        # 启用拖拽文件到表格
+        self.tree.drop_target_register('DND_Files')
+        self.tree.dnd_bind('<<Drop>>', self._on_file_drop)
 
     # ---- 事件处理 ----
 
@@ -420,9 +424,12 @@ class VideoCheckerApp:
         tag = 'pass' if info.is_passing else 'fail'
         result_text = "达标" if info.is_passing else "不达标"
 
+        # 标题显示完整相对路径：./子文件夹/文件名
+        rel = info.rel_path.rstrip('/')
+        title_display = f"{rel}/{info.title}" if rel != '.' else f"./{info.title}"
+
         self.tree.insert('', 'end', values=(
-            info.rel_path,
-            info.title,
+            title_display,
             info.resolution,
             info.frame_rate,
             bitrate_display,
@@ -499,9 +506,68 @@ class VideoCheckerApp:
             counter += 1
         return dest
 
+    def _on_file_drop(self, event):
+        """处理拖拽到窗口的文件"""
+        try:
+            bitrate_std = float(self.bitrate_var.get().strip())
+            if bitrate_std <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("错误", "码率标准必须为正数。")
+            return
+
+        # 解析拖拽的文件列表（Windows 格式）
+        files = event.data.strip()
+        if not files:
+            return
+
+        # 处理 {file1} {file2} ... 格式
+        import re
+        file_list = re.findall(r'\{([^}]+)\}', files)
+        if not file_list:
+            # 没有大括号，直接作为文件路径
+            file_list = [files]
+
+        video_files = [f for f in file_list if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+        if not video_files:
+            messagebox.showinfo("提示", "没有找到视频文件。")
+            return
+
+        self.scanning = True
+        self.scan_btn.config(state='disabled')
+        self.video_results.clear()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        self.result_queue = queue.Queue()
+
+        t = threading.Thread(
+            target=self._scan_files_worker,
+            args=(video_files, bitrate_std),
+            daemon=True,
+        )
+        t.start()
+        self._check_queue()
+
+    def _scan_files_worker(self, files: list[str], bitrate_std: float):
+        """扫描拖拽的文件"""
+        self.result_queue.put(('status', f'正在检测 {len(files)} 个文件...'))
+        base_path = os.path.dirname(files[0]) if files else '.'
+
+        for i, fp in enumerate(files, 1):
+            self.result_queue.put(('status', f'正在检测... ({i}/{len(files)}) {os.path.basename(fp)}'))
+            data = run_ffprobe(fp)
+            if data is None:
+                continue
+            info = parse_video_info(data, fp, base_path, bitrate_std)
+            if info is not None:
+                self.result_queue.put(('result', info))
+
+        self.result_queue.put(('done', None))
+
 
 def main():
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     VideoCheckerApp(root)
     root.mainloop()
 
