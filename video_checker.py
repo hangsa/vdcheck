@@ -16,6 +16,8 @@ from tkinterdnd2 import TkinterDnD
 
 # ffprobe 路径（自动安装后保存绝对路径，None 表示使用 PATH）
 FFPROBE_PATH: str | None = None
+# setx 是否已执行过（避免每次启动重复调用）
+FFPROBE_PATH_SET: bool = False
 
 
 def check_ffprobe() -> str | None:
@@ -43,6 +45,7 @@ def download_ffmpeg(download_dir: str, progress_callback) -> str | None:
         # 下载文件
         start_time = time.time()
         downloaded = 0
+        chunk_count = 0
 
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=300) as resp:
@@ -53,10 +56,12 @@ def download_ffmpeg(download_dir: str, progress_callback) -> str | None:
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
-                    elapsed = time.time() - start_time
-                    speed = downloaded / elapsed if elapsed > 0 else 0
-                    speed_str = _format_speed(speed)
-                    progress_callback(downloaded, total_size, speed_str)
+                    chunk_count += 1
+                    if chunk_count >= 10:
+                        chunk_count = 0
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed if elapsed > 0 else 0
+                        progress_callback(downloaded, total_size, _format_speed(speed))
 
         # 解压
         extract_dir = os.path.join(download_dir, 'ffmpeg')
@@ -98,9 +103,13 @@ def _format_speed(bytes_per_sec: float) -> str:
 
 def add_to_user_path(new_dir: str) -> bool:
     """将目录添加到用户 PATH（仅影响未来会话）"""
+    global FFPROBE_PATH_SET
+    if FFPROBE_PATH_SET:
+        return True
     try:
         current_path = os.environ.get('PATH', '')
         if new_dir.lower() in current_path.lower():
+            FFPROBE_PATH_SET = True
             return True
         result = subprocess.run(
             ['setx', 'PATH', f'{current_path};{new_dir}'],
@@ -109,7 +118,10 @@ def add_to_user_path(new_dir: str) -> bool:
             stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            FFPROBE_PATH_SET = True
+            return True
+        return False
     except Exception:
         return False
 
@@ -308,9 +320,11 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
     else:
         try:
             for f in os.listdir(directory):
-                full = os.path.join(directory, f)
-                if os.path.isfile(full) and os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS:
-                    files.append(full)
+                ext = os.path.splitext(f)[1].lower()
+                if ext in VIDEO_EXTENSIONS:
+                    full = os.path.join(directory, f)
+                    if os.path.isfile(full):
+                        files.append(full)
         except OSError:
             pass
     return files
@@ -326,6 +340,7 @@ class VideoCheckerApp:
         self.video_results: list[VideoInfo] = []
         self.scanning = False
         self._downloading = False
+        self._queue_event = threading.Event()
         self.result_queue: queue.Queue = queue.Queue()
 
         self._create_widgets()
@@ -489,27 +504,32 @@ class VideoCheckerApp:
     def _scan_worker(self, directory: str, recursive: bool, bitrate_std: float):
         """扫描工作线程"""
         self.result_queue.put(('status', '正在扫描文件列表...'))
+        self._queue_event.set()
         files = scan_video_files(directory, recursive)
         total = len(files)
 
         if total == 0:
             self.result_queue.put(('status', '未找到视频文件'))
             self.result_queue.put(('done', None))
+            self._queue_event.set()
             return
 
         for i, fp in enumerate(files, 1):
             self.result_queue.put(('status', f'正在检测... ({i}/{total}) {os.path.basename(fp)}'))
+            self._queue_event.set()
             data = run_ffprobe(fp)
             if data is None:
                 continue
             info = parse_video_info(data, fp, directory, bitrate_std)
             if info is not None:
                 self.result_queue.put(('result', info))
+                self._queue_event.set()
 
         self.result_queue.put(('done', None))
+        self._queue_event.set()
 
     def _check_queue(self):
-        """主线程定期检查结果队列"""
+        """主线程检查结果队列，Event 唤醒或超时后继续"""
         try:
             while True:
                 msg_type, payload = self.result_queue.get_nowait()
@@ -529,7 +549,10 @@ class VideoCheckerApp:
             pass
 
         if self.scanning or self._downloading:
-            self.root.after(100, self._check_queue)
+            signaled = self._queue_event.wait(0.1)
+            if signaled:
+                self._queue_event.clear()
+            self.root.after_idle(self._check_queue)
 
     def _ensure_ffprobe(self) -> bool:
         """确保 ffprobe 可用，返回 True 表示可以扫描"""
@@ -601,9 +624,11 @@ class VideoCheckerApp:
         """下载 ffmpeg 的工作线程"""
         def progress_callback(bytes_dl, total, speed_str):
             self.result_queue.put(('download_progress', (bytes_dl, total, speed_str)))
+            self._queue_event.set()
 
         result = download_ffmpeg(download_dir, progress_callback)
         self.result_queue.put(('download_done', result))
+        self._queue_event.set()
 
     def _update_download_progress(self, bytes_dl: int, total: int, speed_str: str):
         """更新下载进度对话框"""
@@ -778,18 +803,22 @@ class VideoCheckerApp:
     def _scan_files_worker(self, files: list[str], bitrate_std: float):
         """扫描拖拽的文件"""
         self.result_queue.put(('status', f'正在检测 {len(files)} 个文件...'))
+        self._queue_event.set()
         base_path = os.path.dirname(files[0]) if files else '.'
 
         for i, fp in enumerate(files, 1):
             self.result_queue.put(('status', f'正在检测... ({i}/{len(files)}) {os.path.basename(fp)}'))
+            self._queue_event.set()
             data = run_ffprobe(fp)
             if data is None:
                 continue
             info = parse_video_info(data, fp, base_path, bitrate_std)
             if info is not None:
                 self.result_queue.put(('result', info))
+                self._queue_event.set()
 
         self.result_queue.put(('done', None))
+        self._queue_event.set()
 
 
 def main():
