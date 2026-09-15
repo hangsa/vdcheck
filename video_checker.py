@@ -231,6 +231,20 @@ def parse_video_info(
     )
 
 
+def _cell_fg(info: VideoInfo, key: str) -> str | None:
+    """决定一个 cell 的前景色。None 表示用系统默认色。"""
+    if info.is_passing:
+        return '#228B22'
+
+    failing = {'title', 'result'}
+    if info.bitrate_kbps < info.bitrate_std:
+        failing.add('bitrate')
+    if not info.sample_rate_passing:
+        failing.add('audio_sample_rate')
+
+    return '#DC143C' if key in failing else None
+
+
 def scan_video_files(directory: str, recursive: bool) -> list[str]:
     """扫描目录获取视频文件列表"""
     files = []
