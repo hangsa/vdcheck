@@ -23,6 +23,7 @@ VIDEO_EXTENSIONS = {
 }
 
 DEFAULT_BITRATE_KBPS = 30000
+DEFAULT_SAMPLE_RATE_KHZ = 48
 
 
 @lru_cache(maxsize=1)
@@ -48,6 +49,7 @@ class VideoInfo:
     video_codec: str
     audio_codec: str
     audio_channels: str
+    audio_sample_rate: str
     duration: str
     file_size: str
     is_passing: bool
@@ -104,7 +106,8 @@ def run_ffprobe(file_path: str) -> dict | None:
 
 
 def parse_video_info(
-    data: dict, full_path: str, base_path: str, bitrate_std: float
+    data: dict, full_path: str, base_path: str,
+    bitrate_std: float, sample_rate_std: float,
 ) -> VideoInfo | None:
     """从 ffprobe JSON 数据解析视频信息"""
     streams = data.get('streams', [])
@@ -153,6 +156,20 @@ def parse_video_info(
     audio_codec = audio_stream.get('codec_name', 'N/A') if audio_stream else 'N/A'
     audio_channels = str(audio_stream.get('channels', 'N/A')) if audio_stream else 'N/A'
 
+    # 音频采样率 (Hz -> kHz)
+    if audio_stream is not None:
+        sample_rate_raw = audio_stream.get('sample_rate')
+        try:
+            sample_rate_hz = float(sample_rate_raw)
+            audio_sample_rate = f"{sample_rate_hz / 1000:.1f} kHz"
+            sample_rate_passing = (sample_rate_hz / 1000.0) >= sample_rate_std
+        except (TypeError, ValueError):
+            audio_sample_rate = "N/A"
+            sample_rate_passing = False
+    else:
+        audio_sample_rate = "N/A"
+        sample_rate_passing = True  # 无音频流不算不达标
+
     # 时长
     duration_sec = fmt.get('duration')
     try:
@@ -191,7 +208,7 @@ def parse_video_info(
     except ValueError:
         rel_path = full_path
 
-    is_passing = bitrate_kbps >= bitrate_std
+    is_passing = (bitrate_kbps >= bitrate_std) and sample_rate_passing
 
     return VideoInfo(
         rel_path=rel_path,
@@ -202,6 +219,7 @@ def parse_video_info(
         video_codec=video_codec,
         audio_codec=audio_codec,
         audio_channels=audio_channels,
+        audio_sample_rate=audio_sample_rate,
         duration=duration,
         file_size=file_size,
         is_passing=is_passing,
@@ -261,15 +279,21 @@ class VideoCheckerApp:
         self.scan_btn = ttk.Button(top_frame, text="开始检测", command=self._start_scan)
         self.scan_btn.pack(side='left', padx=(10, 0))
 
-        # === Row 2: 码率标准 ===
-        bitrate_frame = ttk.Frame(self.root, padding=5)
-        bitrate_frame.pack(fill='x')
+        # === Row 2: 码率标准 + 采样率标准 ===
+        std_frame = ttk.Frame(self.root, padding=5)
+        std_frame.pack(fill='x')
 
-        ttk.Label(bitrate_frame, text="码率标准:").pack(side='left')
+        ttk.Label(std_frame, text="码率标准:").pack(side='left')
         self.bitrate_var = tk.StringVar(value=str(DEFAULT_BITRATE_KBPS))
-        self.bitrate_entry = ttk.Entry(bitrate_frame, textvariable=self.bitrate_var, width=10)
+        self.bitrate_entry = ttk.Entry(std_frame, textvariable=self.bitrate_var, width=10)
         self.bitrate_entry.pack(side='left', padx=(5, 2))
-        ttk.Label(bitrate_frame, text="kbps").pack(side='left')
+        ttk.Label(std_frame, text="kbps").pack(side='left')
+
+        ttk.Label(std_frame, text="采样率标准:").pack(side='left', padx=(15, 0))
+        self.sample_rate_var = tk.StringVar(value=str(DEFAULT_SAMPLE_RATE_KHZ))
+        self.sample_rate_entry = ttk.Entry(std_frame, textvariable=self.sample_rate_var, width=10)
+        self.sample_rate_entry.pack(side='left', padx=(5, 2))
+        ttk.Label(std_frame, text="kHz").pack(side='left')
 
         # === Main: 结果表格 ===
         tree_frame = ttk.Frame(self.root)
@@ -277,8 +301,8 @@ class VideoCheckerApp:
 
         columns = (
             'title', 'resolution', 'frame_rate', 'bitrate',
-            'video_codec', 'audio_codec', 'audio_channels', 'duration',
-            'file_size', 'result',
+            'video_codec', 'audio_codec', 'audio_channels', 'audio_sample_rate',
+            'duration', 'file_size', 'result',
         )
         self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings', selectmode='extended')
 
@@ -290,6 +314,7 @@ class VideoCheckerApp:
             'video_codec': ('视频编码', 80),
             'audio_codec': ('音频编码', 80),
             'audio_channels': ('声道数', 55),
+            'audio_sample_rate': ('采样率(kHz)', 90),
             'duration': ('时长', 75),
             'file_size': ('文件大小', 80),
             'result': ('结果', 70),
@@ -300,7 +325,7 @@ class VideoCheckerApp:
             anchor = 'center'
             if col == 'title':
                 anchor = 'w'
-            elif col in ('bitrate', 'file_size'):
+            elif col in ('bitrate', 'audio_sample_rate', 'file_size'):
                 anchor = 'e'
             self.tree.column(col, width=width, anchor=anchor)
 
@@ -337,6 +362,8 @@ class VideoCheckerApp:
 
         self.move_btn = ttk.Button(bottom_frame, text="移动达标文件", command=self._move_passing_files)
         self.move_btn.pack(side='left', padx=(10, 0))
+        self.move_all_btn = ttk.Button(bottom_frame, text="移动全部文件", command=self._move_all_files)
+        self.move_all_btn.pack(side='left', padx=(5, 0))
 
         # 启用拖拽文件到表格
         self.tree.drop_target_register('DND_Files')
@@ -348,7 +375,7 @@ class VideoCheckerApp:
         folder = filedialog.askdirectory(title="选择视频文件夹")
         if folder:
             self.path_var.set(folder)
-            self.dest_var.set(os.path.join(folder, "Passed"))
+            self.dest_var.set(os.path.join(folder, "Checked"))
 
     def _browse_dest(self):
         folder = filedialog.askdirectory(title="选择目标文件夹")
@@ -372,9 +399,17 @@ class VideoCheckerApp:
             messagebox.showerror("错误", "码率标准必须为正数。")
             return
 
+        try:
+            sample_rate_std = float(self.sample_rate_var.get().strip())
+            if sample_rate_std <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("错误", "采样率标准必须为正数。")
+            return
+
         # 设置默认目标路径
         if not self.dest_var.get().strip():
-            self.dest_var.set(os.path.join(directory, "Passed"))
+            self.dest_var.set(os.path.join(directory, "Checked"))
 
         self.scanning = True
         self.scan_btn.config(state='disabled')
@@ -387,13 +422,13 @@ class VideoCheckerApp:
 
         t = threading.Thread(
             target=self._scan_worker,
-            args=(directory, self.recursive_var.get(), bitrate_std),
+            args=(directory, self.recursive_var.get(), bitrate_std, sample_rate_std),
             daemon=True,
         )
         t.start()
         self._check_queue()
 
-    def _scan_worker(self, directory: str, recursive: bool, bitrate_std: float):
+    def _scan_worker(self, directory: str, recursive: bool, bitrate_std: float, sample_rate_std: float):
         """扫描工作线程"""
         self.result_queue.put(('status', '正在扫描文件列表...'))
         files = scan_video_files(directory, recursive)
@@ -409,7 +444,7 @@ class VideoCheckerApp:
             data = run_ffprobe(fp)
             if data is None:
                 continue
-            info = parse_video_info(data, fp, directory, bitrate_std)
+            info = parse_video_info(data, fp, directory, bitrate_std, sample_rate_std)
             if info is not None:
                 self.result_queue.put(('result', info))
 
@@ -452,6 +487,7 @@ class VideoCheckerApp:
             info.video_codec,
             info.audio_codec,
             info.audio_channels,
+            info.audio_sample_rate,
             info.duration,
             info.file_size,
             result_text,
@@ -507,6 +543,46 @@ class VideoCheckerApp:
             msg += f"\n\n{len(failed_list)} 个文件移动失败:\n" + "\n".join(failed_list[:20])
         messagebox.showinfo("移动结果", msg)
 
+    def _move_all_files(self):
+        """移动全部文件到目标目录"""
+        files_to_move = self.video_results
+        if not files_to_move:
+            messagebox.showinfo("提示", "没有文件需要移动。")
+            return
+
+        dest_dir = self.dest_var.get().strip()
+        if not dest_dir:
+            messagebox.showerror("错误", "请输入目标文件夹路径。")
+            return
+
+        confirm = messagebox.askyesno(
+            "确认移动",
+            f"确定要将 {len(files_to_move)} 个文件移动到:\n{dest_dir}\n？"
+        )
+        if not confirm:
+            return
+
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("错误", f"无法创建目标目录:\n{e}")
+            return
+
+        moved = 0
+        failed_list = []
+        for info in files_to_move:
+            try:
+                dest_path = self._get_unique_dest(info.full_path, dest_dir)
+                shutil.move(info.full_path, dest_path)
+                moved += 1
+            except (OSError, shutil.Error) as e:
+                failed_list.append(f"{info.rel_path}: {e}")
+
+        msg = f"成功移动 {moved} 个文件。"
+        if failed_list:
+            msg += f"\n\n{len(failed_list)} 个文件移动失败:\n" + "\n".join(failed_list[:20])
+        messagebox.showinfo("移动结果", msg)
+
     @staticmethod
     def _get_unique_dest(src_path: str, dest_dir: str) -> str:
         """获取不重复的目标路径"""
@@ -530,6 +606,14 @@ class VideoCheckerApp:
                 raise ValueError
         except ValueError:
             messagebox.showerror("错误", "码率标准必须为正数。")
+            return
+
+        try:
+            sample_rate_std = float(self.sample_rate_var.get().strip())
+            if sample_rate_std <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("错误", "采样率标准必须为正数。")
             return
 
         # 解析拖拽的文件列表（Windows 格式）
@@ -559,13 +643,13 @@ class VideoCheckerApp:
 
         t = threading.Thread(
             target=self._scan_files_worker,
-            args=(video_files, bitrate_std),
+            args=(video_files, bitrate_std, sample_rate_std),
             daemon=True,
         )
         t.start()
         self._check_queue()
 
-    def _scan_files_worker(self, files: list[str], bitrate_std: float):
+    def _scan_files_worker(self, files: list[str], bitrate_std: float, sample_rate_std: float):
         """扫描拖拽的文件"""
         self.result_queue.put(('status', f'正在检测 {len(files)} 个文件...'))
         base_path = os.path.dirname(files[0]) if files else '.'
@@ -575,7 +659,7 @@ class VideoCheckerApp:
             data = run_ffprobe(fp)
             if data is None:
                 continue
-            info = parse_video_info(data, fp, base_path, bitrate_std)
+            info = parse_video_info(data, fp, base_path, bitrate_std, sample_rate_std)
             if info is not None:
                 self.result_queue.put(('result', info))
 
