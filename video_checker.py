@@ -247,6 +247,165 @@ def _cell_fg(info: VideoInfo, key: str) -> str | None:
     return '#DC143C' if key in failing else None
 
 
+class VideoGridView:
+    """自绘的可滚动表格，每个 cell 独立控制 fg。"""
+
+    FG_PASS = '#228B22'
+    FG_FAIL = '#DC143C'
+
+    def __init__(self, parent: tk.Widget, columns: dict[str, tuple[str, int]]):
+        """
+        parent: 父容器（ttk.Frame）
+        columns: {'key': ('中文表头', width_in_pixels)}
+        """
+        self.parent = parent
+        self.columns = columns
+        self._rows: list[ttk.Frame] = []
+        self._build()
+
+    def pack(self, **kwargs):
+        self.outer.pack(**kwargs)
+
+    def grid(self, **kwargs):
+        self.outer.grid(**kwargs)
+
+    def update_idletasks(self):
+        self.outer.update_idletasks()
+
+    def _build(self):
+        """构建整个组件。"""
+        # 主容器
+        self.outer = ttk.Frame(self.parent)
+
+        # 表头
+        self._build_header()
+
+        # 滚动区
+        body = ttk.Frame(self.outer)
+        body.pack(side='top', fill='both', expand=True)
+
+        self.vsb = ttk.Scrollbar(body, orient='vertical')
+        self.vsb.pack(side='right', fill='y')
+        self.hsb = ttk.Scrollbar(body, orient='horizontal')
+        self.hsb.pack(side='bottom', fill='x')
+
+        self.canvas = tk.Canvas(body, highlightthickness=0)
+        self.canvas.pack(side='left', fill='both', expand=True)
+        self.vsb.config(command=self.canvas.yview)
+        self.hsb.config(command=self.canvas.xview)
+        self.canvas.config(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+
+        self.data_frame = ttk.Frame(self.canvas)
+        self._canvas_window = self.canvas.create_window(
+            (0, 0), window=self.data_frame, anchor='nw'
+        )
+        self.canvas.bind('<Configure>', self._on_canvas_configure)
+        self.data_frame.bind('<Configure>', self._on_data_configure)
+        self._bind_mousewheel()
+
+    def _build_header(self):
+        self.header_frame = ttk.Frame(self.outer)
+        self.header_frame.pack(side='top', fill='x')
+        for i, (key, (heading, width)) in enumerate(self.columns.items()):
+            anchor = self._column_anchor(key)
+            lbl = tk.Label(
+                self.header_frame,
+                text=heading,
+                font=('TkDefaultFont', 9, 'bold'),
+                anchor=anchor,
+                padx=4, pady=2,
+                relief='raised', bd=1,
+            )
+            lbl.grid(row=0, column=i, sticky='nsew')
+            self.header_frame.grid_columnconfigure(i, minsize=width)
+
+    @staticmethod
+    def _column_anchor(key: str) -> str:
+        if key == 'title':
+            return 'w'
+        if key in ('bitrate', 'audio_sample_rate', 'file_size'):
+            return 'e'
+        return 'center'
+
+    def _on_canvas_configure(self, event):
+        # 让 data_frame 宽度等于 canvas 可见宽度
+        self.canvas.itemconfigure(self._canvas_window, width=event.width)
+
+    def _on_data_configure(self, _event):
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+
+    def _bind_mousewheel(self):
+        self.canvas.bind('<Enter>', lambda _e: self._wheel_bind_id())
+        self.canvas.bind('<Leave>', lambda _e: self.canvas.unbind_all('<MouseWheel>'))
+
+    def _wheel_bind_id(self):
+        # macOS / Windows
+        self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
+        # Linux (X11)
+        self.canvas.bind_all('<Button-4>', self._on_mousewheel_linux)
+        self.canvas.bind_all('<Button-5>', self._on_mousewheel_linux)
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+    def _on_mousewheel_linux(self, event):
+        delta = -1 if event.num == 4 else 1
+        self.canvas.yview_scroll(delta, 'units')
+
+    def clear(self):
+        """清空所有数据行，滚动条复位。"""
+        for child in self.data_frame.winfo_children():
+            child.destroy()
+        self._rows.clear()
+        self.canvas.yview_moveto(0)
+
+    def add_row(self, info: VideoInfo):
+        """往表格里追加一行，cell 颜色由 _cell_fg 决定。"""
+        row_frame = ttk.Frame(self.data_frame)
+        row_frame.pack(fill='x')
+        self._rows.append(row_frame)
+
+        for i, (key, (_heading, width)) in enumerate(self.columns.items()):
+            text = self._format_cell(info, key)
+            anchor = self._column_anchor(key)
+            fg = _cell_fg(info, key)
+            cell = tk.Label(
+                row_frame,
+                text=text,
+                anchor=anchor,
+                padx=4, pady=2,
+                fg=fg if fg is not None else 'black',
+            )
+            cell.grid(row=0, column=i, sticky='nsew')
+            row_frame.grid_columnconfigure(i, minsize=width)
+
+    @staticmethod
+    def _format_cell(info: VideoInfo, key: str) -> str:
+        """把 VideoInfo 字段映射成 cell 显示文本。"""
+        if key == 'title':
+            rel = info.rel_path.rstrip('/')
+            return f"{rel}/{info.title}" if rel != '.' else f"./{info.title}"
+        if key == 'bitrate':
+            return f"{info.bitrate_kbps:.0f}"
+        if key == 'result':
+            return "达标" if info.is_passing else "不达标"
+        return {
+            'resolution': info.resolution,
+            'frame_rate': info.frame_rate,
+            'video_codec': info.video_codec,
+            'audio_codec': info.audio_codec,
+            'audio_channels': info.audio_channels,
+            'audio_sample_rate': info.audio_sample_rate,
+            'duration': info.duration,
+            'file_size': info.file_size,
+        }[key]
+
+    def bind_drop(self, callback):
+        """把拖拽事件绑定到 data_frame。"""
+        self.data_frame.drop_target_register('DND_Files')
+        self.data_frame.dnd_bind('<<Drop>>', callback)
+
+
 def scan_video_files(directory: str, recursive: bool) -> list[str]:
     """扫描目录获取视频文件列表"""
     files = []
