@@ -328,8 +328,12 @@ class VideoGridView:
         return 'center'
 
     def _on_canvas_configure(self, event):
-        # 让 data_frame 宽度等于 canvas 可见宽度
-        self.canvas.itemconfigure(self._canvas_window, width=event.width)
+        # 横向：让 inner frame 至少和 canvas 等宽（填满）；但当内容（列总 minsize）
+        # 比 canvas 宽时，保持 natural 宽度，让横向滚动条接管
+        natural = self.data_frame.winfo_reqwidth()
+        self.canvas.itemconfigure(
+            self._canvas_window, width=max(event.width, natural)
+        )
 
     def _on_data_configure(self, _event):
         self.canvas.configure(scrollregion=self.canvas.bbox('all'))
