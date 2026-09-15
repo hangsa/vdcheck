@@ -53,6 +53,7 @@ class VideoInfo:
     duration: str
     file_size: str
     is_passing: bool
+    sample_rate_passing: bool   # NEW: 采样率是否达标，用于按列染色
     bitrate_std: float          # NEW: 码率阈值（kbps），扫描时写入
     sample_rate_std: float      # NEW: 采样率阈值（kHz），扫描时写入
     full_path: str
@@ -225,6 +226,7 @@ def parse_video_info(
         duration=duration,
         file_size=file_size,
         is_passing=is_passing,
+        sample_rate_passing=sample_rate_passing,
         bitrate_std=bitrate_std,
         sample_rate_std=sample_rate_std,
         full_path=full_path,
