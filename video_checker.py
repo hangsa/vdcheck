@@ -236,7 +236,7 @@ def parse_video_info(
 def _cell_fg(info: VideoInfo, key: str) -> str | None:
     """决定一个 cell 的前景色。None 表示用系统默认色。"""
     if info.is_passing:
-        return '#228B22'
+        return VideoGridView.FG_PASS
 
     failing = {'title', 'result'}
     if info.bitrate_kbps < info.bitrate_std:
@@ -244,7 +244,7 @@ def _cell_fg(info: VideoInfo, key: str) -> str | None:
     if not info.sample_rate_passing:
         failing.add('audio_sample_rate')
 
-    return '#DC143C' if key in failing else None
+    return VideoGridView.FG_FAIL if key in failing else None
 
 
 class VideoGridView:
