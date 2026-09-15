@@ -479,7 +479,7 @@ class VideoCheckerApp:
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
 
-        # === Main: 结果表格 ===
+        # === Main: 结果表格（自绘 VideoGridView） ===
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill='both', expand=True, padx=5, pady=5)
 
@@ -488,8 +488,6 @@ class VideoCheckerApp:
             'video_codec', 'audio_codec', 'audio_channels', 'audio_sample_rate',
             'duration', 'file_size', 'result',
         )
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings', selectmode='extended')
-
         headers = {
             'title': ('标题', 350),
             'resolution': ('分辨率', 90),
@@ -504,29 +502,8 @@ class VideoCheckerApp:
             'result': ('结果', 70),
         }
 
-        for col, (heading, width) in headers.items():
-            self.tree.heading(col, text=heading)
-            anchor = 'center'
-            if col == 'title':
-                anchor = 'w'
-            elif col in ('bitrate', 'audio_sample_rate', 'file_size'):
-                anchor = 'e'
-            self.tree.column(col, width=width, anchor=anchor)
-
-        # 滚动条
-        vsb = ttk.Scrollbar(tree_frame, orient='vertical', command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient='horizontal', command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.tree.grid(row=0, column=0, sticky='nsew')
-        vsb.grid(row=0, column=1, sticky='ns')
-        hsb.grid(row=1, column=0, sticky='ew')
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-
-        # 颜色标记
-        self.tree.tag_configure('pass', foreground='#228B22')
-        self.tree.tag_configure('fail', foreground='#DC143C')
+        self.grid = VideoGridView(tree_frame, headers)
+        self.grid.pack(fill='both', expand=True)
 
         # === 状态栏 ===
         self.status_var = tk.StringVar(value="就绪")
@@ -550,8 +527,7 @@ class VideoCheckerApp:
         self.move_all_btn.pack(side='left', padx=(5, 0))
 
         # 启用拖拽文件到表格
-        self.tree.drop_target_register('DND_Files')
-        self.tree.dnd_bind('<<Drop>>', self._on_file_drop)
+        self.grid.bind_drop(self._on_file_drop)
 
     # ---- 事件处理 ----
 
@@ -599,8 +575,7 @@ class VideoCheckerApp:
         self.scan_btn.config(state='disabled')
         self.video_results.clear()
         # 清空表格
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self.grid.clear()
 
         self.result_queue = queue.Queue()
 
@@ -655,27 +630,7 @@ class VideoCheckerApp:
     def _add_result(self, info: VideoInfo):
         """添加一条结果到表格"""
         self.video_results.append(info)
-        bitrate_display = f"{info.bitrate_kbps:.0f}"
-        tag = 'pass' if info.is_passing else 'fail'
-        result_text = "达标" if info.is_passing else "不达标"
-
-        # 标题显示完整相对路径：./子文件夹/文件名
-        rel = info.rel_path.rstrip('/')
-        title_display = f"{rel}/{info.title}" if rel != '.' else f"./{info.title}"
-
-        self.tree.insert('', 'end', values=(
-            title_display,
-            info.resolution,
-            info.frame_rate,
-            bitrate_display,
-            info.video_codec,
-            info.audio_codec,
-            info.audio_channels,
-            info.audio_sample_rate,
-            info.duration,
-            info.file_size,
-            result_text,
-        ), tags=(tag,))
+        self.grid.add_row(info)
 
     def _scan_complete(self):
         """扫描完成处理"""
@@ -820,8 +775,7 @@ class VideoCheckerApp:
         self.scanning = True
         self.scan_btn.config(state='disabled')
         self.video_results.clear()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self.grid.clear()
 
         self.result_queue = queue.Queue()
 
