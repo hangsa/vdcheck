@@ -336,7 +336,7 @@ class VideoGridView:
 
     def _bind_mousewheel(self):
         self.canvas.bind('<Enter>', lambda _e: self._wheel_bind_id())
-        self.canvas.bind('<Leave>', lambda _e: self.canvas.unbind_all('<MouseWheel>'))
+        self.canvas.bind('<Leave>', lambda _e: self._unbind_mousewheel())
 
     def _wheel_bind_id(self):
         # macOS / Windows
@@ -344,6 +344,11 @@ class VideoGridView:
         # Linux (X11)
         self.canvas.bind_all('<Button-4>', self._on_mousewheel_linux)
         self.canvas.bind_all('<Button-5>', self._on_mousewheel_linux)
+
+    def _unbind_mousewheel(self):
+        self.canvas.unbind_all('<MouseWheel>')
+        self.canvas.unbind_all('<Button-4>')
+        self.canvas.unbind_all('<Button-5>')
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
