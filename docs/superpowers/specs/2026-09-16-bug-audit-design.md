@@ -439,3 +439,35 @@
 - `tk.StringVar` 持有 widget 引用，但 widget 销毁时 StringVar 也会被 Tk 释放；多次 `.set()` 不会创建新实例。
 - `scanning` 是普通 Python bool，无资源泄漏。
 - `result_queue` 替换的安全分析见 #🟢 #19。
+
+## 断言运行结果
+
+运行: `python docs/superpowers/specs/2026-09-16-bug-audit-assertions.py`（python3.11）
+
+- 总断言数: **66**
+- 通过: **65**
+- 失败: **1**
+
+**唯一失败项**:
+
+| check() 名称 | 涉及行 | 性质 |
+|---|---|---|
+| `r_frame_rate=0/0 显示 N/A` | `video_checker.py:137-143` | **真实 bug（已记录在 #🟠 高「r_frame_rate="0/0" 时显示 "0.00 fps" 而非 N/A」第 164 行）** |
+
+断言失败原因: `parse_video_info` 在 `r_frame_rate = "0/0"` 时，`num == 0` 且 `den == 0`，但 `if float(den) != 0` 只判断 `den`，故 `fps = 0`，格式化为 `"0.00 fps"` 而非 `"N/A"`。这与静态走查结论一致，是真实代码 bug，**不是断言脚本的 bug**，无需修断言脚本。
+
+**各 section 覆盖范围**:
+
+| section | check 数 | 覆盖目标 |
+|---|---|---|
+| `scan_video_files` | 5 | 顶层 vs 递归、大小写扩展名、非视频文件排除、空/不存在目录 |
+| `parse_video_info — 基本字段与边界` | 9 | is_passing/bitrate/resolution/fps 正常路径；无视频流；r_frame_rate=0/0 与非法字符串 |
+| `parse_video_info — 码率 / 采样率 / 阈值` | 11 | stream vs format 码率优先级、缺失码率、阈值边界 `>=`、采样率缺失/非法/低于阈值、双阈值透传 |
+| `parse_video_info — 标题 / 大小 / 路径` | 8 | tags 大小写、缺失回退、size 缺失/非数字、relpath 同目录/子目录/跨盘 |
+| `_cell_fg 全矩阵` | 16 | 全达标/仅码率不达标/仅采样率不达标/都不达标 × 关键列的红/绿/默认映射 |
+| `_truncate_text` | 1 | 短 ASCII 快路径（依赖 Tk root 的真实 measure 测试留待后续） |
+| `format_duration` | 6 | 0/59/60/3600/3661 秒、负数异常输入 |
+| `format_file_size` | 6 | 0/1023/1024/1MB/1GB、负数 |
+| `_get_unique_dest` | 4 | 无冲突、1 次冲突、多重冲突、源文件已含 `_1` 后缀（语义丢失已记录） |
+
+注: `#🟢 低「_get_unique_dest 源文件已含 _1 后缀 → a_1_1.mp4（语义丢失？）」` 断言通过（确认了 a_1_1.mp4 这一行为），但该行为本身就是可疑的——用户看到 `a_1_1.mp4` 不会知道这是「源已含 _1 后缀 + 目标也冲突」叠加产生。属 UX/可读性问题，非崩溃。
