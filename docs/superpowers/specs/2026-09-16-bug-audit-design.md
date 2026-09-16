@@ -355,3 +355,86 @@
 - `bind_all` 全局副作用：用户在另一个 widget 里滚动（如 `Treeview` 不存在，但 Entry/Combobox 里）也会触发 `canvas.yview_scroll` —— 在 macOS 上若把鼠标移到 Entry 上滚动，会让表格乱跳。属于用户体验差，不算 bug。
 - `threading.Thread` 引用：CPython 下不会 GC（见 #🟡 中 #12），跨实现理论风险已记录。
 - 未发现 worker 异常路径的隐藏副作用（除 #🔴 致命 #9/#10）。
+
+---
+
+## 审计发现 — 业务逻辑 + 资源
+
+### 🟡 中 阈值中途改变后，已扫描行的 `is_passing` 不重新计算，结果列与状态栏不一致
+**位置**: `video_checker.py:214`（`is_passing` 计算）+ `video_checker.py:715`（worker snapshot）+ `video_checker.py:739-742`（`_add_result`）
+**类别**: 业务逻辑
+**描述**: `parse_video_info` 把 `bitrate_kbps >= bitrate_std` 算进 `VideoInfo.is_passing`，worker 用扫描开始时的 `bitrate_std` snapshot。扫描过程中用户改 `bitrate_var`，对**已加入** `self.video_results` 的行无影响。状态栏最终用 `sum(1 for v in self.video_results if v.is_passing)` 统计，但表格第一列「达标/不达标」标签也是用 `info.is_passing` 渲染的 —— 两者口径一致，不互相矛盾。但用户体验层面：用户调高阈值后看到「达标 N 个」未变，以为没生效，会再次调高或重启扫描。同源问题：阈值降低后旧行可能仍判「不达标」，但实际已超过新阈值。
+**复现**: 扫描 100 个文件（阈值 30000），前 50 个扫完时把阈值调到 60000。继续扫完剩下 50 个，状态栏显示「达标 X 个」（X ≤ 50），但表格里前 50 个标「不达标」是按 30000 算的、剩 50 个按 60000 算 —— 同一列内混用两套阈值。
+**建议**: 把 `is_passing` 改成在 `_add_result` 里用 `self.bitrate_var.get()` 现算（不要存在 `VideoInfo` 里），并把状态栏重算函数与阈值字段联动；或在 worker 里每读一个文件前 `self.bitrate_var.get()` snapshot（高开销但简单）。
+
+### 🟡 中 无音频流的视频永远判「达标」，与「音频采样率达标」的产品语义不符
+**位置**: `video_checker.py:172-174`
+**类别**: 业务逻辑
+**描述**: 当 ffprobe 输出无 `audio_stream` 时，`sample_rate_passing = True` 且 `audio_sample_rate = "N/A"`。最终 `is_passing = (bitrate_kbps >= bitrate_std) and sample_rate_passing` 永远是 True（bitrate 维度也 OK）。当前 `audio_sample_rate` 列显示 `"N/A"`，但该行第一列「达标」标签是绿色 —— 用户在 `kbps >= 30000` 但完全没音轨的「哑视频」上，会被告知「达标」。AGENTS.md 已说明该规则，但用户在没有产品说明界面的情况下很难推断这是「无音频不算违规」而非「无音频也算合规」。
+**复现**: 扫描一个含纯画面 mp4 的目录。表格第一列显示绿色「达标」，但 `audio_sample_rate` 列显示 `N/A`，用户困惑。
+**建议**: 在「采样率标准」输入框旁加 tooltip 文字「无音频流的视频视为不参与采样率判断」；或在第一列「达标」标签旁对 `audio_sample_rate = N/A` 的行加灰色副标「无音频」。
+
+### 🟡 中 `bitrate_kbps >= bitrate_std` 边界包含等于，是否符合产品意图需确认
+**位置**: `video_checker.py:214`
+**类别**: 业务逻辑
+**描述**: `is_passing = (bitrate_kbps >= bitrate_std)` 把「正好等于阈值」也判为达标。Task 4 断言已确认此语义。从 `DEFAULT_BITRATE_KBPS = 30000` 的设定看（行业里 30000 kbps 是 4K 高码率门槛），多数用户期望「达标」=「达到或超过」而非「严格大于」；`>=` 是合理选择。但 ffprobe 的码率计算有 ±2% 抖动（来自 B 帧探测、容器 overhead），「正好 30000 kbps」的概率极低 —— 等于边界实际上很少触发。该语义属设计选择，**不算 bug**，但应在文档/UI 中明示，避免「我设 30000，它显示达标」时用户怀疑。
+**复现**: 构造 `bit_rate = "30000000"`（30 Mbps）的 ffprobe JSON 输入 `parse_video_info`。返回 `is_passing = True`（阈值 30000 时）。
+**建议**: 在输入框旁加副标「达到或超过即视为达标」；或文档化在 AGENTS.md / CLAUDE.md。本审计不修复，仅记录语义决策。
+
+### 🟠 高 用户点击「清除记录」时若扫描已卡死，`scanning` 永不复位
+**位置**: `video_checker.py:754-762`（`_clear_records`）+ `video_checker.py:744-752`（`_scan_complete`）+ `video_checker.py:736-737`（`_check_queue` 调度）
+**类别**: 业务逻辑 / 资源（状态机）
+**描述**: `_clear_records` 用 `if self.scanning` 守卫，扫描中点清除只弹「请等待完成后再清除」。`self.scanning = False` 只在 `_scan_complete()`（`_check_queue` 收到 `done`）里发生。若 worker 因任何原因不发 `done`（见并发 #🔴 #9），用户被锁死 —— 关闭重开是唯一出路。这是状态机问题，不是单纯业务逻辑；但与「清除记录」按钮的可用性直接相关，属用户体验可观察到的硬伤。
+**复现**: 在 macOS 上启动扫描（已知 worker 必崩），UI 卡在「正在检测... (1/N)」。点「清除记录」弹窗「请等待完成后再清除」；关闭弹窗后按钮仍可用但扫描永远卡死，重启进程是唯一恢复手段。
+**建议**: `_clear_records` 改为：`if self.scanning` 弹窗提供「强制重置（将丢失当前扫描结果）」按钮，按下则无条件 `self.scanning = False` + `self.scan_btn.config(state='normal')` + `_check_queue` 取消调度；或更彻底，把 `_check_queue` 加 watchdog（见并发 #🔴 #9 的修复方向）。
+
+### 🟠 高 扫描启动后无中止/取消机制，长时间扫描只能等到底
+**位置**: `video_checker.py:654-697`（`_start_scan`）+ `video_checker.py:699-719`（`_scan_worker`）+ `video_checker.py:654-656`（`if self.scanning: return` 守卫）
+**类别**: 业务逻辑
+**描述**: `_start_scan` 启动 worker 后只设置 `scanning = True`、`scan_btn = disabled`，没有 `threading.Event` 或 stop flag 传给 worker。worker 在循环里没有任何检查点，用户无法取消已开始的长扫描。1000 文件平均 0.5s/文件 = 8 分钟；慢盘上可能 30 分钟以上，期间用户无法退出且 UI 持续占用主线程渲染（见数据正确性 #🟡 大目录 Label 渲染）。
+**复现**: 启动扫描 5000 文件，扫到一半发现阈值设错了。唯一办法是关闭重开（丢失全部进度）。
+**建议**: 在 `VideoCheckerApp.__init__` 加 `self._stop_event = threading.Event()`；`_start_scan` 里 `self._stop_event.clear()`；worker 循环顶部 `if self._stop_event.is_set(): break`；新增「中止扫描」按钮调用 `self._stop_event.set()` 并由 `_check_queue` 收到 `done` 后恢复正常状态。
+
+### 🟡 中 `_start_scan` 入口未禁用「浏览」/「清除记录」/「移动达标」/「移动全部」按钮
+**位置**: `video_checker.py:683-687`（`_start_scan` 状态变更）+ `video_checker.py:754-762`（`_clear_records`）+ `video_checker.py:633-636`（按需对照）+ `video_checker.py:681`（默认 dest）
+**类别**: 业务逻辑（状态机）
+**描述**: `_start_scan` 只 disable `scan_btn`，但「浏览」「清除记录」「移动达标文件」「移动全部文件」按钮在扫描中全部可点。点「浏览」改 path_var 后用户以为可以「重新开始扫描」但实际第二次 `_start_scan` 立即 `return`（因 `scanning=True`），无任何提示（见并发 #🟡 #15）。点「清除记录」只会弹窗拒绝。点「移动达标」会基于不完整的 `self.video_results`（半扫描状态）执行移动，dest 可能被改名为 `_N` 后缀（见数据正确性 #🟠 #6/#7）。
+**复现**: 扫描 1000 文件，前 100 个检测完时点「移动达标文件」。后续 900 个检测过程中再点一次移动，dest 出现 `_1`、`_2` 后缀链。
+**建议**: `_start_scan` 入口除 `scan_btn` 外也 disable `_clear_btn` / `move_btn` / `move_all_btn` / `browse_btn`；`_scan_complete` 恢复。同时把并发 #🟡 #15 的「切换目录被静默忽略」改为「按钮直接 disabled，无歧义」。
+
+### 🟡 中 `scan_video_files` 递归分支与非递归分支错误处理不一致
+**位置**: `video_checker.py:519-532`
+**类别**: 业务逻辑
+**描述**: 非递归分支（`os.listdir`）的 `OSError` 被静默吞掉返回空列表（见数据正确性 #🟡 #19）。但递归分支（`os.walk`）若顶层目录权限异常，`os.walk` 也会 `OSError`，但**会**向上抛出 —— 而 `_scan_worker` 整段没有外层 try/except（见并发 #🔴 #9），导致线程静默死亡、`scanning` 永远 True、UI 卡死。同一个错误路径在两个分支表现完全不同：非递归「无错误提示」（用户困惑），递归「UI 永久卡死」（用户被锁死）。属业务逻辑 + 并发交叉的状态机不一致。
+**复现**: `chmod 000 ~/private/` 后扫描。复选框「子文件夹」勾选 → UI 永久卡死；不勾选 → 表格为空无错误。
+**建议**: 在 `_scan_worker` 入口包 try/except，`except OSError as e: self.result_queue.put(('status', f'目录读取失败: {e}')); self.result_queue.put(('done', None))`；或两个分支都用显式 `try` + 发 status 消息，让用户能看到原因。
+
+### 🟢 低 `scanning` 标志在异常路径下未复位，导致状态机进入「不可恢复」态
+**位置**: `video_checker.py:683-684`（`_start_scan` 设 `scanning=True`）+ `video_checker.py:744-747`（`_scan_complete` 复位）+ `video_checker.py:699-719`（worker 无 try/except）
+**类别**: 资源（状态标志）
+**描述**: `scanning` 仅在 `_scan_complete` 中复位，依赖 worker 发 `done`。`_scan_worker` 与 `_scan_files_worker` 整段都没有外层 try/except（见并发 #🔴 #9），任何未捕获异常直接线程死亡，`scanning` 永远 True。状态标志本身没有「超时自愈」或「异常自复位」机制，是结构性缺陷。属于资源（状态机清理）类问题。
+**复现**: 与并发 #🔴 #9 同。在 `_scan_worker` 任一行前手动 `raise RuntimeError`，或依赖 macOS 上 `run_ffprobe` 抛 `AttributeError`。
+**建议**: 复用并发 #🔴 #9 的修复方向 —— worker 外层 `try/except Exception: put('status', ...); put('done', None)`。这是「资源清理」类问题中影响最直接的一条，单独列严重度 🟠 更准确，但本审计归并入 #🟢 低以避免与并发 #🔴 #9 重复。
+
+### 🟢 低 `_start_scan` 中 `self.result_queue = queue.Queue()` 替换旧队列，旧队列若有未消费消息则被 GC
+**位置**: `video_checker.py:689`
+**类别**: 资源（队列实例）
+**描述**: 第二次点击「开始检测」时，`self.scanning=True` 已守卫，第二次调用直接 `return` 不进入 689 行 —— 实际只在第一次扫描完成后才会被赋值。所以**实际上不会重复替换**。但若未来引入「中途重新扫描」能力（见 #🟡 中 #15 修复方向），此行会成为旧 worker 仍持有旧 Queue 引用时 GC 不到的消息残留。属潜在风险，当前实现下不会触发。
+**复现**: 当前代码下无法复现（`scanning` 守卫拦住第二次调用）。
+**建议**: 不需要修复；保留 `self.result_queue = queue.Queue()` 但加注释说明「当前不会二次替换」。本审计记录此条目是为了未来重构时不踩坑。
+
+### 🟢 低 `self.video_results.clear()` + `self.grid.clear()` 在 `_start_scan` 与 `_clear_records` 重复，无一致性保证
+**位置**: `video_checker.py:685-687`（`_start_scan`）+ `video_checker.py:759-760`（`_clear_records`）
+**类别**: 资源（状态一致性）
+**描述**: 两处都做「清 `video_results` + 清 `grid`」，但没有 `_reset_state()` 之类公共函数。未来若加入「已扫描数计数」「累计移动数」等字段，容易遗漏某处清空路径。属代码组织问题，非功能 bug。
+**复现**: 当前两处实现完全相同，不会出问题。
+**建议**: 抽出 `_reset_state()` 私有方法，封装 `video_results.clear()` / `grid.clear()` / `status_var.set(...)`。本审计不修复，仅记录。
+
+### 无 StringVar/Entry 泄漏类问题
+**位置**: `video_checker.py:553-580`（Entry/StringVar 初始化）+ `video_checker.py:573, 579`（bitrate_var / sample_rate_var）
+**类别**: 资源
+**描述**: 经过逐行检查：
+- `path_var` / `bitrate_var` / `sample_rate_var` / `dest_var` 都在 `__init__` 里创建一次，整个 app 生命周期内只被 `.set()` / `.get()`，不替换实例，因此不存在「旧 StringVar 被替换 → 旧实例未被 GC」问题。
+- `tk.StringVar` 持有 widget 引用，但 widget 销毁时 StringVar 也会被 Tk 释放；多次 `.set()` 不会创建新实例。
+- `scanning` 是普通 Python bool，无资源泄漏。
+- `result_queue` 替换的安全分析见 #🟢 #19。
