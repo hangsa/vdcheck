@@ -291,7 +291,7 @@
 **复现**: 把 `~/Downloads/a.mp4` 与 `/Volumes/External/b.mp4` 同时拖到窗口（在 macOS 上）。`rel_path` 全部基于 `~/Downloads/`，第二行显示 `../../../Volumes/External/b.mp4`。
 **建议**: 用 `os.path.commonpath(files)` 计算共同祖先；共同祖先不存在（如跨盘符）则 `base_path = os.path.dirname(os.path.commonpath([os.path.abspath(f) for f in files]))`，仍失败则退化为各文件的 `os.path.dirname`（即每个文件用自己的目录作 base）。
 
-### 🟠 高 路径前后空白未 strip，拖拽路径含尾部 `/` 时 `os.path.isdir` 与扫描路径不一致
+### 🟠 高 路径前后空白未 strip，NBSP 等不可见字符导致 `os.path.isdir` 失败
 **位置**: `video_checker.py:658`（`_start_scan`）+ `video_checker.py:771`（`_move_passing_files`）+ `video_checker.py:811`（`_move_all_files`）
 **类别**: 输入解析
 **描述**: `_start_scan` 对 `directory` 调用了 `.strip()`；但 `_move_passing_files` / `_move_all_files` 对 `dest_dir` 也调用了 `.strip()`。看似 OK，但若用户在 path_entry 输入 `" /Users/foo/Videos "`（前后含空格）→ strip 后通过；但若输入 `" /Users/foo/Videos "` 含不可见字符（如 NBSP ` `），`.strip()` 默认不剥 NBSP，`os.path.isdir` 返回 False → 弹「请输入有效文件夹路径」。部分输入法、剪贴板历史会注入 NBSP。
@@ -326,7 +326,7 @@
 **复现**: 无（CPython 下不会触发）；理论上 PyPy 上若 GC 触发，会看到 worker 线程中途消失。
 **建议**: 把 `self._scan_thread = t`（或维护 `self._threads: list[Thread]`）；不需要 join，但显式持有避免后续协作者疑惑。
 
-### 🟡 中 拖拽文件重复检测：同一文件拖第二次会被重复处理，但旧 worker 已被 `scanning` 守卫挡住
+### 🟡 中 移动中拖拽新文件破坏状态机（move + drop 并发竞态）
 **位置**: `video_checker.py:897-910`（`_on_file_drop`）
 **类别**: 并发
 **描述**: 拖拽第二次时会重置 `self.video_results` 与 `self.grid`，如果 `_start_scan` 也跑过同样守卫，状态一致。**但** `_move_passing_files` / `_move_all_files` 期间（移动是同步阻塞的）若用户拖新文件，会把 `self.video_results` 清空重建 —— 移动完成时 `self.video_results` 已不是移动前的那个列表（虽然 move 内用的 list 是局部 `passing` 拷贝，不依赖 self.video_results，但状态机已被破坏）。属并发竞态但不致命（不会数据丢失，只会让用户困惑）。
