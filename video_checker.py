@@ -259,8 +259,10 @@ class VideoGridView:
         columns: {'key': ('中文表头', width_in_pixels)}
         """
         self.parent = parent
-        self.columns = columns
+        # 拷贝一份以避免拖动列宽时回写到外部 dict
+        self.columns = {k: (h, w) for k, (h, w) in columns.items()}
         self._rows: list[ttk.Frame] = []
+        self._resize_state: dict | None = None
         self._build()
 
     def pack(self, **kwargs):
@@ -306,18 +308,68 @@ class VideoGridView:
     def _build_header(self):
         self.header_frame = ttk.Frame(self.outer)
         self.header_frame.pack(side='top', fill='x')
-        for i, (key, (heading, width)) in enumerate(self.columns.items()):
+
+        # 表头 grid 里：偶数列 = 列标签，奇数列 = 列间拖拽手柄。
+        # 数据行 grid 里没有手柄，所以列索引仍然是 0,1,2,...
+        keys = list(self.columns.keys())
+        n = len(keys)
+        for i, key in enumerate(keys):
+            heading, width = self.columns[key]
+            col_idx = i * 2
+
             anchor = self._column_anchor(key)
             lbl = tk.Label(
                 self.header_frame,
                 text=heading,
-                font=('TkDefaultFont', 9, 'bold'),
+                font=('TkDefaultFont', 9),
                 anchor=anchor,
                 padx=4, pady=2,
                 relief='raised', bd=1,
             )
-            lbl.grid(row=0, column=i, sticky='nsew')
-            self.header_frame.grid_columnconfigure(i, minsize=width)
+            lbl.grid(row=0, column=col_idx, sticky='nsew')
+            self.header_frame.grid_columnconfigure(col_idx, minsize=width)
+
+            # 最后一列不放手柄
+            if i < n - 1:
+                sep = tk.Frame(
+                    self.header_frame,
+                    width=4,
+                    cursor='sb_h_double_arrow',
+                    bg='#c0c0c0',
+                )
+                sep.grid(row=0, column=col_idx + 1, sticky='ns')
+                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=4)
+                sep.bind('<Button-1>', lambda e, k=key: self._start_col_resize(e, k))
+                sep.bind('<B1-Motion>', lambda e, k=key: self._on_col_resize(e, k))
+                sep.bind('<ButtonRelease-1>', lambda _e: self._end_col_resize())
+
+    def _start_col_resize(self, event, key: str):
+        self._resize_state = {
+            'key': key,
+            'start_x': event.x_root,
+            'start_width': self.columns[key][1],
+        }
+
+    def _on_col_resize(self, event, key: str):
+        if self._resize_state is None or self._resize_state['key'] != key:
+            return
+        dx = event.x_root - self._resize_state['start_x']
+        new_width = max(20, int(self._resize_state['start_width'] + dx))
+        if new_width == self.columns[key][1]:
+            return
+        # 更新内部宽度（数据行 add_row 会从这里读）
+        heading = self.columns[key][0]
+        self.columns[key] = (heading, new_width)
+        keys = list(self.columns.keys())
+        data_idx = keys.index(key)
+        header_col_idx = data_idx * 2
+        self.header_frame.grid_columnconfigure(header_col_idx, minsize=new_width)
+        # 已存在的数据行：同步 minsize，保持与表头对齐
+        for row_frame in self._rows:
+            row_frame.grid_columnconfigure(data_idx, minsize=new_width)
+
+    def _end_col_resize(self):
+        self._resize_state = None
 
     @staticmethod
     def _column_anchor(key: str) -> str:
@@ -483,6 +535,10 @@ class VideoCheckerApp:
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
 
+        ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
+            side='left', padx=(15, 0)
+        )
+
         # === Main: 结果表格（自绘 VideoGridView） ===
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill='both', expand=True, padx=5, pady=5)
@@ -646,6 +702,16 @@ class VideoCheckerApp:
         failed = total - passed
         self.status_var.set(f"检测完成：共 {total} 个视频文件，{passed} 个达标，{failed} 个不达标")
 
+    def _clear_records(self):
+        """清空检测记录与目标路径（不影响阈值输入）。"""
+        if self.scanning:
+            messagebox.showinfo("提示", "正在检测中，请等待完成后再清除。")
+            return
+        self.video_results.clear()
+        self.grid.clear()
+        self.dest_var.set('')
+        self.status_var.set("已清除记录")
+
     def _move_passing_files(self):
         """移动达标文件到目标目录"""
         passing = [v for v in self.video_results if v.is_passing]
@@ -775,6 +841,9 @@ class VideoCheckerApp:
         if not video_files:
             messagebox.showinfo("提示", "没有找到视频文件。")
             return
+
+        # 目标路径默认填第一个文件所在目录
+        self.dest_var.set(os.path.dirname(video_files[0]))
 
         self.scanning = True
         self.scan_btn.config(state='disabled')
