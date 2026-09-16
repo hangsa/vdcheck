@@ -182,17 +182,17 @@
 **复现**: 把 dest 设在挂载的网络盘；中途断网；UI 显示「成功移动 N 个文件」，实际 dest 端都是 0 字节占位文件，源端已删。
 **建议**: 移动前校验目标剩余空间；移动后 `os.path.getsize(dest) == os.path.getsize(src)` 校验；或换为 `shutil.copy2 + 校验 + os.remove` 两段式。
 
-### 🟡 中 `_get_unique_dest` 在并发或重命名链下会无限加后缀
+### 🟠 高 `_get_unique_dest` 在并发或重命名链下会无限加后缀
 **位置**: `video_checker.py:844-857`
 **类别**: 数据正确性
-**描述**: `_get_unique_dest` 假定 dest 目录里 `name.ext`、`name_1.ext`、`name_2.ext` … 之后没有同名文件。但若用户源文件本身就叫 `foo_1.mp4`（拖拽目录里既有 `foo.mp4` 又有 `foo_1.mp4`），dest 端又会再生成 `foo_1_1.mp4`，命名语义丢失；循环多次扫描+移动后会出现 `foo_1_2_3_4.mp4` 这种链式后缀。属于边界场景但可观察。
+**描述**: `_get_unique_dest` 假定 dest 目录里 `name.ext`、`name_1.ext`、`name_2.ext` … 之后没有同名文件。但若用户源文件本身就叫 `foo_1.mp4`（拖拽目录里既有 `foo.mp4` 又有 `foo_1.mp4`），dest 端又会再生成 `foo_1_1.mp4`，命名语义丢失；循环多次扫描+移动后会出现 `foo_1_2_3_4.mp4` 这种链式后缀。属可观察到的错误结果（用户命名语义被悄悄破坏），与发现 #2 同级。
 **复现**: 源目录有 `a.mp4`、`a_1.mp4`，目标目录已有 `a.mp4`。移动后 dest 端得到 `a_1.mp4`（与源同名冲突的用户语义已被破坏）和 `a_1_1.mp4`（源 `a_1.mp4` 被改名后的产物）。
 **建议**: 用 `uuid.uuid4().hex[:8]` 短哈希替代 `_N` 计数器，避免链式后缀；或维持用户命名习惯但加源目录短哈希。
 
-### 🟡 中 `_move_passing_files` / `_move_all_files` 未校验 `dest_dir == source`
+### 🟠 高 `_move_passing_files` / `_move_all_files` 未校验 `dest_dir == source`
 **位置**: `video_checker.py:771` + `video_checker.py:811`
 **类别**: 数据正确性
-**描述**: 如果用户把 dest_var 设为与 source 完全相同的目录（粘贴错了），`shutil.move("a.mp4", "a.mp4")` 在 Windows 上会抛 `OSError` 被捕获；但在 Linux 上 `os.rename` 同源到同源会成功（no-op），文件实际未移动却计入 `moved += 1`，UI 误报成功。
+**描述**: 如果用户把 dest_var 设为与 source 完全相同的目录（粘贴错了），`shutil.move("a.mp4", "a.mp4")` 在 Windows 上会抛 `OSError` 被捕获；但在 Linux 上 `os.rename` 同源到同源会成功（no-op），文件实际未移动却计入 `moved += 1`，UI 误报成功。属于明显的错误结果（moved 计数 ≠ 实际移动文件数）。
 **复现**: Linux 上扫描 `./Videos`，目标设为 `./Videos`，点击移动。`moved = N` 但磁盘零变化。
 **建议**: 移动前用 `os.path.realpath` 解析两边绝对路径并比较，相等则拒绝。
 
@@ -209,6 +209,13 @@
 **描述**: macOS/Linux 拖拽格式是 `file:///path/with%20space/file.mp4` 或裸路径；`re.findall(r'\{([^}]+)\}', ...)` 拿不到就 fallback 到 `file_list = [files]`，把整串 `"file:///a.mp4 file:///b.mp4"`（含分隔空格）当成单个文件路径交给后续流程。最终 `os.path.splitext` 拿到 `.mp4` 通过扩展名检查，再去 `open("file:///a.mp4 file:///b.mp4")` 失败 → ffprobe 报文件不存在 → 返回 `None` → 整批文件无声丢失。
 **复现**: macOS 上把两个 .mp4 一起拖进窗口。表格为空，无错误提示，用户以为「不支持拖拽」。
 **建议**: 把 `re.findall(r'\S+', files)` 作为通用兜底，或先剥 `file://` 头再 split。
+
+### 🟡 中 `scan_video_files` 非递归路径静默吞 `OSError`，空结果不可区分于权限错误
+**位置**: `video_checker.py:524-531`
+**类别**: 数据正确性
+**描述**: 非递归分支用 `try: os.listdir(...) except OSError: pass` 静默吞掉所有错误。用户面对的「找不到视频」既可能是「真的没有」，也可能是「目录无权限/路径损坏/被其他进程锁定」，但 UI 上完全无差别。批量扫描含权限异常目录时排查困难。
+**复现**: 把目录权限设为 `chmod 000 ~/private/` 后用非递归扫描；表格为空，无错误提示。
+**建议**: 捕获 `OSError` 后向 `result_queue` 发 `('status', f'目录读取失败: {e}')`，让用户在状态栏看到原因。
 
 ### 🟡 中 大目录扫描（数千文件）时，每行 11 个 Label + 主线程 `_check_queue` 100ms 节奏会被队列堵
 **位置**: `video_checker.py:721-737`
