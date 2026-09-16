@@ -135,3 +135,105 @@
 - 新增：`docs/superpowers/specs/2026-09-16-bug-audit-assertions.py`（一次性断言脚本）
 - 修改：本 spec 在审计完成后追加「概述 / 问题列表 / 断言结果」三节
 - 无代码改动
+
+---
+
+## 审计发现 — 崩溃 + 数据正确性
+
+### 🔴 致命 macOS/Linux 上扫描启动即崩溃，UI 永久卡死
+**位置**: `video_checker.py:86-102`（`run_ffprobe`）+ `video_checker.py:699-719`（`_scan_worker`）+ `video_checker.py:912-926`（`_scan_files_worker`）
+**类别**: 崩溃
+**描述**: `run_ffprobe` 中 `subprocess.STARTUPINFO()`、`subprocess.STARTF_USESHOWWINDOW`、`subprocess.CREATE_NO_WINDOW` 仅 Windows 存在；非 Windows 平台访问这些属性直接抛 `AttributeError`。当前 `except` 列表为 `(subprocess.TimeoutExpired, json.JSONDecodeError, OSError)`，**不含 `AttributeError`**，因此异常会向外传播。更糟的是 `_scan_files_worker` 完全外层无 try/except，线程静默死亡但从未向队列发 `done`，主线程 `_check_queue` 不断轮询，`self.scanning` 永远为 True，扫描按钮永久 disabled。`_scan_worker` 同理（虽然 `scan_video_files` 会先运行，但若目录含至少 1 个视频文件，下一次 `run_ffprobe` 必崩且不发 `done`）。
+**复现**: 在 macOS/Linux 上启动 app，输入任意含视频文件的目录，点击「扫描」。`run_ffprobe` 第 86 行立即抛 `AttributeError`，worker 线程死亡；UI 显示「正在扫描」但永远停在那里，按钮变灰无法再点。拖拽文件路径则 100% 复现。
+**建议**: 把 `startupinfo=...` / `creationflags=...` 放在 `if sys.platform == 'win32':` 分支里构造并传入；或把 `except` 扩为 `except Exception`，让 `run_ffprobe` 退化为返回 `None`。
+
+### 🟠 高 移动达标文件后，UI 表格与磁盘状态不一致（混乱 + 重复移动）
+**位置**: `video_checker.py:764-802`（`_move_passing_files`）+ `video_checker.py:804-842`（`_move_all_files`）
+**类别**: 数据正确性
+**描述**: 移动成功后，`self.video_results` 列表、`self.grid`（VideoGridView）表格、`status_var` 均不刷新。表格继续显示已不存在的旧路径。再次点击「移动达标文件」时，`_get_unique_dest` 会因为 dest 目录里已有同名文件而追加 `_1`、`_2`…，但源文件已不在 `video_results` 命中的旧路径上（已搬走）—— 重新扫描前用户无法恢复视图，更糟的是用户可能反复点击导致 dest 端出现 `video_1.mp4`、`video_2.mp4` 的链式命名混乱。配合下方 `shutil.move` 部分失败吞错，会让用户看到 `moved=N` 误以为全部成功，实际可能半失败但表格不变 —— 操作后状态机不可信。
+**复现**: 扫描 `~/Videos/`、设置阈值全过、目标 `~/Videos/Checked/`、点击移动。观察表格内容未变；立刻再次点击移动，dest 端逐次出现 `video_1.mp4`、`video_2.mp4`，表格里看到的仍是旧路径，新生成的是被搬来的内容还是源里原有的已无法区分。
+**建议**: 移动成功后调用 `self.video_results.remove(info)` 与 `self.grid.remove_row(info)`；记录每次失败的 source/dest 让用户能手动恢复；对 `shutil.move` 的部分失败至少提示「部分文件状态未知，请人工核对」。
+
+### 🟠 高 移动时 dest 是 source 的子目录时，反复操作会改写命名（数据可恢复但语义错乱）
+**位置**: `video_checker.py:764-802` + `video_checker.py:844-857`（`_get_unique_dest`）+ `video_checker.py:681`（默认 dest）
+**类别**: 数据正确性
+**描述**: 默认 dest = `os.path.join(directory, "Checked")` 是 source 的子目录路径。首次移动后 dest 端就是 source 的子集；若用户未重扫就再次点「移动达标」，`_get_unique_dest` 会把已搬过去的同名文件 `_N` 化重命名 —— 文件未丢但命名语义被悄悄改写。配合「移动后 UI 不刷新」问题更糟：用户看到的还是旧路径，无法察觉已发生的 rename。
+**复现**: 扫描 `~/Videos/`（含 `a.mp4` + 子目录 `Checked/a.mp4`），点击移动达标。`Checked/a.mp4` 不变（首次搬过去的）。**再次**点击移动达标（不重扫）：`Checked/a.mp4` 被改名为 `Checked/a_1.mp4`，`moved = 1`，UI 显示成功。源端那个原本叫 `a.mp4` 的文件已不存在于原位置 —— 用户以为「没移动」实际已被改名。
+**建议**: 移动前校验 `dest_dir` 不是 source 的祖先目录，是则拒绝并提示；或每次移动后刷新 `video_results` 与 `grid`，并把已移动行标记/移除。
+
+### 🟠 高 `r_frame_rate="0/0"` 时显示 `"0.00 fps"` 而非 `N/A`
+**位置**: `video_checker.py:137-143`
+**类别**: 数据正确性
+**描述**: Task 3 断言已确认：当 `r_frame_rate = "0/0"` 时，`den = 0` 触发 `else fps = 0`，被格式化为 `"0.00 fps"`。但代码本意在 `den == 0` 时等价于「未知」（ffprobe 在某些容器/编码失败场景确实返回 `"0/0"`），此处把它降级为「0 fps」会让用户误以为帧率确为 0。从任务上下文看属可观察到的错误结果，但 UI 没有「达标/不达标」与 fps 直接挂钩，所以不是数据丢失。
+**复现**: 构造 `r_frame_rate = "0/0"` 的 ffprobe JSON 调用 `parse_video_info`。返回 `frame_rate = "0.00 fps"`。
+**建议**: 当 `den == 0` 或 `num == 0 && den == 0` 时，`frame_rate = "N/A"`。仅一行改动。
+
+### 🟠 高 `_scan_files_worker` 用 `os.path.dirname(files[0])` 当 base_path，单文件或多根拖拽时 rel_path 失真
+**位置**: `video_checker.py:915` + `video_checker.py:204-212`（`parse_video_info`）
+**类别**: 数据正确性
+**描述**: 拖拽多文件落在不同子目录时，所有 `rel_path` 都基于第一个文件的目录，导致第二个文件的相对路径是 `../sub/` 风格甚至跨出 base 变 `./`；拖拽单个根目录文件（如 macOS 上 `~/Downloads/a.mp4`）时 `os.path.dirname` 返回 `~/Downloads`，但若拖的是 `/` 这种边界路径就退化为 `'.'` 导致 `rel_path` 全是 `./`，多个不同子目录的文件在表格里无法区分。这与检查清单第 2 节一致。
+**复现**: 把 `~/Videos/A/a.mp4` 与 `~/Videos/B/b.mp4` 同时拖到窗口，表格里两行的 `rel_path` 都基于 A，会出现 `../B/b.mp4` 这种不直观路径。
+**建议**: 拖拽时以所有文件的共同祖先目录作为 `base_path`（`os.path.commonpath`），或干脆把 `rel_path` 退化为绝对路径的 basename 前缀。
+
+### 🟠 高 `shutil.move` 跨设备可能半完成，错误被静默吞掉
+**位置**: `video_checker.py:794` + `video_checker.py:834`
+**类别**: 数据正确性
+**描述**: `shutil.move` 在跨文件系统时会 `copy2` 然后 `os.unlink` 源文件；若 copy 成功但 unlink 失败（权限、AV 扫描器锁定），源端文件仍在，dest 端也有副本 —— 重复文件出现。但更危险的是中途 `copy2` 写一半被中断（磁盘满、用户注销）时，dest 端是损坏文件，源端已被 unlink，**文件彻底丢失且 UI 仅报 `moved += 1`**。
+**复现**: 把 dest 设在挂载的网络盘；中途断网；UI 显示「成功移动 N 个文件」，实际 dest 端都是 0 字节占位文件，源端已删。
+**建议**: 移动前校验目标剩余空间；移动后 `os.path.getsize(dest) == os.path.getsize(src)` 校验；或换为 `shutil.copy2 + 校验 + os.remove` 两段式。
+
+### 🟡 中 `_get_unique_dest` 在并发或重命名链下会无限加后缀
+**位置**: `video_checker.py:844-857`
+**类别**: 数据正确性
+**描述**: `_get_unique_dest` 假定 dest 目录里 `name.ext`、`name_1.ext`、`name_2.ext` … 之后没有同名文件。但若用户源文件本身就叫 `foo_1.mp4`（拖拽目录里既有 `foo.mp4` 又有 `foo_1.mp4`），dest 端又会再生成 `foo_1_1.mp4`，命名语义丢失；循环多次扫描+移动后会出现 `foo_1_2_3_4.mp4` 这种链式后缀。属于边界场景但可观察。
+**复现**: 源目录有 `a.mp4`、`a_1.mp4`，目标目录已有 `a.mp4`。移动后 dest 端得到 `a_1.mp4`（与源同名冲突的用户语义已被破坏）和 `a_1_1.mp4`（源 `a_1.mp4` 被改名后的产物）。
+**建议**: 用 `uuid.uuid4().hex[:8]` 短哈希替代 `_N` 计数器，避免链式后缀；或维持用户命名习惯但加源目录短哈希。
+
+### 🟡 中 `_move_passing_files` / `_move_all_files` 未校验 `dest_dir == source`
+**位置**: `video_checker.py:771` + `video_checker.py:811`
+**类别**: 数据正确性
+**描述**: 如果用户把 dest_var 设为与 source 完全相同的目录（粘贴错了），`shutil.move("a.mp4", "a.mp4")` 在 Windows 上会抛 `OSError` 被捕获；但在 Linux 上 `os.rename` 同源到同源会成功（no-op），文件实际未移动却计入 `moved += 1`，UI 误报成功。
+**复现**: Linux 上扫描 `./Videos`，目标设为 `./Videos`，点击移动。`moved = N` 但磁盘零变化。
+**建议**: 移动前用 `os.path.realpath` 解析两边绝对路径并比较，相等则拒绝。
+
+### 🟡 中 `parse_video_info` 未捕获 `tag` 不是 dict 的异常
+**位置**: `video_checker.py:194-202`
+**类别**: 崩溃
+**描述**: 假定 `fmt.get('tags', {})` 返回 dict；部分 ffprobe 输出在 `tags` 为字符串或缺失时仍返回 `{}`，但理论上若 ffprobe JSON 损坏或被中间层修改（用户手改 JSON 后用 `subprocess.run` 喂入不可能，但 hook/拦截器可能），`tags` 可能为 list 或其他类型。`for k, v in tags.items():` 会抛 `AttributeError`。虽然当前 main path 不会触发，但 `parse_video_info` 标注为「可独立测试」，断言脚本里手写 fixture 时若不注意就会爆。
+**复现**: 构造 `fmt = {"tags": ["title", "foo"]}` 调 `parse_video_info`，抛 `AttributeError`。
+**建议**: `tags = fmt.get('tags') or {}` 之后再 `if isinstance(tags, dict)` 守卫；或在 except 中退化为空 dict。
+
+### 🟡 中 `_on_file_drop` 解析 Windows `{path}` 格式失败时把整串当路径
+**位置**: `video_checker.py:882-887`
+**类别**: 数据正确性
+**描述**: macOS/Linux 拖拽格式是 `file:///path/with%20space/file.mp4` 或裸路径；`re.findall(r'\{([^}]+)\}', ...)` 拿不到就 fallback 到 `file_list = [files]`，把整串 `"file:///a.mp4 file:///b.mp4"`（含分隔空格）当成单个文件路径交给后续流程。最终 `os.path.splitext` 拿到 `.mp4` 通过扩展名检查，再去 `open("file:///a.mp4 file:///b.mp4")` 失败 → ffprobe 报文件不存在 → 返回 `None` → 整批文件无声丢失。
+**复现**: macOS 上把两个 .mp4 一起拖进窗口。表格为空，无错误提示，用户以为「不支持拖拽」。
+**建议**: 把 `re.findall(r'\S+', files)` 作为通用兜底，或先剥 `file://` 头再 split。
+
+### 🟡 中 大目录扫描（数千文件）时，每行 11 个 Label + 主线程 `_check_queue` 100ms 节奏会被队列堵
+**位置**: `video_checker.py:721-737`
+**类别**: 崩溃（潜在）/ 数据正确性
+**描述**: worker 线程以 `result_queue.put` 单条发送 `_add_result`；主线程 `get_nowait` 循环一次只处理 1 条就被 `queue.Empty` 打断回到 `after(100, ...)`。当 worker 高速产生结果时，UI 实际刷新节奏 = 100ms × 队列积压量。表格里每行 11 个 Label + Canvas redraw，30+ 行后主线程渲染耗时可能 > 100ms 一次，积压越来越深，最终队列无界增长，内存 OOM。属于崩溃衍生（线程不退出）与性能混合，但首因是缺批量/节流。
+**复现**: 在含 5000 个短视频的目录上扫描并设阈值让 90% 通过。约 30 秒后 Python 进程占用 > 1GB RAM。
+**建议**（仅指方向，不属本审计修复范围）: 增量渲染 + coalesce，或用 `DoubleVar`/`Text` 缓存行。
+
+### 🟢 低 `os.walk` 默认不跟随 symlink —— 大目录扫不全
+**位置**: `video_checker.py:519-523`
+**类别**: 数据正确性
+**描述**: `os.walk(directory)` 默认 `followlinks=False`，符号链接的视频目录树不会被扫到。Windows 上常见 `My Videos` 是符号链接 / junction；macOS 上 `~/Library/Mobile Documents/com~apple~CloudDocs/` 是云盘符号链接。属于「默认安全选择」（避免循环），但用户察觉不到为何文件少了。
+**复现**: 在 macOS 上扫描含一个符号链接到外置硬盘的目录，外置硬盘视频不出现，无提示。
+**建议**: 在「递归扫描」复选框旁加副标题「不包含符号链接」；或加 `follow_symlinks` 复选框。
+
+### 🟢 低 `parse_video_info` 在 `relpath` 抛 `ValueError` 时降级为绝对路径
+**位置**: `video_checker.py:205-212`
+**类别**: 数据正确性
+**描述**: `os.path.relpath` 在 Windows 上若 base_path 和 full_path 跨盘符会抛 `ValueError`，已被 except 捕获降级 `rel_path = full_path`。但若 `full_path` 是 UNC 路径（`\\server\share\...`），降级后表格列里出现完整网络路径，非常长且无视觉提示。在文件多时常被截断显示。
+**复现**: Windows 上扫描 `\\NAS\Videos\a.mp4`，表格第一列显示完整 UNC 路径。
+**建议**: 降级时再用 `os.path.basename` + 父目录缩写。
+
+### 🟢 低 `run_ffprobe` timeout 30s 偏短，4K 大文件首次解析可能超时
+**位置**: `video_checker.py:100`
+**类别**: 数据正确性
+**描述**: 部分大文件（>10GB）或 NAS 慢盘上 ffprobe 启动 + 读取 moov atom 需 > 30s，触 `TimeoutExpired` 被静默吞掉返回 `None`，用户看不到错误，且 UI 显示「正在检测 ...」长时间无变化无超时提示。
+**复现**: 在慢速 NAS 上扫描 4K HDR 文件。
+**建议**: 把 timeout 暴露为配置；或捕获后向队列发 `('status', f'ffprobe 超时: {name}')` 而非吞掉。
