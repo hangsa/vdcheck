@@ -334,13 +334,13 @@ class VideoGridView:
             # 最后一列不放手柄
             if i < n - 1:
                 # 外层 grab 是 8px 宽的透明热区（事件绑这里），便于点击；
-                # 内层 line 是 1px 可见分隔线，居中显示。
+                # 内层 line 是 1px 可见分隔线，靠左与数据列边界对齐。
                 grab = tk.Frame(self.header_frame, cursor='sb_h_double_arrow')
                 grab.grid(row=0, column=col_idx + 1, sticky='ns')
                 self.header_frame.grid_columnconfigure(col_idx + 1, minsize=8)
 
                 line = tk.Frame(grab, width=1, bg='#c0c0c0')
-                line.pack(side='left', padx=(3, 4), fill='y')
+                line.pack(side='left', fill='y')
 
                 grab.bind('<Button-1>', lambda e, k=key: self._start_col_resize(e, k))
                 grab.bind('<B1-Motion>', lambda e, k=key: self._on_col_resize(e, k))
@@ -367,9 +367,9 @@ class VideoGridView:
         data_idx = keys.index(key)
         header_col_idx = data_idx * 2
         self.header_frame.grid_columnconfigure(header_col_idx, minsize=new_width)
-        # 已存在的数据行：同步 minsize，保持与表头对齐
+        # 数据行 cell 现在在 col data_idx*2（与表头列结构对齐）
         for row_frame in self._rows:
-            row_frame.grid_columnconfigure(data_idx, minsize=new_width)
+            row_frame.grid_columnconfigure(data_idx * 2, minsize=new_width)
         # 已存在的数据行：该列 cell 文本按新列宽重新截断
         for row_frame in self._rows:
             k, full_text, cell = row_frame._cells[data_idx]
@@ -452,11 +452,16 @@ class VideoGridView:
         self.canvas.yview_moveto(0)
 
     def add_row(self, info: VideoInfo):
-        """往表格里追加一行，cell 颜色由 _cell_fg 决定。"""
+        """往表格里追加一行，cell 颜色由 _cell_fg 决定。
+
+        列结构与表头一致：cell 在 col i*2，间隔列 col i*2+1 占 8px。
+        这样表头 (label+grab) 和数据行 (cell+间隔) 的列边界完全重合。
+        """
         row_frame = ttk.Frame(self.data_frame)
         row_frame.pack(fill='x')
         self._rows.append(row_frame)
 
+        n = len(self.columns)
         # (key, full_text, label) — 列宽变化时按 full_text 重新截断
         row_cells: list[tuple[str, str, tk.Label]] = []
         for i, (key, (_heading, width)) in enumerate(self.columns.items()):
@@ -471,9 +476,12 @@ class VideoGridView:
                 padx=4, pady=2,
                 fg=fg if fg is not None else 'black',
             )
-            cell.grid(row=0, column=i, sticky='nsew')
-            row_frame.grid_columnconfigure(i, minsize=width)
+            cell.grid(row=0, column=i * 2, sticky='nsew')
+            row_frame.grid_columnconfigure(i * 2, minsize=width)
             row_cells.append((key, full_text, cell))
+            if i < n - 1:
+                # 与表头 grab 列同宽（8px），保证列边界对齐；不放 widget 仅占空间
+                row_frame.grid_columnconfigure(i * 2 + 1, minsize=8)
         row_frame._cells = row_cells
 
     @staticmethod
