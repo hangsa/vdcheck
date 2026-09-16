@@ -329,7 +329,7 @@ class VideoGridView:
                 relief='raised', bd=1,
             )
             lbl.grid(row=0, column=col_idx, sticky='nsew')
-            self.header_frame.grid_columnconfigure(col_idx, minsize=width)
+            self.header_frame.grid_columnconfigure(col_idx, minsize=width, weight=1)
 
             # 最后一列不放手柄
             if i < n - 1:
@@ -337,7 +337,8 @@ class VideoGridView:
                 # 内层 line 是 1px 可见分隔线，靠左与数据列边界对齐。
                 grab = tk.Frame(self.header_frame, cursor='sb_h_double_arrow')
                 grab.grid(row=0, column=col_idx + 1, sticky='ns')
-                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=8)
+                # weight=0: 不参与拉伸/压缩, 始终保持 8px 热区
+                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=8, weight=0)
 
                 line = tk.Frame(grab, width=1, bg='#c0c0c0')
                 line.pack(side='left', fill='y')
@@ -477,11 +478,12 @@ class VideoGridView:
                 fg=fg if fg is not None else 'black',
             )
             cell.grid(row=0, column=i * 2, sticky='nsew')
-            row_frame.grid_columnconfigure(i * 2, minsize=width)
+            row_frame.grid_columnconfigure(i * 2, minsize=width, weight=1)
             row_cells.append((key, full_text, cell))
             if i < n - 1:
                 # 与表头 grab 列同宽（8px），保证列边界对齐；不放 widget 仅占空间
-                row_frame.grid_columnconfigure(i * 2 + 1, minsize=8)
+                # weight=0: 不参与拉伸/压缩, 始终保持 8px
+                row_frame.grid_columnconfigure(i * 2 + 1, minsize=8, weight=0)
         row_frame._cells = row_cells
 
     @staticmethod
@@ -889,8 +891,8 @@ class VideoCheckerApp:
             messagebox.showinfo("提示", "没有找到视频文件。")
             return
 
-        # 目标路径默认填第一个文件所在目录
-        self.dest_var.set(os.path.dirname(video_files[0]))
+        # 目标路径默认在第一个文件所在目录下追加 Checked 子目录
+        self.dest_var.set(os.path.join(os.path.dirname(video_files[0]), "Checked"))
 
         self.scanning = True
         self.scan_btn.config(state='disabled')
