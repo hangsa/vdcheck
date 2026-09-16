@@ -246,5 +246,84 @@ if __name__ == "__main__":
     check("bitrate_std 透传", info.bitrate_std == 30000)
     check("sample_rate_std 透传", info.sample_rate_std == 48)
 
+    section("parse_video_info — 标题 / 大小 / 路径")
+
+    def base_video_streams():
+        return [{"codec_type": "video", "codec_name": "h264",
+                 "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+                 "bit_rate": "30000000"}]
+
+    full = "/tmp/test.mp4"
+
+    # 标题: tags 中大小写不敏感
+    info = parse_video_info(
+        {"streams": base_video_streams(),
+         "format": {"tags": {"TITLE": "My Movie"}}},
+        full, "/tmp", 30000, 48,
+    )
+    check("title 标签大小写不敏感", info.title == "My Movie")
+
+    # 标题: tags 中无 title → 回退到无扩展文件名
+    info = parse_video_info(
+        {"streams": base_video_streams(),
+         "format": {"tags": {"artist": "X"}}},
+        full, "/tmp", 30000, 48,
+    )
+    check("title 缺失回退到文件名", info.title == "test")
+
+    # 标题: 无 tags 字段
+    info = parse_video_info(
+        {"streams": base_video_streams(), "format": {}},
+        full, "/tmp", 30000, 48,
+    )
+    check("无 tags 字段不崩溃", info.title == "test")
+
+    # 文件大小: format.size 缺失
+    with tempdir() as d:
+        path = os.path.join(d, "x.mp4")
+        open(path, "w").write("x" * 5000)
+        info = parse_video_info(
+            {"streams": base_video_streams(), "format": {}},
+            path, d, 30000, 48,
+        )
+        check("size 缺失回退 os.path.getsize", "KB" in info.file_size or "B" in info.file_size,
+              detail=f"got {info.file_size!r}")
+
+    # 文件大小: size 非数字
+    info = parse_video_info(
+        {"streams": base_video_streams(),
+         "format": {"size": "garbage"}},
+        full, "/tmp", 30000, 48,
+    )
+    check("size 非数字 → N/A（不回退到真实大小）",
+          info.file_size == "N/A",
+          detail=f"got {info.file_size!r}")
+
+    # 相对路径: 同目录 → ./
+    info = parse_video_info(
+        {"streams": base_video_streams(), "format": {}},
+        "/tmp/a.mp4", "/tmp", 30000, 48,
+    )
+    check("rel_path 同目录 → ./", info.rel_path == "./",
+          detail=f"got {info.rel_path!r}")
+
+    # 相对路径: 子目录 → ./A/B
+    info = parse_video_info(
+        {"streams": base_video_streams(), "format": {}},
+        "/tmp/A/B/c.mp4", "/tmp", 30000, 48,
+    )
+    check("rel_path 子目录 → ./A/B",
+          info.rel_path == "./A/B",
+          detail=f"got {info.rel_path!r}")
+
+    # 相对路径: base 在另一个盘（Windows 跨盘 → ValueError）
+    info = parse_video_info(
+        {"streams": base_video_streams(), "format": {}},
+        "C:\\foo\\x.mp4", "D:\\bar", 30000, 48,
+    )
+    check("rel_path 跨盘 → 回退绝对路径",
+          info.rel_path == "C:\\foo\\x.mp4",
+          detail=f"got {info.rel_path!r}")
+
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
     sys.exit(1 if _failures else 0)
