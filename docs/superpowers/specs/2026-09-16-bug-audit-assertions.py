@@ -89,5 +89,63 @@ if __name__ == "__main__":
         result = scan_video_files(empty_d, recursive=False)
         check("不存在目录不抛错", result == [], detail=f"got {result}")
 
+    section("parse_video_info — 基本字段与边界")
+
+    def make_ffprobe_json(**overrides):
+        """基础 ffprobe JSON，包含一个视频流 + 一个音频流。"""
+        base = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264",
+                 "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+                 "bit_rate": "30000000"},
+                {"codec_type": "audio", "codec_name": "aac",
+                 "channels": 2, "sample_rate": "48000"},
+            ],
+            "format": {"duration": "120.0", "size": "100000000", "bit_rate": "31000000"},
+        }
+        # 深度合并覆盖（streams 列表整体替换）
+        if "streams" in overrides:
+            base["streams"] = overrides.pop("streams")
+        if "format" in overrides:
+            base["format"].update(overrides.pop("format"))
+        base.update(overrides)
+        return base
+
+    full = "/tmp/test_video.mp4"
+    base = "/tmp"
+
+    # 1. 正常情况
+    info = parse_video_info(make_ffprobe_json(), full, base, 30000, 48)
+    check("正常: is_passing=True", info.is_passing is True)
+    check("正常: bitrate=30000", info.bitrate_kbps == 30000.0)
+    check("正常: resolution=1920x1080", info.resolution == "1920x1080")
+    check("正常: frame_rate", info.frame_rate == "30.00 fps")
+    check("正常: sample_rate_passing", info.sample_rate_passing is True)
+
+    # 2. 无视频流 → 返回 None
+    info = parse_video_info({"streams": [
+        {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000"},
+    ], "format": {}}, full, base, 30000, 48)
+    check("无视频流返回 None", info is None)
+
+    # 3. r_frame_rate = 0/0
+    info = parse_video_info(make_ffprobe_json(streams=[
+        {"codec_type": "video", "codec_name": "h264",
+         "width": 1920, "height": 1080, "r_frame_rate": "0/0",
+         "bit_rate": "30000000"},
+        {"codec_type": "audio", "codec_name": "aac",
+         "channels": 2, "sample_rate": "48000"},
+    ]), full, base, 30000, 48)
+    check("r_frame_rate=0/0 不崩溃", info is not None)
+    check("r_frame_rate=0/0 显示 N/A", info.frame_rate == "N/A")
+
+    # 4. r_frame_rate 非法字符串
+    info = parse_video_info(make_ffprobe_json(streams=[
+        {"codec_type": "video", "codec_name": "h264",
+         "width": 1920, "height": 1080, "r_frame_rate": "abc",
+         "bit_rate": "30000000"},
+    ]), full, base, 30000, 48)
+    check("r_frame_rate 非法 → N/A", info.frame_rate == "N/A")
+
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
     sys.exit(1 if _failures else 0)
