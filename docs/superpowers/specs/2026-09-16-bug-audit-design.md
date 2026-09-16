@@ -273,7 +273,7 @@
 ### 🟠 高 macOS/Linux 拖拽格式无 `{...}` 大括号，整串当文件路径，整批文件无声丢失
 **位置**: `video_checker.py:877-887`
 **类别**: 输入解析
-**描述**: `event.data` 在 macOS 是 `file:///path/a.mp4` 或裸路径，Linux 是 `file://...` 或裸路径，多文件用空格分隔；当前代码 `re.findall(r'\{([^}]+)\}', files)` 拿不到任何匹配，fallback 到 `file_list = [files]`，把整串 `"file:///a.mp4 file:///b.mp4"`（含分隔空格与协议头）当成单个文件路径。下游 `os.path.splitext` 取到 `.mp4`（位于字符串末尾）扩展名检查通过，`run_ffprobe` 打开一个不存在的长字符串路径返回 `None`，**整批文件无声丢失**，表格为空、无错误提示。这与已记录的 #🟡「`_on_file_drop` 解析 Windows `{path}` 格式失败时把整串当路径」完全同源；本次静态走查再次确认其在 macOS 上的常态性（无大括号是默认情况）。
+**描述**: `event.data` 在 macOS 是 `file:///path/a.mp4` 或裸路径，Linux 是 `file://...` 或裸路径，多文件用空格分隔；当前代码 `re.findall(r'\{([^}]+)\}', files)` 拿不到任何匹配，fallback 到 `file_list = [files]`，把整串 `"file:///a.mp4 file:///b.mp4"`（含分隔空格与协议头）当成单个文件路径。下游 `os.path.splitext` 取到 `.mp4`（位于字符串末尾）扩展名检查通过，`run_ffprobe` 打开一个不存在的长字符串路径返回 `None`，**整批文件无声丢失**，表格为空、无错误提示。这与 Task 8 「`_on_file_drop` 解析 Windows `{path}` 格式失败时把整串当路径」完全同源；本次静态走查再次确认其在 macOS 上的常态性（无大括号是默认情况）并升级严重度为 🟠（默认 macOS 拖拽就触发，影响比 Windows 罕见路径更广）。
 **复现**: macOS 上从 Finder 拖两个 .mp4 到窗口。表格为空，无错误提示，用户以为「macOS 不支持拖拽」。
 **建议**: 解析顺序改为：(1) 若 `event.data` 含 `{`，按当前正则；(2) 否则按空白 split（`re.findall(r'\S+', files)`）；(3) 对每个 token 剥 `file://` 头并 `urllib.parse.unquote`；(4) 扩展名不匹配时把 token 原样保留并在 status 提示「已跳过 N 个非视频文件」而不是吞掉。
 
@@ -287,7 +287,7 @@
 ### 🟠 高 拖拽单文件时若路径在 `/`，`os.path.dirname` 返回 `/`，所有 `rel_path` 失真
 **位置**: `video_checker.py:915`（`_scan_files_worker`）+ `video_checker.py:204-212`（`parse_video_info`）
 **类别**: 输入解析
-**描述**: `_scan_files_worker` 取 `base_path = os.path.dirname(files[0])`。当用户拖单个根目录文件（如 `/tmp/a.mp4`，`os.path.dirname` = `/`）或拖多个分散在不同盘符/挂载点的文件（Windows 上 `C:\a.mp4` 与 `D:\b.mp4`，`os.path.dirname` = `C:\\`）时，所有 `rel_path` 都基于第一个文件目录，导致后面文件的相对路径是 `../...` 风格甚至跨越 base。任务上下文已确认此问题；本次复检定位到具体失败模式。
+**描述**: `_scan_files_worker` 取 `base_path = os.path.dirname(files[0])`。当用户拖单个根目录文件（如 `/tmp/a.mp4`，`os.path.dirname` = `/`）或拖多个分散在不同盘符/挂载点的文件（Windows 上 `C:\a.mp4` 与 `D:\b.mp4`，`os.path.dirname` = `C:\\`）时，所有 `rel_path` 都基于第一个文件目录，导致后面文件的相对路径是 `../...` 风格甚至跨越 base。与 Task 8 「`_scan_files_worker` 用 `os.path.dirname(files[0])` 当 base_path」同源；本次复检定位到具体失败模式（根目录文件、跨盘符、跨挂载点）。
 **复现**: 把 `~/Downloads/a.mp4` 与 `/Volumes/External/b.mp4` 同时拖到窗口（在 macOS 上）。`rel_path` 全部基于 `~/Downloads/`，第二行显示 `../../../Volumes/External/b.mp4`。
 **建议**: 用 `os.path.commonpath(files)` 计算共同祖先；共同祖先不存在（如跨盘符）则 `base_path = os.path.dirname(os.path.commonpath([os.path.abspath(f) for f in files]))`，仍失败则退化为各文件的 `os.path.dirname`（即每个文件用自己的目录作 base）。
 
