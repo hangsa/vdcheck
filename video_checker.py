@@ -10,7 +10,7 @@ import threading
 from functools import lru_cache
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 from tkinterdnd2 import TkinterDnD
 
 # 视频扩展名集合
@@ -263,6 +263,7 @@ class VideoGridView:
         self.columns = {k: (h, w) for k, (h, w) in columns.items()}
         self._rows: list[ttk.Frame] = []
         self._resize_state: dict | None = None
+        self._cell_font = tkfont.Font(font=('TkDefaultFont', 9))
         self._build()
 
     def pack(self, **kwargs):
@@ -318,9 +319,10 @@ class VideoGridView:
             col_idx = i * 2
 
             anchor = self._column_anchor(key)
+            display_heading = self._truncate_text(heading, width)
             lbl = tk.Label(
                 self.header_frame,
-                text=heading,
+                text=display_heading,
                 font=('TkDefaultFont', 9),
                 anchor=anchor,
                 padx=4, pady=2,
@@ -333,12 +335,12 @@ class VideoGridView:
             if i < n - 1:
                 sep = tk.Frame(
                     self.header_frame,
-                    width=4,
+                    width=1,
                     cursor='sb_h_double_arrow',
                     bg='#c0c0c0',
                 )
                 sep.grid(row=0, column=col_idx + 1, sticky='ns')
-                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=4)
+                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=1)
                 sep.bind('<Button-1>', lambda e, k=key: self._start_col_resize(e, k))
                 sep.bind('<B1-Motion>', lambda e, k=key: self._on_col_resize(e, k))
                 sep.bind('<ButtonRelease-1>', lambda _e: self._end_col_resize())
@@ -367,16 +369,32 @@ class VideoGridView:
         # 已存在的数据行：同步 minsize，保持与表头对齐
         for row_frame in self._rows:
             row_frame.grid_columnconfigure(data_idx, minsize=new_width)
+        # 已存在的数据行：该列 cell 文本按新列宽重新截断
+        for row_frame in self._rows:
+            k, full_text, cell = row_frame._cells[data_idx]
+            new_text = self._truncate_text(full_text, new_width)
+            if cell.cget('text') != new_text:
+                cell.config(text=new_text)
 
     def _end_col_resize(self):
         self._resize_state = None
+
+    def _truncate_text(self, text: str, col_width: int) -> str:
+        """把 text 截断到不超过列宽（扣去 padx + bd）。"""
+        # 单元格内边距：padx=4 两侧 + bd=1 两侧 = 10
+        max_width = max(0, col_width - 10)
+        if self._cell_font.measure(text) <= max_width:
+            return text
+        ellipsis = '...'
+        result = text
+        while result and self._cell_font.measure(result + ellipsis) > max_width:
+            result = result[:-1]
+        return (result + ellipsis) if result else ellipsis
 
     @staticmethod
     def _column_anchor(key: str) -> str:
         if key == 'title':
             return 'w'
-        if key in ('bitrate', 'audio_sample_rate', 'file_size'):
-            return 'e'
         return 'center'
 
     def _on_canvas_configure(self, event):
@@ -426,8 +444,11 @@ class VideoGridView:
         row_frame.pack(fill='x')
         self._rows.append(row_frame)
 
+        # (key, full_text, label) — 列宽变化时按 full_text 重新截断
+        row_cells: list[tuple[str, str, tk.Label]] = []
         for i, (key, (_heading, width)) in enumerate(self.columns.items()):
-            text = self._format_cell(info, key)
+            full_text = self._format_cell(info, key)
+            text = self._truncate_text(full_text, width)
             anchor = self._column_anchor(key)
             fg = _cell_fg(info, key)
             cell = tk.Label(
@@ -439,6 +460,8 @@ class VideoGridView:
             )
             cell.grid(row=0, column=i, sticky='nsew')
             row_frame.grid_columnconfigure(i, minsize=width)
+            row_cells.append((key, full_text, cell))
+        row_frame._cells = row_cells
 
     @staticmethod
     def _format_cell(info: VideoInfo, key: str) -> str:
