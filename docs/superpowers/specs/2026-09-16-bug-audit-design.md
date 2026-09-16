@@ -366,6 +366,7 @@
 **描述**: `parse_video_info` 把 `bitrate_kbps >= bitrate_std` 算进 `VideoInfo.is_passing`，worker 用扫描开始时的 `bitrate_std` snapshot。扫描过程中用户改 `bitrate_var`，对**已加入** `self.video_results` 的行无影响。状态栏最终用 `sum(1 for v in self.video_results if v.is_passing)` 统计，但表格第一列「达标/不达标」标签也是用 `info.is_passing` 渲染的 —— 两者口径一致，不互相矛盾。但用户体验层面：用户调高阈值后看到「达标 N 个」未变，以为没生效，会再次调高或重启扫描。同源问题：阈值降低后旧行可能仍判「不达标」，但实际已超过新阈值。
 **复现**: 扫描 100 个文件（阈值 30000），前 50 个扫完时把阈值调到 60000。继续扫完剩下 50 个，状态栏显示「达标 X 个」（X ≤ 50），但表格里前 50 个标「不达标」是按 30000 算的、剩 50 个按 60000 算 —— 同一列内混用两套阈值。
 **建议**: 把 `is_passing` 改成在 `_add_result` 里用 `self.bitrate_var.get()` 现算（不要存在 `VideoInfo` 里），并把状态栏重算函数与阈值字段联动；或在 worker 里每读一个文件前 `self.bitrate_var.get()` snapshot（高开销但简单）。
+**与并发 + 输入解析 #🟢 #15 同源**：该处也曾记录此问题但归类为「不算 bug」并降级为 🟢 低。本条从业务逻辑 / 用户体验角度将其升为 🟡 中 —— 用户调阈值看不到表格响应属于「能复现的功能缺陷」，但仍不算崩溃或数据损坏。
 
 ### 🟡 中 无音频流的视频永远判「达标」，与「音频采样率达标」的产品语义不符
 **位置**: `video_checker.py:172-174`
@@ -384,7 +385,7 @@
 ### 🟠 高 用户点击「清除记录」时若扫描已卡死，`scanning` 永不复位
 **位置**: `video_checker.py:754-762`（`_clear_records`）+ `video_checker.py:744-752`（`_scan_complete`）+ `video_checker.py:736-737`（`_check_queue` 调度）
 **类别**: 业务逻辑 / 资源（状态机）
-**描述**: `_clear_records` 用 `if self.scanning` 守卫，扫描中点清除只弹「请等待完成后再清除」。`self.scanning = False` 只在 `_scan_complete()`（`_check_queue` 收到 `done`）里发生。若 worker 因任何原因不发 `done`（见并发 #🔴 #9），用户被锁死 —— 关闭重开是唯一出路。这是状态机问题，不是单纯业务逻辑；但与「清除记录」按钮的可用性直接相关，属用户体验可观察到的硬伤。
+**描述**: `_clear_records` 用 `if self.scanning` 守卫，扫描中点清除只弹「请等待完成后再清除」。`self.scanning = False` 只在 `_scan_complete()`（`_check_queue` 收到 `done`）里发生。若 worker 因任何原因不发 `done`（见并发 #🔴 #9），用户被锁死 —— 关闭重开是唯一出路。这是状态机问题，不是单纯业务逻辑；但与「清除记录」按钮的可用性直接相关，属用户体验可观察到的硬伤。同源问题已在并发 #🔴 #10 从并发角度记录，本条从业务逻辑 / 用户体验角度补全现象描述与修复方向。
 **复现**: 在 macOS 上启动扫描（已知 worker 必崩），UI 卡在「正在检测... (1/N)」。点「清除记录」弹窗「请等待完成后再清除」；关闭弹窗后按钮仍可用但扫描永远卡死，重启进程是唯一恢复手段。
 **建议**: `_clear_records` 改为：`if self.scanning` 弹窗提供「强制重置（将丢失当前扫描结果）」按钮，按下则无条件 `self.scanning = False` + `self.scan_btn.config(state='normal')` + `_check_queue` 取消调度；或更彻底，把 `_check_queue` 加 watchdog（见并发 #🔴 #9 的修复方向）。
 
