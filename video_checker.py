@@ -333,17 +333,18 @@ class VideoGridView:
 
             # 最后一列不放手柄
             if i < n - 1:
-                sep = tk.Frame(
-                    self.header_frame,
-                    width=1,
-                    cursor='sb_h_double_arrow',
-                    bg='#c0c0c0',
-                )
-                sep.grid(row=0, column=col_idx + 1, sticky='ns')
-                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=1)
-                sep.bind('<Button-1>', lambda e, k=key: self._start_col_resize(e, k))
-                sep.bind('<B1-Motion>', lambda e, k=key: self._on_col_resize(e, k))
-                sep.bind('<ButtonRelease-1>', lambda _e: self._end_col_resize())
+                # 外层 grab 是 8px 宽的透明热区（事件绑这里），便于点击；
+                # 内层 line 是 1px 可见分隔线，居中显示。
+                grab = tk.Frame(self.header_frame, cursor='sb_h_double_arrow')
+                grab.grid(row=0, column=col_idx + 1, sticky='ns')
+                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=8)
+
+                line = tk.Frame(grab, width=1, bg='#c0c0c0')
+                line.pack(side='left', padx=(3, 4), fill='y')
+
+                grab.bind('<Button-1>', lambda e, k=key: self._start_col_resize(e, k))
+                grab.bind('<B1-Motion>', lambda e, k=key: self._on_col_resize(e, k))
+                grab.bind('<ButtonRelease-1>', lambda _e: self._end_col_resize())
 
     def _start_col_resize(self, event, key: str):
         self._resize_state = {
@@ -380,16 +381,28 @@ class VideoGridView:
         self._resize_state = None
 
     def _truncate_text(self, text: str, col_width: int) -> str:
-        """把 text 截断到不超过列宽（扣去 padx + bd）。"""
-        # 单元格内边距：padx=4 两侧 + bd=1 两侧 = 10
+        """把 text 截断到不超过列宽（扣去 padx + bd）。
+
+        快路径：按最宽字符估算宽度，若确定能装下就跳过 measure（绝大多数 cell 走这里）。
+        慢路径：measure 验证 + 二分查找前缀长度。
+        """
         max_width = max(0, col_width - 10)
+        # 9pt 下 ASCII ~7px，CJK ~14px；纯 ASCII 用更小的上界可以跳过更多 measure
+        has_cjk = any(ord(c) >= 0x80 for c in text)
+        per_char = 7 if not has_cjk else 14
+        if len(text) * per_char <= max_width:
+            return text
         if self._cell_font.measure(text) <= max_width:
             return text
         ellipsis = '...'
-        result = text
-        while result and self._cell_font.measure(result + ellipsis) > max_width:
-            result = result[:-1]
-        return (result + ellipsis) if result else ellipsis
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._cell_font.measure(text[:mid] + ellipsis) <= max_width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + ellipsis
 
     @staticmethod
     def _column_anchor(key: str) -> str:
@@ -485,9 +498,9 @@ class VideoGridView:
         }[key]
 
     def bind_drop(self, callback):
-        """把拖拽事件绑定到 data_frame。"""
-        self.data_frame.drop_target_register('DND_Files')
-        self.data_frame.dnd_bind('<<Drop>>', callback)
+        """把拖拽事件绑定到 outer（覆盖表头 + 画布，空表也能接住）。"""
+        self.outer.drop_target_register('DND_Files')
+        self.outer.dnd_bind('<<Drop>>', callback)
 
 
 def scan_video_files(directory: str, recursive: bool) -> list[str]:
@@ -587,6 +600,9 @@ class VideoCheckerApp:
 
         self.grid = VideoGridView(tree_frame, headers)
         self.grid.pack(fill='both', expand=True)
+
+        # 全局快捷键
+        self.root.bind('<Control-o>', lambda _e: self._browse_path())
 
         # === 状态栏 ===
         self.status_var = tk.StringVar(value="就绪")
