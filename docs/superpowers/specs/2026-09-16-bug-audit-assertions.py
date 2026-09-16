@@ -370,5 +370,67 @@ if __name__ == "__main__":
           _cell_fg(info, 'audio_sample_rate') == FG_FAIL)
     check("都不达标/duration=默认", _cell_fg(info, 'duration') is None)
 
+    section("_truncate_text")
+
+    gv = VideoGridView.__new__(VideoGridView)  # 跳过 __init__
+    gv._cell_font = None  # type: ignore  # 触发 tk 创建路径需要 root，此处只测纯逻辑分支
+
+    # 短 ASCII 不截断
+    short = "hello"
+    if gv._cell_font is None:
+        # 不创建 root 时无法测真实 measure；只测快路径
+        check("短 ASCII 快路径（估算）",
+              gv._truncate_text(short, 200) == short,
+              detail="需要 Tk root 才能测真实 measure；快路径逻辑估算")
+    # 留作后续：实际 measure 测试在有 root 时跑
+
+    section("format_duration")
+    check("0 秒", format_duration(0) == "00:00:00")
+    check("59 秒", format_duration(59) == "00:00:59")
+    check("60 秒", format_duration(60) == "00:01:00")
+    check("3600 秒", format_duration(3600) == "01:00:00")
+    check("3661 秒", format_duration(3661) == "01:01:01")
+    check("负数（异常输入）",
+          format_duration(-1) == "-1:59:59" or format_duration(-1).startswith("-"),
+          detail=f"got {format_duration(-1)!r}")
+
+    section("format_file_size")
+    check("0 B", format_file_size(0) == "0 B")
+    check("1023 B", format_file_size(1023) == "1023 B")
+    check("1024 B → KB", format_file_size(1024) == "1.0 KB")
+    check("1 MB", format_file_size(1024**2) == "1.0 MB")
+    check("1 GB", format_file_size(1024**3) == "1.00 GB")
+    check("负数", format_file_size(-1) == "-1 B",
+          detail=f"got {format_file_size(-1)!r}")
+
+    section("_get_unique_dest")
+    with tempdir() as d:
+        # 无冲突
+        src = os.path.join(d, "src", "a.mp4")
+        os.makedirs(os.path.dirname(src))
+        open(src, "w").close()
+        result = VideoCheckerApp._get_unique_dest(src, d)
+        check("无冲突 → 直接", result == os.path.join(d, "a.mp4"))
+
+        # 目标已存在同名
+        open(os.path.join(d, "a.mp4"), "w").close()
+        result = VideoCheckerApp._get_unique_dest(src, d)
+        check("冲突 → _1", result == os.path.join(d, "a_1.mp4"))
+
+        # 多个同名
+        open(os.path.join(d, "a_1.mp4"), "w").close()
+        result = VideoCheckerApp._get_unique_dest(src, d)
+        check("多重冲突 → _2", result == os.path.join(d, "a_2.mp4"))
+
+        # 源文件已叫 a_1.mp4
+        os.remove(src)
+        src2 = os.path.join(d, "src", "a_1.mp4")
+        open(src2, "w").close()
+        # 注意此时 d 中已有 a.mp4, a_1.mp4
+        result = VideoCheckerApp._get_unique_dest(src2, d)
+        check("源文件已含 _1 后缀 → a_1_1.mp4（语义丢失？）",
+              result == os.path.join(d, "a_1_1.mp4"),
+              detail=f"got {result}")
+
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
     sys.exit(1 if _failures else 0)
