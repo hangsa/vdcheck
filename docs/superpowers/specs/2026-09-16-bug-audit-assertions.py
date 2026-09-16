@@ -325,5 +325,50 @@ if __name__ == "__main__":
           info.rel_path == "C:\\foo\\x.mp4",
           detail=f"got {info.rel_path!r}")
 
+    section("_cell_fg 全矩阵")
+
+    FG_PASS = VideoGridView.FG_PASS
+    FG_FAIL = VideoGridView.FG_FAIL
+
+    def mk(bitrate_kbps, sr_passing, std=30000, sr_std=48):
+        return VideoInfo(
+            rel_path="./", title="t", resolution="r", frame_rate="f",
+            bitrate_kbps=bitrate_kbps, video_codec="v", audio_codec="a",
+            audio_channels="2", audio_sample_rate="48 kHz",
+            duration="00:01:00", file_size="1 MB",
+            is_passing=bitrate_kbps >= std and sr_passing,
+            sample_rate_passing=sr_passing,
+            bitrate_std=std, sample_rate_std=sr_std,
+            full_path="/tmp/t.mp4",
+        )
+
+    # 全达标 → 所有 cell 绿
+    info = mk(30000, True)
+    for key in ['title', 'resolution', 'bitrate', 'audio_sample_rate', 'result']:
+        check(f"全达标/{key}=绿", _cell_fg(info, key) == FG_PASS)
+
+    # 仅码率不达标
+    info = mk(20000, True)
+    check("仅码率不达标/title=红", _cell_fg(info, 'title') == FG_FAIL)
+    check("仅码率不达标/result=红", _cell_fg(info, 'result') == FG_FAIL)
+    check("仅码率不达标/bitrate=红", _cell_fg(info, 'bitrate') == FG_FAIL)
+    check("仅码率不达标/audio_sample_rate=默认",
+          _cell_fg(info, 'audio_sample_rate') is None)
+    check("仅码率不达标/resolution=默认", _cell_fg(info, 'resolution') is None)
+
+    # 仅采样率不达标
+    info = mk(30000, False)
+    check("仅采样率不达标/title=红", _cell_fg(info, 'title') == FG_FAIL)
+    check("仅采样率不达标/audio_sample_rate=红",
+          _cell_fg(info, 'audio_sample_rate') == FG_FAIL)
+    check("仅采样率不达标/bitrate=默认", _cell_fg(info, 'bitrate') is None)
+
+    # 两项都不达标
+    info = mk(20000, False)
+    check("都不达标/bitrate=红", _cell_fg(info, 'bitrate') == FG_FAIL)
+    check("都不达标/audio_sample_rate=红",
+          _cell_fg(info, 'audio_sample_rate') == FG_FAIL)
+    check("都不达标/duration=默认", _cell_fg(info, 'duration') is None)
+
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
     sys.exit(1 if _failures else 0)
