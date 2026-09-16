@@ -244,3 +244,114 @@
 **描述**: 部分大文件（>10GB）或 NAS 慢盘上 ffprobe 启动 + 读取 moov atom 需 > 30s，触 `TimeoutExpired` 被静默吞掉返回 `None`，用户看不到错误，且 UI 显示「正在检测 ...」长时间无变化无超时提示。
 **复现**: 在慢速 NAS 上扫描 4K HDR 文件。
 **建议**: 把 timeout 暴露为配置；或捕获后向队列发 `('status', f'ffprobe 超时: {name}')` 而非吞掉。
+
+---
+
+## 审计发现 — 并发 + 输入解析
+
+### 🔴 致命 worker 线程抛出未捕获异常后，UI 永久卡死
+**位置**: `video_checker.py:699-719`（`_scan_worker`）+ `video_checker.py:912-926`（`_scan_files_worker`）+ `video_checker.py:721-737`（`_check_queue`）
+**类别**: 并发
+**描述**: 两个 worker 方法都没有外层 `try/except`，任何未捕获异常（例如 `run_ffprobe` 在 macOS/Linux 上的 `AttributeError`，见致命 #1）会让线程静默死亡。死亡线程不会向队列发 `done`；主线程 `_check_queue` 每 100ms 轮询、永远拿不到 `done`、`self.scanning` 永远为 True、`scan_btn` 永远 disabled。这是为什么 macOS/Linux 上崩溃会变「永久卡死」的根因 —— 即使下游 bug 修了，若 worker 任何路径再抛新异常，UI 状态机仍会卡死。
+**复现**: 在 `_scan_files_worker` 里手动 `raise RuntimeError`（或依赖 macOS 上 `run_ffprobe` 抛 `AttributeError`）。点击开始扫描后，UI 状态栏冻结在「正在检测... (1/N)」、按钮变灰，无法再次点击扫描、无法清除记录、唯一办法是关闭重开。
+**建议**: worker 外层包 `try/except Exception`，catch 后向队列发 `('done', None)` 并附 `('status', f'扫描异常: {e}')`；同时 `_check_queue` 在 `self.scanning` 为 True 但 `get_nowait` 持续空时增加 watchdog（例如 5s 内无任何消息则强制 `_scan_complete()` + 日志告警）。
+
+### 🔴 致命 `_clear_records` 在扫描中拒绝，但若扫描卡死则 `scanning` 永不复位
+**位置**: `video_checker.py:754-762`（`_clear_records`）+ `video_checker.py:744-752`（`_scan_complete`）
+**类别**: 并发
+**描述**: `_clear_records` 用 `if self.scanning` 守卫，遇到扫描中就拒绝并弹窗；但 `self.scanning = False` 只在 `_scan_complete()` 里发生，而后者只在 worker 发 `done` 时触发（见致命 #9）。一旦 worker 因任何原因不发 `done`（崩溃、queue 卡住、析构），`scanning` 永远 True，「清除记录」按钮只能弹「请等待完成」，但永远等不到完成 —— 用户被锁死，唯一出路是关闭进程。
+**复现**: 启动扫描，扫到一半把当前目录的读权限改为 `000`（让 `scan_video_files` 在 worker 内部抛 `PermissionError`），或主动 kill ffprobe 让 worker 任何路径抛异常。UI 卡在「正在检测」，点「清除记录」永远提示等待中。
+**建议**: `_clear_records` 改为「`scanning` 时弹窗提供「强制重置」选项，按下则无条件 `self.scanning = False` + `self.scan_btn.config(state='normal')` + 表格清空；或最简单 — 把 `_check_queue` 加 watchdog（见 #9）。
+
+### 🟠 高 `_start_scan` / `_on_file_drop` 在扫描中未禁用 `move_btn` / `move_all_btn`
+**位置**: `video_checker.py:633-636` + `video_checker.py:684` + `video_checker.py:898`
+**类别**: 并发
+**描述**: 「开始检测」时只 `self.scan_btn.config(state='disabled')`，但底部的「移动达标文件」/「移动全部文件」按钮一直可点。若用户在扫描中途点移动，会基于一个半完成的 `self.video_results` 列表（含尚未检测的文件）执行 `shutil.move` —— 可能移动到一半文件被 worker 同时通过 `parse_video_info` 读取（虽然 Python 文件句柄可共享，逻辑上不冲突但语义混乱），更严重的是用户在第一次移动后再点第二次会触发 `_get_unique_dest` 链式后缀（见 #6）。属于「可观察到的状态错乱 + 用户误操作风险」。
+**复现**: 扫描大目录（1000+ 文件）时，前 100 个检测完用户点「移动达标文件」，移动进行中后面 900 个仍在检测；中途再点一次，dest 出现 `_1`、`_2` 后缀链。
+**建议**: `_start_scan` / `_on_file_drop` 入口处把所有动作按钮 disable；`_scan_complete` / 异常路径里恢复。
+
+### 🟠 高 macOS/Linux 拖拽格式无 `{...}` 大括号，整串当文件路径，整批文件无声丢失
+**位置**: `video_checker.py:877-887`
+**类别**: 输入解析
+**描述**: `event.data` 在 macOS 是 `file:///path/a.mp4` 或裸路径，Linux 是 `file://...` 或裸路径，多文件用空格分隔；当前代码 `re.findall(r'\{([^}]+)\}', files)` 拿不到任何匹配，fallback 到 `file_list = [files]`，把整串 `"file:///a.mp4 file:///b.mp4"`（含分隔空格与协议头）当成单个文件路径。下游 `os.path.splitext` 取到 `.mp4`（位于字符串末尾）扩展名检查通过，`run_ffprobe` 打开一个不存在的长字符串路径返回 `None`，**整批文件无声丢失**，表格为空、无错误提示。这与已记录的 #🟡「`_on_file_drop` 解析 Windows `{path}` 格式失败时把整串当路径」完全同源；本次静态走查再次确认其在 macOS 上的常态性（无大括号是默认情况）。
+**复现**: macOS 上从 Finder 拖两个 .mp4 到窗口。表格为空，无错误提示，用户以为「macOS 不支持拖拽」。
+**建议**: 解析顺序改为：(1) 若 `event.data` 含 `{`，按当前正则；(2) 否则按空白 split（`re.findall(r'\S+', files)`）；(3) 对每个 token 剥 `file://` 头并 `urllib.parse.unquote`；(4) 扩展名不匹配时把 token 原样保留并在 status 提示「已跳过 N 个非视频文件」而不是吞掉。
+
+### 🟠 高 阈值输入接受 `inf` / `nan`，导致所有文件永远「达标」或「不达标」
+**位置**: `video_checker.py:663-677` + `video_checker.py:862-875`
+**类别**: 输入解析
+**描述**: `float(x)` 在 Python 里能解析字符串 `"inf"`、`"nan"`、`"+inf"`、`"1e9999"`（→ inf）。当前 `try: float(...) except ValueError` 只能拦 `ValueError`，不拦这些「成功但无意义」的输入。`inf` 时所有 `bitrate_kbps >= inf` 永远 False → 全部判不达标；`nan` 时 `bitrate_kbps >= nan` 永远 False → 全部不达标；`-0.0`（用户输入 `-0`）被 `<= 0` 拒绝但 `-1e-9999` → `-0.0` 同样被拒；但 `+1e99999` → `inf` 则绕过 `<= 0` 检查。
+**复现**: 在「码率标准」输入框输入 `inf` 或 `nan` 或 `1e99999`，点击扫描。所有行结果列显示「不达标」，但状态栏又显示「达标 0 个」；用户反复调阈值都无效。
+**建议**: 用 `math.isfinite(bitrate_std)` 显式拒绝 inf/nan；或把 `except` 改成 `except (ValueError, ArithmeticError)` 并检查 `math.isnan` / `math.isinf`。
+
+### 🟠 高 拖拽单文件时若路径在 `/`，`os.path.dirname` 返回 `/`，所有 `rel_path` 失真
+**位置**: `video_checker.py:915`（`_scan_files_worker`）+ `video_checker.py:204-212`（`parse_video_info`）
+**类别**: 输入解析
+**描述**: `_scan_files_worker` 取 `base_path = os.path.dirname(files[0])`。当用户拖单个根目录文件（如 `/tmp/a.mp4`，`os.path.dirname` = `/`）或拖多个分散在不同盘符/挂载点的文件（Windows 上 `C:\a.mp4` 与 `D:\b.mp4`，`os.path.dirname` = `C:\\`）时，所有 `rel_path` 都基于第一个文件目录，导致后面文件的相对路径是 `../...` 风格甚至跨越 base。任务上下文已确认此问题；本次复检定位到具体失败模式。
+**复现**: 把 `~/Downloads/a.mp4` 与 `/Volumes/External/b.mp4` 同时拖到窗口（在 macOS 上）。`rel_path` 全部基于 `~/Downloads/`，第二行显示 `../../../Volumes/External/b.mp4`。
+**建议**: 用 `os.path.commonpath(files)` 计算共同祖先；共同祖先不存在（如跨盘符）则 `base_path = os.path.dirname(os.path.commonpath([os.path.abspath(f) for f in files]))`，仍失败则退化为各文件的 `os.path.dirname`（即每个文件用自己的目录作 base）。
+
+### 🟠 高 路径前后空白未 strip，拖拽路径含尾部 `/` 时 `os.path.isdir` 与扫描路径不一致
+**位置**: `video_checker.py:658`（`_start_scan`）+ `video_checker.py:771`（`_move_passing_files`）+ `video_checker.py:811`（`_move_all_files`）
+**类别**: 输入解析
+**描述**: `_start_scan` 对 `directory` 调用了 `.strip()`；但 `_move_passing_files` / `_move_all_files` 对 `dest_dir` 也调用了 `.strip()`。看似 OK，但若用户在 path_entry 输入 `" /Users/foo/Videos "`（前后含空格）→ strip 后通过；但若输入 `" /Users/foo/Videos "` 含不可见字符（如 NBSP ` `），`.strip()` 默认不剥 NBSP，`os.path.isdir` 返回 False → 弹「请输入有效文件夹路径」。部分输入法、剪贴板历史会注入 NBSP。
+**复现**: 从某些 IM 复制路径（含 NBSP）粘贴到路径输入框，点扫描。立即弹「请输入有效文件夹路径」。
+**建议**: 把 strip 替换为 `re.sub(r'[\s ​]+', '', ...)` 或至少 `text.strip().replace(' ', ' ')`；或单独校验 `directory = self.path_var.get()` 后 `.strip()` + 规范化（`os.path.normpath`）。
+
+### 🟡 中 拖拽单文件无大括号时整串被当作路径，扩展名末尾才被识别
+**位置**: `video_checker.py:885-889`（`_on_file_drop`）
+**类别**: 输入解析
+**描述**: 在 Linux 上从 Nautilus 拖单个文件（裸路径，无 `{}` 包裹），`event.data` = `'/home/user/a.mp4'`，正则拿不到，fallback 到 `file_list = [files]` = `['/home/user/a.mp4']`，下游 `os.path.splitext` 取 `.mp4` 通过。看似 OK，但若文件名本身含空格（Linux 上 `'/home/user/My Video.mp4'`），整串还是单个 path 没问题。真正问题在「多个裸路径以空格分隔」场景：拖 `'/home/a.mp4 /home/b.mp4'` → fallback 整串当单文件路径 → `splitext` 拿 `.mp4`（字符串末尾）通过 → `run_ffprobe` 失败 → 整批丢失。
+**复现**: Linux 上从 Nautilus 拖两个 .mp4 到窗口（无大括号格式）。表格为空。
+**建议**: 紧接修复 #4 的解析顺序：先 `re.findall(r'\S+', files)` 后再尝试 `{...}`，作为跨平台默认。
+
+### 🟡 中 拖拽文件含 `}` 的路径会被正则提前截断
+**位置**: `video_checker.py:884`（`_on_file_drop`）
+**类别**: 输入解析
+**描述**: `re.findall(r'\{([^}]+)\}', files)` 在 Windows 上遇到含 `}` 的合法文件名 `"{my}video.mp4"` 会截断成 `"my"`，把空/错误片段传给下游；后续 `os.path.exists` 失败或命中错误文件。Linux 上虽没有这个现象，但拖 Windows 共享路径（UNC `\\share{a}`）也可能撞到。
+**复现**: Windows 上把名为 `{a}.mp4` 的文件拖进窗口，表格为空。
+**建议**: 改用 `tkinterdnd2` 文档推荐的 `tk.splitlist` 或 `tk.tk.splitlist`，它们原生处理 `{...}` 与转义；或手动用 `re.findall(r'\{(?:[^{}]|\{[^{}]*\})+\}', files)` 处理嵌套/转义。
+
+### 🟡 中 扫描中点「浏览」切换目录 + 再点扫描，旧 worker 队列消息污染新扫描
+**位置**: `video_checker.py:643-647`（`_browse_path`）+ `video_checker.py:683-697`（`_start_scan`）+ `video_checker.py:689`（旧队列替换）
+**类别**: 并发
+**描述**: `_start_scan` 创建新 `self.result_queue = queue.Queue()` 替换旧队列。旧队列里的 `('result', info)` / `('status', ...)` 消息随旧 Queue 实例被 GC，没有泄漏 —— 但旧 worker 线程仍可能继续向旧队列 `put`（它持有旧 Queue 引用直到函数结束），所以严格说不会污染。但若用户扫描途中点「浏览」改了 path_var，再点扫描，旧 worker 可能还在跑（虽然第二次 `_start_scan` 的 `if self.scanning: return` 会拦住）—— 实际上是 `scanning=True` 时 `_start_scan` 直接 return，没问题；但「点浏览改 path_var 时已 `scanning=True`」用户可能误以为可以重新开始。属 UI 误导，不致命。
+**复现**: 扫描大目录中途，点浏览改 path_var，再点扫描。第二次点击直接被静默忽略（scanning=True），用户困惑为什么没反应。
+**建议**: 扫描中把 `path_entry` / `browse` 按钮也 disable；或 `scanning=True` 时在状态栏显示「扫描中，禁止切换目录」。
+
+### 🟡 中 worker 线程 `daemon=True` 且引用未持有，CPython 行为未明确保证可移植性
+**位置**: `video_checker.py:691-696` + `video_checker.py:904-909`
+**类别**: 并发
+**描述**: `t = threading.Thread(...); t.start()` 后 `t` 是局部变量；方法返回后引用消失。CPython 实现下 `Thread.start()` 会把自己注册到 `_active` 全局 dict 直至 `run()` 结束（与 daemon 无关），所以**实际不会 GC**。但 PyPy、Jython 等其他实现没有这个保证；且若 Python 解释器曾考虑改变此行为（PEP 3141/374 讨论过），跨实现可移植性可疑。任务上下文已列为「已验证为非问题」候选；本次确认在 CPython 3.10+ 下不会 GC，但建议显式持有以提升可读性与跨实现安全。
+**复现**: 无（CPython 下不会触发）；理论上 PyPy 上若 GC 触发，会看到 worker 线程中途消失。
+**建议**: 把 `self._scan_thread = t`（或维护 `self._threads: list[Thread]`）；不需要 join，但显式持有避免后续协作者疑惑。
+
+### 🟡 中 拖拽文件重复检测：同一文件拖第二次会被重复处理，但旧 worker 已被 `scanning` 守卫挡住
+**位置**: `video_checker.py:897-910`（`_on_file_drop`）
+**类别**: 并发
+**描述**: 拖拽第二次时会重置 `self.video_results` 与 `self.grid`，如果 `_start_scan` 也跑过同样守卫，状态一致。**但** `_move_passing_files` / `_move_all_files` 期间（移动是同步阻塞的）若用户拖新文件，会把 `self.video_results` 清空重建 —— 移动完成时 `self.video_results` 已不是移动前的那个列表（虽然 move 内用的 list 是局部 `passing` 拷贝，不依赖 self.video_results，但状态机已被破坏）。属并发竞态但不致命（不会数据丢失，只会让用户困惑）。
+**复现**: 扫描后立刻点移动；移动 messagebox 弹出的同时拖入新文件。先确认移动，后看表格——是旧内容还是新内容取决于确认时序。
+**建议**: 移动中也守卫 `if self.scanning or self.moving`（需要新增 `self.moving` 标志）。
+
+### 🟢 低 `_check_queue` 100ms 节奏在主线程繁忙时仍会持续触发，递归 `after` 无最大深度限制但有堆栈开销
+**位置**: `video_checker.py:721-737`
+**类别**: 并发
+**描述**: `_check_queue` 每 100ms 重新 `after(100, ...)` 自身，30 分钟扫描会产生 ~18000 次调度；不构成 bug，但若主线程某次 `_check_queue` 渲染耗时 > 100ms（见 #🟡 大目录 Label 渲染），会形成 backlog、队列积压，最终 OOM。属性能衍生，非纯并发 bug。
+**复现**: 长扫描 30 分钟以上，状态栏节奏肉眼可见的卡顿。
+**建议**: 把渲染节流到 200ms 或 500ms；与下方 `_add_result` 一起批处理。
+
+### 🟢 低 `_scan_worker` 与 `_scan_files_worker` 重复代码，且 `if info is not None` 后无 `is_passing` 重算（阈值中途改变不会重算）
+**位置**: `video_checker.py:699-719` + `video_checker.py:912-926`
+**类别**: 并发 / 输入解析
+**描述**: 两个 worker 主体几乎一致。`info.is_passing` 在 `parse_video_info` 里计算（用扫描时的 `bitrate_std`），扫描中用户若改了 `bitrate_var` 不影响已排队消息 —— 这是设计选择，**不算 bug**。但提示给后续开发者注意：阈值与 `is_passing` 必须一起变，否则 UI 滞后。
+**复现**: 在 `_check_queue` 处理 `('result', info)` 之前，用户把阈值从 30000 调到 60000。当 `info` 被 `_add_result` 加入时，`is_passing` 还是按 30000 算的。
+**建议**: 把阈值查询放在 `_add_result` 主线程里（每次都 `self.bitrate_var.get()`），不在 worker 里 snapshot。
+
+### 无 线程引用 / daemon GC / event bindings 泄漏等其余并发类问题
+**位置**: `video_checker.py:425-446`（`_bind_mousewheel` / `_unbind_mousewheel`）+ `video_checker.py:691-696`（worker 引用）
+**类别**: 并发
+**描述**: 经过逐行检查：
+- `_wheel_bind_id` 用 `bind_all` 而非 `bind`，所以 `<Enter>` 触发时绑到 root，`<Leave>` 时 `unbind_all` 撤销。理论上若 `<Leave>` 触发前窗口被销毁（`__del__` 路径），`canvas` 已销毁，`unbind_all` 会抛 `TclError` 但被 `__del__` 吞掉。日常使用不构成 bug。
+- `bind_all` 全局副作用：用户在另一个 widget 里滚动（如 `Treeview` 不存在，但 Entry/Combobox 里）也会触发 `canvas.yview_scroll` —— 在 macOS 上若把鼠标移到 Entry 上滚动，会让表格乱跳。属于用户体验差，不算 bug。
+- `threading.Thread` 引用：CPython 下不会 GC（见 #🟡 中 #12），跨实现理论风险已记录。
+- 未发现 worker 异常路径的隐藏副作用（除 #🔴 致命 #9/#10）。
