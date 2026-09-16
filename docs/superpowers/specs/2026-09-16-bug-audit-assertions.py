@@ -147,5 +147,104 @@ if __name__ == "__main__":
     ]), full, base, 30000, 48)
     check("r_frame_rate 非法 → N/A", info.frame_rate == "N/A")
 
+    section("parse_video_info — 码率 / 采样率 / 阈值")
+
+    def json_with(streams, format_=None):
+        return {"streams": streams, "format": format_ or {}}
+
+    full = "/tmp/test.mp4"
+    base = "/tmp"
+
+    # 码率: stream 级优先于 format 级
+    data = json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+          "bit_rate": "20000000"}],  # 20 Mbps stream
+        {"bit_rate": "50000000"},  # 50 Mbps format（应被忽略）
+    )
+    info = parse_video_info(data, full, base, 30000, 48)
+    check("stream 级码率优先于 format 级", info.bitrate_kbps == 20000.0,
+          detail=f"got {info.bitrate_kbps}")
+
+    # 码率: 两处都没有 → 0，不崩溃
+    data = json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1"}],
+        {},
+    )
+    info = parse_video_info(data, full, base, 30000, 48)
+    check("码率缺失 → 0 不崩溃", info.bitrate_kbps == 0.0)
+
+    # 阈值: 正好等于阈值算达标？
+    data = json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+          "bit_rate": "30000000"},
+         {"codec_type": "audio", "codec_name": "aac",
+          "channels": 2, "sample_rate": "48000"}],
+        {},
+    )
+    info = parse_video_info(data, full, base, 30000, 48)
+    check("码率正好等于阈值算达标", info.is_passing is True)
+
+    # 阈值: 低于阈值
+    data = json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+          "bit_rate": "29999000"},
+         {"codec_type": "audio", "codec_name": "aac",
+          "channels": 2, "sample_rate": "48000"}],
+        {},
+    )
+    info = parse_video_info(data, full, base, 30000, 48)
+    check("码率 29999 < 30000 → 不达标", info.is_passing is False)
+
+    # 采样率: 无音频流
+    data = json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+          "bit_rate": "30000000"}],
+        {},
+    )
+    info = parse_video_info(data, full, base, 30000, 48)
+    check("无音频流: sample_rate_passing=True", info.sample_rate_passing is True)
+    check("无音频流: is_passing=True（不受影响）", info.is_passing is True)
+
+    # 采样率: 解析失败（非数字字符串）
+    data = json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+          "bit_rate": "30000000"},
+         {"codec_type": "audio", "codec_name": "aac",
+          "channels": 2, "sample_rate": "not_a_number"}],
+        {},
+    )
+    info = parse_video_info(data, full, base, 30000, 48)
+    check("采样率解析失败: sample_rate_passing=False", info.sample_rate_passing is False)
+    check("采样率解析失败: is_passing=False", info.is_passing is False)
+
+    # 采样率: 低于阈值
+    data = json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+          "bit_rate": "30000000"},
+         {"codec_type": "audio", "codec_name": "aac",
+          "channels": 2, "sample_rate": "44100"}],
+        {},
+    )
+    info = parse_video_info(data, full, base, 30000, 48)
+    check("采样率 44.1kHz < 48kHz → sample_rate_passing=False",
+          info.sample_rate_passing is False)
+
+    # 阈值字段透传
+    info = parse_video_info(json_with(
+        [{"codec_type": "video", "codec_name": "h264",
+          "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+          "bit_rate": "30000000"}],
+        {},
+    ), full, base, 30000, 48)
+    check("bitrate_std 透传", info.bitrate_std == 30000)
+    check("sample_rate_std 透传", info.sample_rate_std == 48)
+
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
     sys.exit(1 if _failures else 0)
