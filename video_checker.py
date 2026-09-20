@@ -334,18 +334,16 @@ class VideoGridView:
 
             # 最后一列不放手柄
             if i < n - 1:
-                # grab 是 GRAB_WIDTH 宽的热区（事件绑这里 + line 上，便于点击可见分隔线）；
-                # line 是可见的拖拽手柄，占满 grab 宽度，靠左与数据列边界对齐。
+                # grab 是 GRAB_WIDTH 宽的命中热区；line 是 1px 可见分隔线（占左 1px），
+                # 与左数据列右边界对齐。事件同时绑到 grab 和 line，否则点 line 上会被 line 吃掉。
                 grab = tk.Frame(self.header_frame, cursor='sb_h_double_arrow')
                 grab.grid(row=0, column=col_idx + 1, sticky='ns')
                 # weight=0: 不参与拉伸/压缩, 始终保持 GRAB_WIDTH 热区
                 self.header_frame.grid_columnconfigure(col_idx + 1, minsize=self.GRAB_WIDTH, weight=0)
 
-                line = tk.Frame(grab, width=self.GRAB_WIDTH, bg='#a0a0a0', cursor='sb_h_double_arrow')
+                line = tk.Frame(grab, width=1, bg='#a0a0a0', cursor='sb_h_double_arrow')
                 line.pack(side='left', fill='y')
 
-                # 事件必须在 grab 和 line 上都绑：line 是 grab 的子 widget，
-                # 不绑的话点在线上会被 line 吃掉，grab 的 handler 收不到。
                 on_press = lambda e, k=key: self._start_col_resize(e, k)
                 on_drag = lambda e, k=key: self._on_col_resize(e, k)
                 on_release = lambda _e: self._end_col_resize()
