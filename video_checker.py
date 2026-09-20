@@ -252,6 +252,7 @@ class VideoGridView:
 
     FG_PASS = '#228B22'
     FG_FAIL = '#DC143C'
+    GRAB_WIDTH = 10
 
     def __init__(self, parent: tk.Widget, columns: dict[str, tuple[str, int]]):
         """
@@ -333,19 +334,25 @@ class VideoGridView:
 
             # 最后一列不放手柄
             if i < n - 1:
-                # 外层 grab 是 8px 宽的透明热区（事件绑这里），便于点击；
-                # 内层 line 是 1px 可见分隔线，靠左与数据列边界对齐。
+                # grab 是 GRAB_WIDTH 宽的热区（事件绑这里 + line 上，便于点击可见分隔线）；
+                # line 是可见的拖拽手柄，占满 grab 宽度，靠左与数据列边界对齐。
                 grab = tk.Frame(self.header_frame, cursor='sb_h_double_arrow')
                 grab.grid(row=0, column=col_idx + 1, sticky='ns')
-                # weight=0: 不参与拉伸/压缩, 始终保持 8px 热区
-                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=8, weight=0)
+                # weight=0: 不参与拉伸/压缩, 始终保持 GRAB_WIDTH 热区
+                self.header_frame.grid_columnconfigure(col_idx + 1, minsize=self.GRAB_WIDTH, weight=0)
 
-                line = tk.Frame(grab, width=1, bg='#c0c0c0')
+                line = tk.Frame(grab, width=self.GRAB_WIDTH, bg='#a0a0a0', cursor='sb_h_double_arrow')
                 line.pack(side='left', fill='y')
 
-                grab.bind('<Button-1>', lambda e, k=key: self._start_col_resize(e, k))
-                grab.bind('<B1-Motion>', lambda e, k=key: self._on_col_resize(e, k))
-                grab.bind('<ButtonRelease-1>', lambda _e: self._end_col_resize())
+                # 事件必须在 grab 和 line 上都绑：line 是 grab 的子 widget，
+                # 不绑的话点在线上会被 line 吃掉，grab 的 handler 收不到。
+                on_press = lambda e, k=key: self._start_col_resize(e, k)
+                on_drag = lambda e, k=key: self._on_col_resize(e, k)
+                on_release = lambda _e: self._end_col_resize()
+                for w in (grab, line):
+                    w.bind('<Button-1>', on_press)
+                    w.bind('<B1-Motion>', on_drag)
+                    w.bind('<ButtonRelease-1>', on_release)
 
     def _start_col_resize(self, event, key: str):
         self._resize_state = {
@@ -481,9 +488,9 @@ class VideoGridView:
             row_frame.grid_columnconfigure(i * 2, minsize=width, weight=1)
             row_cells.append((key, full_text, cell))
             if i < n - 1:
-                # 与表头 grab 列同宽（8px），保证列边界对齐；不放 widget 仅占空间
-                # weight=0: 不参与拉伸/压缩, 始终保持 8px
-                row_frame.grid_columnconfigure(i * 2 + 1, minsize=8, weight=0)
+                # 与表头 grab 列同宽，保证列边界对齐；不放 widget 仅占空间
+                # weight=0: 不参与拉伸/压缩, 始终保持 GRAB_WIDTH
+                row_frame.grid_columnconfigure(i * 2 + 1, minsize=self.GRAB_WIDTH, weight=0)
         row_frame._cells = row_cells
 
     @staticmethod
@@ -595,7 +602,7 @@ class VideoCheckerApp:
             'duration', 'file_size', 'result',
         )
         headers = {
-            'title': ('标题', 350),
+            'title': ('标题', 280),
             'resolution': ('分辨率', 90),
             'frame_rate': ('帧率', 80),
             'bitrate': ('码率(kbps)', 90),
