@@ -337,7 +337,9 @@ class VideoGridView:
                 # grab 是 GRAB_WIDTH 宽的命中热区；line 是 1px 可见分隔线（占左 1px），
                 # 与左数据列右边界对齐。事件同时绑到 grab 和 line，否则点 line 上会被 line 吃掉。
                 grab = tk.Frame(self.header_frame, cursor='sb_h_double_arrow')
-                grab.grid(row=0, column=col_idx + 1, sticky='ns')
+                # sticky='nsew' 让 grab 填满整列（命中区 = GRAB_WIDTH）；
+                # 否则空 Frame 默认只有 1px，列内其余 9px 没有 widget 接收事件。
+                grab.grid(row=0, column=col_idx + 1, sticky='nsew')
                 # weight=0: 不参与拉伸/压缩, 始终保持 GRAB_WIDTH 热区
                 self.header_frame.grid_columnconfigure(col_idx + 1, minsize=self.GRAB_WIDTH, weight=0)
 
