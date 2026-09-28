@@ -524,6 +524,7 @@ class VideoGridView:
             'resolution': info.resolution,
             'frame_rate': info.frame_rate,
             'video_codec': info.video_codec,
+            'container_format': info.container_format,
             'audio_codec': info.audio_codec,
             'audio_channels': info.audio_channels,
             'audio_sample_rate': info.audio_sample_rate,
@@ -615,21 +616,22 @@ class VideoCheckerApp:
 
         columns = (
             'title', 'resolution', 'frame_rate', 'bitrate',
-            'video_codec', 'audio_codec', 'audio_channels', 'audio_sample_rate',
-            'duration', 'file_size', 'result',
+            'video_codec', 'container_format', 'audio_codec', 'audio_channels',
+            'audio_sample_rate', 'duration', 'file_size', 'result',
         )
         headers = {
-            'title': ('标题', 280),
+            'title': ('标题', 250),
             'resolution': ('分辨率', 90),
-            'frame_rate': ('帧率', 80),
-            'bitrate': ('码率(kbps)', 90),
+            'frame_rate': ('帧率', 75),
+            'bitrate': ('码率(kbps)', 85),
             'video_codec': ('视频编码', 80),
+            'container_format': ('封装', 75),
             'audio_codec': ('音频编码', 80),
             'audio_channels': ('声道数', 55),
             'audio_sample_rate': ('采样率(kHz)', 90),
             'duration': ('时长', 75),
-            'file_size': ('文件大小', 80),
-            'result': ('结果', 70),
+            'file_size': ('文件大小', 75),
+            'result': ('结果', 60),
         }
 
         self.grid = VideoGridView(tree_frame, headers)
