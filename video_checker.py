@@ -57,6 +57,7 @@ class VideoInfo:
     bitrate_std: float          # NEW: 码率阈值（kbps），扫描时写入
     sample_rate_std: float      # NEW: 采样率阈值（kHz），扫描时写入
     full_path: str
+    container_format: str = 'N/A'  # NEW: 容器格式（如 'mp4'/'matroska'），ffprobe format_name 优先，缺则回退到扩展名
 
 
 def format_duration(seconds: float) -> str:
@@ -211,6 +212,21 @@ def parse_video_info(
     except ValueError:
         rel_path = full_path
 
+    # 容器格式: 优先在 format_name 列表里匹配文件扩展名, 否则取第一项;
+    # format_name 缺失/为空时回退到文件扩展名; 仍无则 'N/A'
+    raw_format = fmt.get('format_name', '')
+    ext = os.path.splitext(full_path)[1].lstrip('.').lower()
+    container_format = ''
+    if raw_format:
+        tokens = raw_format.split(',')
+        # 优先选与扩展名匹配的 token (例如 mp4 文件的 format_name='mov,mp4,...' → 'mp4')
+        if ext and ext in tokens:
+            container_format = ext
+        else:
+            container_format = tokens[0]
+    if not container_format:
+        container_format = ext if ext else 'N/A'
+
     is_passing = (bitrate_kbps >= bitrate_std) and sample_rate_passing
 
     return VideoInfo(
@@ -230,6 +246,7 @@ def parse_video_info(
         bitrate_std=bitrate_std,
         sample_rate_std=sample_rate_std,
         full_path=full_path,
+        container_format=container_format,  # NEW
     )
 
 
