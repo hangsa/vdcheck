@@ -32,17 +32,25 @@ ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
 
 **数据流**:
 1. `parse_video_info` 从 ffprobe 的 `data['format']['format_name']` 读取。该字段以逗号分隔多个格式名（如 `"mov,mp4,m4a,3gp,3g2,mj2"`）。
-2. 取第一项作为显示值。空时回退到文件扩展名（小写、去点），最坏情况 `'N/A'`。
+2. 优先在 token 列表里挑出与文件扩展名匹配的那一项；否则取第一项；format_name 缺失/空时回退到扩展名（小写、去点）；仍无则 `'N/A'`。
+   - 例：mp4 文件 `format_name='mov,mp4,m4a,3gp,3g2,mj2'`, 扩展名 'mp4' 命中列表 → 显示 `mp4`（而不是 `mov`）
+   - 例：mkv 文件 `format_name='matroska,webm'`, 扩展名 'mkv' 不在列表 → 取首项 `matroska`
 
 ```python
 raw_format = fmt.get('format_name', '')
-container_format = raw_format.split(',')[0] if raw_format else ''
+ext = os.path.splitext(full_path)[1].lstrip('.').lower()
+container_format = ''
+if raw_format:
+    tokens = raw_format.split(',')
+    if ext and ext in tokens:
+        container_format = ext
+    else:
+        container_format = tokens[0]
 if not container_format:
-    ext = os.path.splitext(full_path)[1].lstrip('.').lower()
     container_format = ext if ext else 'N/A'
 ```
 
-3. `VideoInfo` 增加字段 `container_format: str`。
+3. `VideoInfo` 增加字段 `container_format: str = 'N/A'`（默认值保证现有 `VideoInfo(...)` 构造调用全部兼容）。**字段位置必须在 `full_path` 之后**: Python `@dataclass` 规则不允许默认字段前置于无默认字段。
 4. `VideoCheckerApp._create_widgets` 中修改 `columns` 元组和 `headers` dict:
    - 元组位置（line ~599）插入 `container_format`：变成 `('title', 'resolution', 'frame_rate', 'bitrate', 'video_codec', 'container_format', 'audio_codec', ...)`
    - headers（line ~604）插入：`'container_format': ('封装', 75)`
