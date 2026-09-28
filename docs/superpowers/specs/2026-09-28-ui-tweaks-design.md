@@ -43,10 +43,10 @@ if not container_format:
 ```
 
 3. `VideoInfo` 增加字段 `container_format: str`。
-4. `VideoCheckerApp._create_widgets` 的 `columns` 元组和 `headers` dict 之间插入：
-   - 元组位置: `('title', 'resolution', 'frame_rate', 'bitrate', 'video_codec', 'container_format', 'audio_codec', ...)`
-   - headers: `'container_format': ('封装', 75)`
-5. `VideoGridView._format_cell` 增加分支: `if key == 'container_format': return info.container_format`
+4. `VideoCheckerApp._create_widgets` 中修改 `columns` 元组和 `headers` dict:
+   - 元组位置（line ~599）插入 `container_format`：变成 `('title', 'resolution', 'frame_rate', 'bitrate', 'video_codec', 'container_format', 'audio_codec', ...)`
+   - headers（line ~604）插入：`'container_format': ('封装', 75)`
+5. `VideoGridView._format_cell` 的尾部 dict 中新增键：`'container_format': info.container_format`。无需新增 `if` 分支。
 
 **列宽策略**: 默认 75 px。`matroska`（9 字符）/ `mpegts`（7 字符）以 9pt 默认字体都能装下（每字符 ~7-14 px，上限 ~75 px）。CJK 表头「封装」2 字符 ≈ 28 px，远小于 75，标题完整显示。
 
@@ -64,11 +64,10 @@ if not container_format:
 
 **装下验证**:
 - 列总宽: 250 + 90 + 75 + 85 + 80 + 75 + 80 + 55 + 90 + 75 + 75 + 60 = **1090 px**
-  (为了核对再加一遍: 250+90+75+85+80+75+80+55+90+75+75+60; 250+90=340; +75=415; +85=500; +80=580; +75=655; +80=735; +55=790; +90=880; +75=955; +75=1030; +60=1090)
-- grab 列 (12 × 10 px) = **120 px**
-- 总内容宽: **1210 px**
-- 窗口 1280 - 左右 padding 10 - tree_frame padding 10 ≈ **1260 px 可用**
-- 余量: **50 px**
+- grab 列数 = 列数 - 1 = **11** 个；总 grab 宽 = 11 × 10 px = **110 px**
+- 总内容宽: **1200 px**
+- `tree_frame` 内容区宽 = 1280 (root geometry) - 10 (tree_frame `pack(padx=5)`) = **1270 px 可用**
+- 余量: **70 px**
 
 注: 装下验证的精度取决于字体度量，但已有列实测都能在当前宽度正常截断；新增的「封装」列宽 75 px 也已通过历史类似列（`matroska` 类宽度）验证可行。window minsize 1000 仍能装下列（用户可继续拖动列宽自适应）。
 
