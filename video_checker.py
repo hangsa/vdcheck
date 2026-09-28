@@ -561,8 +561,8 @@ class VideoCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("视频检测 v2.1")
-        self.root.geometry("1200x700")
-        self.root.minsize(900, 500)
+        self.root.geometry("1280x700")
+        self.root.minsize(1000, 500)
 
         self.video_results: list[VideoInfo] = []
         self.scanning = False
