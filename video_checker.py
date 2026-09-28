@@ -606,8 +606,10 @@ class VideoCheckerApp:
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
 
+        # 「清除记录」放在 std_frame 行右端, 与 Row 1 浏览按钮视觉对齐
+        # pack 顺序: 所有 side='left' 控件都已在上面调用完毕, 这一行必须是最后
         ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
-            side='left', padx=(15, 0)
+            side='right', padx=(0, 5)
         )
 
         # === Main: 结果表格（自绘 VideoGridView） ===
