@@ -80,6 +80,30 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024 ** 3:.2f} GB"
 
 
+def _parse_drop_data(data: str) -> list[str]:
+    """解析 tkinterdnd2 拖拽事件 data 字段为文件路径列表。
+
+    支持两种格式:
+    - Windows: ``{file1} {file2}`` (大括号包路径, 空格分隔)
+    - macOS / Linux: ``file1 file2`` (无大括号, 空格分隔)
+
+    返回去除前后空白的文件路径列表。空字符串返回 ``[]``。
+
+    已知限制: 含空格的路径在 macOS / Linux 格式下会被错误切分;
+    这是 DND 格式本身的局限, 不在本函数能力范围。
+    """
+    import re
+    text = data.strip()
+    if not text:
+        return []
+
+    braced = re.findall(r'\{([^}]+)\}', text)
+    if braced:
+        return braced
+
+    return text.split()
+
+
 def run_ffprobe(file_path: str) -> dict | None:
     """调用 ffprobe 获取视频文件信息"""
     try:
@@ -606,10 +630,12 @@ class VideoCheckerApp:
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
 
-        # 「清除记录」放在 std_frame 行右端, 与 Row 1 浏览按钮视觉对齐
-        # pack 顺序: 所有 side='left' 控件都已在上面调用完毕, 这一行必须是最后
+        # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~150 px
+        # (约等于 Row 1 「子文件夹」+「开始检测」按钮合计宽度),
+        # 使之视觉上对齐 Row 1 的「浏览」按钮而非最右端的「开始检测」按钮。
+        # pack 顺序: 所有 side='left' 控件都已在上面调用完毕, 这一行必须是最后。
         ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
-            side='right', padx=(0, 5)
+            side='right', padx=(0, 150)
         )
 
         # === Main: 结果表格（自绘 VideoGridView） ===
@@ -902,17 +928,10 @@ class VideoCheckerApp:
             messagebox.showerror("错误", "采样率标准必须为正数。")
             return
 
-        # 解析拖拽的文件列表（Windows 格式）
-        files = event.data.strip()
-        if not files:
-            return
-
-        # 处理 {file1} {file2} ... 格式
-        import re
-        file_list = re.findall(r'\{([^}]+)\}', files)
+        # 解析拖拽的文件列表: 支持 Windows ``{file1} {file2}`` 与 macOS / Linux 空格分隔
+        file_list = _parse_drop_data(event.data)
         if not file_list:
-            # 没有大括号，直接作为文件路径
-            file_list = [files]
+            return
 
         video_files = [f for f in file_list if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
         if not video_files:
