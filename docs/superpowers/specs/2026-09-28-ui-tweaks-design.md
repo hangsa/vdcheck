@@ -1,6 +1,6 @@
 # UI Tweaks: 清除记录 按钮位置 + 新增「封装」列
 
-**日期**: 2026-09-28
+**日期**: 2026-09-28 (新增 2026-09-29 bugfix 节)
 **范围**: `video_checker.py`（单文件，单一 Tkinter 应用）
 
 ## 背景
@@ -115,3 +115,24 @@ if not container_format:
 - 不引入新的样式/主题
 - 不改 `_cell_fg` 颜色规则
 - 不加新测试文件
+
+---
+
+## 2026-09-29 后续 bugfix（已实现）
+
+### Bugfix A: 「清除记录」按钮位置 — 从 `padx=(0, 5)` 改 `padx=(0, 150)`
+
+**问题**: 第一版实现用 `side='right', padx=(0, 5)` 让按钮贴 std_frame 右边缘。std_frame 与 top_frame 共享同一右边缘, 所以按钮实际对齐到 Row 1 的「开始检测」而非「浏览」。
+
+**修复**: 把右侧 padx 从 5 改 150 px。150 ≈ Row 1「子文件夹」+「开始检测」按钮合计宽度。`side='right'` 仍保留 (语义: 靠右), 但视觉上落到「浏览」列下方。
+
+### Bugfix B: drag-drop 多文件解析
+
+**问题**: `_on_file_drop` 只识别 Windows `"{file1} {file2}"` 大括号格式。macOS / Linux DND 事件 `event.data` 是无大括号、纯空格分隔的路径列表, 旧实现把整个字符串当成单个路径, `os.path.splitext` 取不到扩展名, `VIDEO_EXTENSIONS` 检查全失败, 多文件拖拽永远弹「没有找到视频文件」。
+
+**修复**:
+- 抽出模块级 helper `_parse_drop_data(data) -> list[str]`: 优先试 `\{([^}]+)\}` 正则, 命中就回退; 否则 `split()`
+- `_on_file_drop` 改用 helper, 移除行内 regex
+- 新断言脚本 `docs/superpowers/specs/2026-09-29-dnd-parsing-assertions.py` 覆盖 Windows / macOS / Linux 三种格式共 16 case
+
+**关于"目标路径写入多个文件路径"的观察**: 用户报告 dest 路径看起来包含多个文件路径。复盘代码, `dest_var.set(os.path.join(os.path.dirname(video_files[0]), "Checked"))` 只读 `video_files[0]`, 不可能写入多个路径。用户看到的"多个路径"应该是解析失败时 dest_var 保留了上一次成功拖拽/浏览留下的旧值, 视觉上叠加了多个来源。修好 Bugfix B 之后, dest_var 会在多文件拖拽成功时正确写入 `dirname(first_file)/Checked`, 不会再保留旧值。
