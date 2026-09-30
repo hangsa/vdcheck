@@ -590,6 +590,7 @@ class VideoCheckerApp:
 
         self.video_results: list[VideoInfo] = []
         self.scanning = False
+        self.cancel_event = threading.Event()
         self.result_queue: queue.Queue = queue.Queue()
 
         self._create_widgets()
@@ -611,7 +612,7 @@ class VideoCheckerApp:
             top_frame, text="子文件夹", variable=self.recursive_var
         ).pack(side='left', padx=(10, 2))
 
-        self.scan_btn = ttk.Button(top_frame, text="开始检测", command=self._start_scan)
+        self.scan_btn = ttk.Button(top_frame, text="开始检测", command=self._on_scan_btn_click)
         self.scan_btn.pack(side='left', padx=(10, 0))
 
         # === Row 2: 码率标准 + 采样率标准 ===
@@ -630,12 +631,12 @@ class VideoCheckerApp:
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
 
-        # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~245 px,
+        # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~270 px,
         # 使之视觉上对齐 Row 1 的「文件路径」输入框右边缘（再往前一个身位,
         # 比原先对齐「浏览」的位置更靠左）。
         # pack 顺序: 所有 side='left' 控件都已在上面调用完毕, 这一行必须是最后。
         ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
-            side='right', padx=(0, 245)
+            side='right', padx=(0, 270)
         )
 
         # === Main: 结果表格（自绘 VideoGridView） ===
@@ -705,10 +706,15 @@ class VideoCheckerApp:
         if folder:
             self.dest_var.set(folder)
 
-    def _start_scan(self):
+    def _on_scan_btn_click(self):
+        """扫描按钮点击: 空闲时启动检测, 检测中触发停止。"""
         if self.scanning:
-            return
+            self.cancel_event.set()
+            self.scan_btn.config(state='disabled', text='正在停止...')
+        else:
+            self._start_scan()
 
+    def _start_scan(self):
         directory = self.path_var.get().strip()
         if not directory or not os.path.isdir(directory):
             messagebox.showerror("错误", "请输入有效的文件夹路径。")
@@ -734,8 +740,9 @@ class VideoCheckerApp:
         if not self.dest_var.get().strip():
             self.dest_var.set(os.path.join(directory, "Checked"))
 
+        self.cancel_event.clear()
         self.scanning = True
-        self.scan_btn.config(state='disabled')
+        self.scan_btn.config(text='检测中')
         self.video_results.clear()
         # 清空表格
         self.grid.clear()
@@ -762,6 +769,8 @@ class VideoCheckerApp:
             return
 
         for i, fp in enumerate(files, 1):
+            if self.cancel_event.is_set():
+                break
             self.result_queue.put(('status', f'正在检测... ({i}/{total}) {os.path.basename(fp)}'))
             data = run_ffprobe(fp)
             if data is None:
@@ -797,13 +806,17 @@ class VideoCheckerApp:
 
     def _scan_complete(self):
         """扫描完成处理"""
+        cancelled = self.cancel_event.is_set()
         self.scanning = False
-        self.scan_btn.config(state='normal')
+        self.scan_btn.config(state='normal', text='开始检测')
 
         total = len(self.video_results)
         passed = sum(1 for v in self.video_results if v.is_passing)
         failed = total - passed
-        self.status_var.set(f"检测完成：共 {total} 个视频文件，{passed} 个达标，{failed} 个不达标")
+        if cancelled:
+            self.status_var.set(f"已停止检测：已完成 {total} 个文件，{passed} 个达标，{failed} 个不达标")
+        else:
+            self.status_var.set(f"检测完成：共 {total} 个视频文件，{passed} 个达标，{failed} 个不达标")
 
     def _clear_records(self):
         """清空检测记录与目标路径（不影响阈值输入）。"""
@@ -912,6 +925,9 @@ class VideoCheckerApp:
 
     def _on_file_drop(self, event):
         """处理拖拽到窗口的文件"""
+        if self.scanning:
+            messagebox.showinfo("提示", "正在检测中，请等待完成后再添加文件。")
+            return
         try:
             bitrate_std = float(self.bitrate_var.get().strip())
             if bitrate_std <= 0:
@@ -941,8 +957,9 @@ class VideoCheckerApp:
         # 目标路径默认在第一个文件所在目录下追加 Checked 子目录
         self.dest_var.set(os.path.join(os.path.dirname(video_files[0]), "Checked"))
 
+        self.cancel_event.clear()
         self.scanning = True
-        self.scan_btn.config(state='disabled')
+        self.scan_btn.config(text='检测中')
         self.video_results.clear()
         self.grid.clear()
 
@@ -962,6 +979,8 @@ class VideoCheckerApp:
         base_path = os.path.dirname(files[0]) if files else '.'
 
         for i, fp in enumerate(files, 1):
+            if self.cancel_event.is_set():
+                break
             self.result_queue.put(('status', f'正在检测... ({i}/{len(files)}) {os.path.basename(fp)}'))
             data = run_ffprobe(fp)
             if data is None:
