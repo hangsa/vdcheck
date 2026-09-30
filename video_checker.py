@@ -591,6 +591,7 @@ class VideoCheckerApp:
         self.video_results: list[VideoInfo] = []
         self.scanning = False
         self.cancel_event = threading.Event()
+        self.total_files: int = 0
         self.result_queue: queue.Queue = queue.Queue()
 
         self._create_widgets()
@@ -742,6 +743,7 @@ class VideoCheckerApp:
 
         self.cancel_event.clear()
         self.scanning = True
+        self.total_files = 0
         self.scan_btn.config(text='检测中')
         self.video_results.clear()
         # 清空表格
@@ -761,6 +763,7 @@ class VideoCheckerApp:
         """扫描工作线程"""
         self.result_queue.put(('status', '正在扫描文件列表...'))
         files = scan_video_files(directory, recursive)
+        self.total_files = len(files)
         total = len(files)
 
         if total == 0:
@@ -810,13 +813,20 @@ class VideoCheckerApp:
         self.scanning = False
         self.scan_btn.config(state='normal', text='开始检测')
 
-        total = len(self.video_results)
+        completed = len(self.video_results)
         passed = sum(1 for v in self.video_results if v.is_passing)
-        failed = total - passed
+        failed = completed - passed
         if cancelled:
-            self.status_var.set(f"已停止检测：已完成 {total} 个文件，{passed} 个达标，{failed} 个不达标")
+            queued = self.total_files
+            pending = max(queued - completed, 0)
+            self.status_var.set(
+                f"已停止检测：共 {queued} 个视频文件，"
+                f"已完成 {completed} 个文件，"
+                f"{passed} 个达标，{failed} 个不达标，"
+                f"{pending} 个未检测"
+            )
         else:
-            self.status_var.set(f"检测完成：共 {total} 个视频文件，{passed} 个达标，{failed} 个不达标")
+            self.status_var.set(f"检测完成：共 {completed} 个视频文件，{passed} 个达标，{failed} 个不达标")
 
     def _clear_records(self):
         """清空检测记录与目标路径（不影响阈值输入）。"""
@@ -980,6 +990,7 @@ class VideoCheckerApp:
 
     def _scan_files_worker(self, files: list[str], bitrate_std: float, sample_rate_std: float):
         """扫描拖拽的文件"""
+        self.total_files = len(files)
         self.result_queue.put(('status', f'正在检测 {len(files)} 个文件...'))
         base_path = os.path.dirname(files[0]) if files else '.'
 
