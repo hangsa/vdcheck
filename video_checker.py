@@ -584,7 +584,7 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
 class VideoCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("视频检测 v2.1")
+        self.root.title("视频检测 v2.2")
         self.root.geometry("1280x700")
         self.root.minsize(1000, 500)
 
@@ -631,12 +631,12 @@ class VideoCheckerApp:
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
 
-        # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~270 px,
+        # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~272 px,
         # 使之视觉上对齐 Row 1 的「文件路径」输入框右边缘（再往前一个身位,
         # 比原先对齐「浏览」的位置更靠左）。
         # pack 顺序: 所有 side='left' 控件都已在上面调用完毕, 这一行必须是最后。
         ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
-            side='right', padx=(0, 270)
+            side='right', padx=(0, 272)
         )
 
         # === Main: 结果表格（自绘 VideoGridView） ===
@@ -699,12 +699,12 @@ class VideoCheckerApp:
         folder = filedialog.askdirectory(title="选择视频文件夹")
         if folder:
             self.path_var.set(folder)
-            self.dest_var.set(os.path.join(folder, "Checked"))
+            self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
 
     def _browse_dest(self):
         folder = filedialog.askdirectory(title="选择目标文件夹")
         if folder:
-            self.dest_var.set(folder)
+            self.dest_var.set(folder.replace('/', '\\'))
 
     def _on_scan_btn_click(self):
         """扫描按钮点击: 空闲时启动检测, 检测中触发停止。"""
@@ -738,7 +738,7 @@ class VideoCheckerApp:
 
         # 设置默认目标路径
         if not self.dest_var.get().strip():
-            self.dest_var.set(os.path.join(directory, "Checked"))
+            self.dest_var.set(os.path.join(directory, "Checked").replace('/', '\\'))
 
         self.cancel_event.clear()
         self.scanning = True
@@ -954,8 +954,13 @@ class VideoCheckerApp:
             messagebox.showinfo("提示", "没有找到视频文件。")
             return
 
-        # 目标路径默认在第一个文件所在目录下追加 Checked 子目录
-        self.dest_var.set(os.path.join(os.path.dirname(video_files[0]), "Checked"))
+        # 在文件路径输入框显示第一个被拖入的文件, 目标路径默认在
+        # 第一个文件所在目录下追加 Checked 子目录。Windows 系统下统一
+        # 使用反斜杠, 避免路径中斜杠与反斜杠交替出现。
+        self.path_var.set(video_files[0])
+        self.dest_var.set(
+            os.path.join(os.path.dirname(video_files[0]), "Checked").replace('/', '\\')
+        )
 
         self.cancel_event.clear()
         self.scanning = True
