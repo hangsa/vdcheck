@@ -964,10 +964,10 @@ class VideoCheckerApp:
             messagebox.showinfo("提示", "没有找到视频文件。")
             return
 
-        # 在文件路径输入框显示第一个被拖入的文件, 目标路径默认在
-        # 第一个文件所在目录下追加 Checked 子目录。Windows 系统下统一
+        # 在文件路径输入框显示第一个被拖入的文件所在目录（不含文件名）,
+        # 目标路径默认在该目录下追加 Checked 子目录。Windows 系统下统一
         # 使用反斜杠, 避免路径中斜杠与反斜杠交替出现。
-        self.path_var.set(video_files[0])
+        self.path_var.set(os.path.dirname(video_files[0]).replace('/', '\\'))
         self.dest_var.set(
             os.path.join(os.path.dirname(video_files[0]), "Checked").replace('/', '\\')
         )
