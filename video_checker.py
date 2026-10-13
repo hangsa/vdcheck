@@ -58,6 +58,9 @@ class VideoInfo:
     sample_rate_std: float      # NEW: 采样率阈值（kHz），扫描时写入
     full_path: str
     container_format: str = 'N/A'  # NEW: 容器格式（如 'mp4'/'matroska'），ffprobe format_name 优先，缺则回退到扩展名
+    # 排序用原始数值 (parse_video_info 写入; 默认值仅供测试夹具)
+    frame_rate_fps: float = 0.0
+    sample_rate_khz: float = 0.0
 
 
 def format_duration(seconds: float) -> str:
@@ -160,6 +163,7 @@ def parse_video_info(
 
     # 帧率
     r_frame_rate = video_stream.get('r_frame_rate', '0/1')
+    fps = 0.0
     try:
         num, den = r_frame_rate.split('/')
         fps = float(num) / float(den) if float(den) != 0 else 0
@@ -185,6 +189,7 @@ def parse_video_info(
     audio_channels = str(audio_stream.get('channels', 'N/A')) if audio_stream else 'N/A'
 
     # 音频采样率 (Hz -> kHz)
+    sample_rate_hz = 0.0
     if audio_stream is not None:
         sample_rate_raw = audio_stream.get('sample_rate')
         try:
@@ -258,11 +263,13 @@ def parse_video_info(
         title=title,
         resolution=resolution,
         frame_rate=frame_rate,
+        frame_rate_fps=fps,
         bitrate_kbps=bitrate_kbps,
         video_codec=video_codec,
         audio_codec=audio_codec,
         audio_channels=audio_channels,
         audio_sample_rate=audio_sample_rate,
+        sample_rate_khz=sample_rate_hz / 1000.0,
         duration=duration,
         file_size=file_size,
         is_passing=is_passing,
@@ -288,6 +295,47 @@ def _cell_fg(info: VideoInfo, key: str) -> str | None:
     return VideoGridView.FG_FAIL if key in failing else None
 
 
+# --- 列表头点击排序辅助函数 ---
+
+# 4 个可点击排序的列表头 (其他列表头点击无反应)。
+_SORTABLE_COLUMNS = frozenset({
+    'result', 'bitrate', 'frame_rate', 'audio_sample_rate',
+})
+
+
+def _extract_sort_key(info: VideoInfo, key: str):
+    """从 VideoInfo 取出用于排序的原始数值 / 布尔值。未知列抛 KeyError。"""
+    if key == 'result':
+        return info.is_passing
+    if key == 'bitrate':
+        return info.bitrate_kbps
+    if key == 'frame_rate':
+        return info.frame_rate_fps
+    if key == 'audio_sample_rate':
+        return info.sample_rate_khz
+    raise KeyError(key)
+
+
+def _next_sort_state(
+    current_key: str | None, current_desc: bool, clicked_key: str,
+) -> tuple[str | None, bool]:
+    """3 态循环 + 跨列切换重置到升序。返回 (new_key, new_desc)。"""
+    if clicked_key not in _SORTABLE_COLUMNS:
+        return current_key, current_desc
+    if current_key != clicked_key:
+        return clicked_key, False   # 跨列 → 升序开始
+    if not current_desc:
+        return clicked_key, True    # 升序 → 降序
+    return None, False             # 降序 → 取消
+
+
+def _header_text_with_arrow(base_text: str, is_active: bool, desc: bool) -> str:
+    """表头显示文本: 活动列附 ▲/▼, 否则原样。"""
+    if not is_active:
+        return base_text
+    return f"{base_text} ▼" if desc else f"{base_text} ▲"
+
+
 class VideoGridView:
     """自绘的可滚动表格，每个 cell 独立控制 fg。"""
 
@@ -306,6 +354,11 @@ class VideoGridView:
         self._rows: list[ttk.Frame] = []
         self._resize_state: dict | None = None
         self._cell_font = tkfont.Font(font=('TkDefaultFont', 9))
+        # 排序状态: key=None 表示无排序; desc=False 为升序, True 为降序
+        self._sort_key: str | None = None
+        self._sort_desc: bool = False
+        # 表头 Label 引用, 用于排序时改写文本 (附 ▲/▼)
+        self._header_labels: dict[str, tk.Label] = {}
         self._build()
 
     def pack(self, **kwargs):
@@ -362,6 +415,7 @@ class VideoGridView:
 
             anchor = self._column_anchor(key)
             display_heading = self._truncate_text(heading, width)
+            sortable = key in _SORTABLE_COLUMNS
             lbl = tk.Label(
                 self.header_frame,
                 text=display_heading,
@@ -369,9 +423,14 @@ class VideoGridView:
                 anchor=anchor,
                 padx=4, pady=2,
                 relief='raised', bd=1,
+                cursor='hand2' if sortable else None,
             )
             lbl.grid(row=0, column=col_idx, sticky='nsew')
             self.header_frame.grid_columnconfigure(col_idx, minsize=width, weight=1)
+            self._header_labels[key] = lbl
+            # 可排序列点击 → 触发排序; 拖拽手柄 (grab) 仍可独立 resize
+            if sortable:
+                lbl.bind('<Button-1>', lambda _e, k=key: self._on_header_click(k))
 
             # 最后一列不放手柄
             if i < n - 1:
@@ -509,6 +568,8 @@ class VideoGridView:
         row_frame = ttk.Frame(self.data_frame)
         row_frame.pack(fill='x')
         self._rows.append(row_frame)
+        # 排序时需要从 row widget 找回原始 VideoInfo
+        row_frame._info = info
 
         n = len(self.columns)
         # (key, full_text, label) — 列宽变化时按 full_text 重新截断
@@ -560,6 +621,44 @@ class VideoGridView:
         """把拖拽事件绑定到 outer（覆盖表头 + 画布，空表也能接住）。"""
         self.outer.drop_target_register('DND_Files')
         self.outer.dnd_bind('<<Drop>>', callback)
+
+    # --- 排序 ---
+
+    def is_sorted(self) -> bool:
+        """是否处于排序状态 (供 App 在扫描完成后决定是否 reorder)。"""
+        return self._sort_key is not None
+
+    def _on_header_click(self, key: str):
+        """列表头点击: 3 态循环 + 跨列重置到升序。"""
+        self._sort_key, self._sort_desc = _next_sort_state(
+            self._sort_key, self._sort_desc, key,
+        )
+        self._refresh_headers()
+        self.reorder()
+
+    def _refresh_headers(self):
+        """重写所有表头 Label 文本: 活动列附 ▲/▼, 其他列原样。"""
+        for key, lbl in self._header_labels.items():
+            base_text, width = self.columns[key]
+            is_active = (key == self._sort_key)
+            arrow = _header_text_with_arrow(base_text, is_active, self._sort_desc)
+            new_text = self._truncate_text(arrow, width)
+            if lbl.cget('text') != new_text:
+                lbl.config(text=new_text)
+
+    def reorder(self):
+        """按当前排序状态重排现有行。无排序状态或 0 行时为 no-op。"""
+        if self._sort_key is None or not self._rows:
+            return
+        infos = [r._info for r in self._rows]
+        # list.sort 稳定, 同级保留插入序
+        infos.sort(
+            key=lambda i: _extract_sort_key(i, self._sort_key),
+            reverse=self._sort_desc,
+        )
+        self.clear()
+        for info in infos:
+            self.add_row(info)
 
 
 def scan_video_files(directory: str, recursive: bool) -> list[str]:
@@ -812,6 +911,10 @@ class VideoCheckerApp:
         cancelled = self.cancel_event.is_set()
         self.scanning = False
         self.scan_btn.config(state='normal', text='开始检测')
+
+        # 扫描中途按插入序追加结果; 若已激活排序, 扫描结束统一 reorder 一次
+        if self.grid.is_sorted():
+            self.grid.reorder()
 
         completed = len(self.video_results)
         passed = sum(1 for v in self.video_results if v.is_passing)
