@@ -178,13 +178,19 @@ def run_ffprobe(file_path: str) -> dict | None:
         return None
 
 
-def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
-    """用 ffmpeg 在 seconds 处抽 1 帧, 缩放到 160 px 宽, PNG 写入 output_path.
+# 抽帧输出宽度 (px), 进度弹窗 cell 显示用 subsample(2) 缩到一半 (EXTRACT_THUMB_W/2)
+# 单帧 PNG 100-300 KB, 500 帧 50-150 MB; 弹窗可点 cell 看原图
+EXTRACT_THUMB_W = 640
 
-    磁盘上保留的就是 160 px 缩略图, 进度弹窗直接 PhotoImage(file=...) 加载。
+
+def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
+    """用 ffmpeg 在 seconds 处抽 1 帧, 缩放到 EXTRACT_THUMB_W px 宽, PNG 写入 output_path.
+
+    磁盘上保留的就是大图, 进度弹窗 cell 显示用 PhotoImage.subsample(2) 缩到一半;
+    点 cell 弹 EnlargeDialog 看原图。
     输出格式选 PNG 而非 JPEG: Tk 的 PhotoImage 原生只支持 GIF/PGM/PPM/PNG,
     不能读 JPEG, 用 PNG 才能让弹窗直接显示。
-    160x90 PNG 单帧 30-100 KB, 500 帧约 15-50 MB, 可接受。
+    640x360 PNG 单帧 100-300 KB, 500 帧约 50-150 MB, 可接受。
     ffmpeg 不可用 / 文件损坏 / 超时 / 跨平台 AttributeError 均返回 False。
     """
     try:
@@ -207,7 +213,7 @@ def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
                 '-ss', f'{seconds:.6f}',
                 '-i', input_path,
                 '-frames:v', '1',
-                '-vf', 'scale=160:-1',
+                '-vf', f'scale={EXTRACT_THUMB_W}:-1',
                 '-c:v', 'png',
                 output_path,
             ],
@@ -1199,11 +1205,12 @@ class SnapshotProgressDialog:
     - 点 cell 弹 EnlargeDialog 看 480x270 原图
     """
 
-    THUMB_DISPLAY_W = 160  # cell 显示宽度 (subsample 3 后)
-    THUMB_FULL_W = 480     # extract_frame 写盘宽度
-    THUMB_SUBSAMPLE = 3    # 480 / 160 = 3
+    THUMB_DISPLAY_W = EXTRACT_THUMB_W // 2  # cell 显示宽度 (subsample 2 后) = 320
+    THUMB_FULL_W = EXTRACT_THUMB_W          # extract_frame 写盘宽度; click-enlarge 也用这个尺寸
+    THUMB_SUBSAMPLE = 2                     # 640 / 320 = 2
     ROW_BG_PASS = '#E8F5E9'   # 浅绿
     ROW_BG_FAIL = '#FFEBEE'   # 浅红
+    TITLE_COL_WIDTH = 250     # 与主表格 title 列宽一致
 
     def __init__(
         self, parent: tk.Tk,
@@ -1220,10 +1227,10 @@ class SnapshotProgressDialog:
         self._cells_processed = 0       # 已处理 cell 数 (驱动进度条)
 
         self.top = tk.Toplevel(parent)
-        self.top.title("截图进度")
+        self.top.title("定点截图")
         self.top.transient(parent)
         self.top.grab_set()
-        self.top.geometry("900x600")
+        self.top.geometry("1200x700")
 
         # 顶部工具栏: 状态 + 进度条
         top_frame = ttk.Frame(self.top)
@@ -1256,9 +1263,11 @@ class SnapshotProgressDialog:
 
         # 列头
         n_cols = len(time_tokens)
+        # 标题列: 宽 = 主表格 title 列 (250 px), 用 minsize 强制最小宽度
+        self._inner.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
         ttk.Label(
-            self._inner, text="文件", font=('TkDefaultFont', 9, 'bold'),
-            relief='raised', width=20, anchor='w',
+            self._inner, text="标题", font=('TkDefaultFont', 9, 'bold'),
+            relief='raised', width=28, anchor='w',
         ).grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
         for c, tok in enumerate(time_tokens):
             ttk.Label(
@@ -1274,10 +1283,10 @@ class SnapshotProgressDialog:
         self._row_title_labels: list[tk.Label] = []
         for r, info in enumerate(files):
             row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
-            # 文件名 label (列 0) — tk.Label 支持 bg
+            # 文件名 label (列 0) — tk.Label 支持 bg; width=28 接近 250 px
             title_lbl = tk.Label(
                 self._inner, text=info.title, anchor='w',
-                width=20, bg=row_bg, font=('TkDefaultFont', 9),
+                width=28, bg=row_bg, font=('TkDefaultFont', 9),
                 padx=4, pady=2,
             )
             title_lbl.grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
