@@ -1152,6 +1152,175 @@ class SnapshotInputDialog:
         self.top.destroy()
 
 
+class SnapshotProgressDialog:
+    """定点截图的进度弹窗: 表格 (行=文件, 列=时间点) + 状态栏 + 取消/关闭.
+
+    自带 scrollable Canvas+Frame 布局, 不复用 VideoGridView.
+    """
+
+    THUMB_W = 160
+    THUMB_H = 90   # 16:9 缩略图 (实际高度由 ffmpeg 按比例算出, 这里是上限)
+
+    def __init__(
+        self, parent: tk.Tk,
+        files: list, time_tokens: list[str], output_dir: str,
+    ):
+        self._files = files
+        self._time_tokens = time_tokens
+        self._output_dir = output_dir
+        self._state = 'running'
+        self._failed_count = 0
+        self._closed = False
+        self._photo_refs: list[tk.PhotoImage] = []   # 阻止 PhotoImage GC
+        self._cancel_callback = None   # 由 app 设置: cancel_event.set
+
+        self.top = tk.Toplevel(parent)
+        self.top.title("截图进度")
+        self.top.transient(parent)
+        self.top.grab_set()
+        self.top.geometry("900x600")
+
+        # 顶部工具栏: 状态
+        self._status_var = tk.StringVar(value="准备中...")
+        status_bar = ttk.Label(
+            self.top, textvariable=self._status_var, anchor='w', padding=5,
+        )
+        status_bar.pack(side='top', fill='x')
+
+        # Canvas + 内嵌 Frame
+        self.canvas = tk.Canvas(self.top, highlightthickness=0)
+        self.canvas.pack(side='top', fill='both', expand=True)
+        vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
+        vsb.pack(side='right', fill='y')
+        self.canvas.config(yscrollcommand=vsb.set)
+
+        self._inner = ttk.Frame(self.canvas)
+        self._window = self.canvas.create_window(
+            (0, 0), window=self._inner, anchor='nw',
+        )
+        self._inner.bind(
+            '<Configure>',
+            lambda _e: self.canvas.config(scrollregion=self.canvas.bbox('all')),
+        )
+
+        # 列头
+        n_cols = len(time_tokens)
+        ttk.Label(
+            self._inner, text="文件", font=('TkDefaultFont', 9, 'bold'),
+            relief='raised', width=20, anchor='w',
+        ).grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+        for c, tok in enumerate(time_tokens):
+            ttk.Label(
+                self._inner,
+                text=f"T{c+1}: {time_token_to_string(tok)}",
+                font=('TkDefaultFont', 9, 'bold'),
+                relief='raised', width=14,
+            ).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
+
+        # 行 (行 = 文件, 列 = 时间点)
+        self._cells: list[list[tk.Label]] = []
+        for r, info in enumerate(files):
+            ttk.Label(
+                self._inner, text=info.title, anchor='w',
+                width=20,
+            ).grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
+            row_cells: list[tk.Label] = []
+            for c in range(n_cols):
+                cell = tk.Label(
+                    self._inner, text='…', fg='gray',
+                    padx=4, pady=2, width=14, height=5,
+                )
+                cell.grid(row=r + 1, column=c + 1, sticky='nsew', padx=1, pady=1)
+                row_cells.append(cell)
+            self._cells.append(row_cells)
+
+        # 底部按钮
+        btn_frame = ttk.Frame(self.top, padding=5)
+        btn_frame.pack(side='bottom', fill='x')
+        self._cancel_btn = ttk.Button(
+            btn_frame, text="取消", command=self._on_cancel,
+        )
+        self._cancel_btn.pack(side='right', padx=(5, 0))
+        self._close_btn = ttk.Button(
+            btn_frame, text="关闭", command=self._on_close, state='disabled',
+        )
+        self._close_btn.pack(side='right')
+
+        self.top.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._total = len(files) * n_cols
+        self._done = 0
+        self.update_status(0, self._total, "")
+
+    def mark_loading(self, r: int, c: int) -> None:
+        cell = self._cells[r][c]
+        cell.config(text='…', fg='blue', image='', compound='none')
+
+    def mark_done(self, r: int, c: int, image_path: str) -> None:
+        cell = self._cells[r][c]
+        try:
+            img = tk.PhotoImage(file=image_path)
+            self._photo_refs.append(img)
+            cell.config(image=img, text='', compound='none', fg='black')
+        except (tk.TclError, OSError):
+            self.mark_failed(r, c)
+
+    def mark_failed(self, r: int, c: int) -> None:
+        cell = self._cells[r][c]
+        cell.config(
+            text='×', fg='red',
+            font=('TkDefaultFont', 14, 'bold'),
+            image='', compound='none',
+        )
+        self._failed_count += 1
+
+    def update_status(self, done: int, total: int, current: str) -> None:
+        if self._state == 'cancelling':
+            return
+        prefix = "抽帧中" if self._state == 'running' else "已取消"
+        suffix = f" ({current})" if current else ""
+        self._status_var.set(f"{prefix} {done}/{total}{suffix}")
+
+    def mark_complete(self, done: int, total: int, cancelled: bool) -> None:
+        if cancelled:
+            self._state = 'cancelled'
+        else:
+            self._state = 'completed'
+        self._done = done
+        self._cancel_btn.config(state='disabled')
+        self._close_btn.config(state='normal')
+        status = "抽帧已取消" if cancelled else "抽帧完成"
+        self._status_var.set(
+            f"{status}: {done}/{total} ({done - self._failed_count} 成功, {self._failed_count} 失败)"
+        )
+
+    def set_cancel_callback(self, cb) -> None:
+        self._cancel_callback = cb
+
+    def _on_cancel(self) -> None:
+        if self._state != 'running':
+            return
+        self._state = 'cancelling'
+        self._cancel_btn.config(state='disabled')
+        self._status_var.set("正在取消... 等待当前帧完成")
+        if self._cancel_callback is not None:
+            self._cancel_callback()
+
+    def _on_close(self) -> None:
+        if self._state in ('running', 'cancelling'):
+            from tkinter import messagebox
+            ok = messagebox.askyesno(
+                "确认关闭", "抽帧还在进行中, 确定要关闭吗?",
+                parent=self.top,
+            )
+            if not ok:
+                return
+            if self._cancel_callback is not None:
+                self._cancel_callback()
+        self._closed = True
+        self._photo_refs.clear()
+        self.top.destroy()
+
+
 def scan_video_files(directory: str, recursive: bool) -> list[str]:
     """扫描目录获取视频文件列表"""
     files = []
