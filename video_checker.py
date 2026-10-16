@@ -1251,6 +1251,11 @@ class SnapshotProgressDialog:
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
         vsb.pack(side='right', fill='y')
         self.canvas.config(yscrollcommand=vsb.set)
+        # Mouse wheel: Windows/macOS = <MouseWheel>, Linux (X11) = <Button-4/5>
+        # bind (不是 bind_all) 避免和主窗口 grid 冲突; 模态时主窗被 grab 锁, 无冲突
+        self.canvas.bind('<MouseWheel>', self._on_mousewheel)
+        self.canvas.bind('<Button-4>', self._on_mousewheel_linux)
+        self.canvas.bind('<Button-5>', self._on_mousewheel_linux)
 
         self._inner = ttk.Frame(self.canvas)
         self._window = self.canvas.create_window(
@@ -1403,6 +1408,15 @@ class SnapshotProgressDialog:
             image_path=cell._image_path,
             title=f"{info.title} @ T{c + 1}",
         )
+
+    def _on_mousewheel(self, event) -> None:
+        """Windows / macOS 滚轮: yview_scroll 按 delta/120 滚动行数"""
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+    def _on_mousewheel_linux(self, event) -> None:
+        """Linux (X11) 滚轮: Button-4 向上 / Button-5 向下"""
+        delta = -1 if event.num == 4 else 1
+        self.canvas.yview_scroll(delta, 'units')
 
     def _on_cancel(self) -> None:
         if self._state != 'running':
