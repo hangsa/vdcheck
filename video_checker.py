@@ -985,7 +985,7 @@ class SnapshotInputDialog:
         (time_tokens, output_dir) = 用户确认
     """
 
-    def __init__(self, parent: tk.Tk):
+    def __init__(self, parent: tk.Tk, default_output_dir: str = ''):
         self.result: tuple[list[str], str] | None = None
         self.top = tk.Toplevel(parent)
         self.top.title("定点截图")
@@ -1016,7 +1016,7 @@ class SnapshotInputDialog:
         self._dir_frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
         self._dir_frame.pack(fill='x')
         ttk.Label(self._dir_frame, text="输出目录:").pack(side='left')
-        self.dir_var = tk.StringVar()
+        self.dir_var = tk.StringVar(value=default_output_dir)
         self.dir_entry = ttk.Entry(self._dir_frame, textvariable=self.dir_var)
         self.dir_entry.pack(side='left', fill='x', expand=True, padx=(5, 2))
         ttk.Button(
@@ -1618,7 +1618,20 @@ class VideoCheckerApp:
         if not self.video_results:
             messagebox.showinfo("提示", "请先扫描视频。")
             return
-        dlg = SnapshotInputDialog(self.root)
+        # 默认输出目录 = <文件路径>\snapshot; 若父目录存在则自动建子目录
+        # Windows 路径用反斜杠保持与项目其余处一致; macOS 留正斜杠
+        # (macOS 上 os.path.isdir 不识别反斜杠路径, 不能盲目套用)
+        default_dir = ''
+        parent = self.path_var.get().strip()
+        if parent and os.path.isdir(parent):
+            default_dir = os.path.join(parent, 'snapshot')
+            if sys.platform == 'win32':
+                default_dir = default_dir.replace('/', '\\')
+            try:
+                os.makedirs(default_dir, exist_ok=True)
+            except OSError:
+                default_dir = ''  # 建不出来就留空, 让用户自己填
+        dlg = SnapshotInputDialog(self.root, default_output_dir=default_dir)
         self.root.wait_window(dlg.top)
         if dlg.result is None:
             return
