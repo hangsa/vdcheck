@@ -1352,6 +1352,9 @@ class VideoCheckerApp:
         self.cancel_event = threading.Event()
         self.total_files: int = 0
         self.result_queue: queue.Queue = queue.Queue()
+        self.snapshot_cancel_event: threading.Event = threading.Event()
+        self.snapshot_result_queue: queue.Queue = queue.Queue()
+        self.snapshot_progress_dialog: SnapshotProgressDialog | None = None
 
         self._create_widgets()
 
@@ -1397,6 +1400,9 @@ class VideoCheckerApp:
         # pack 顺序: 所有 side='left' 控件都已在上面调用完毕, 这一行必须是最后。
         ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
             side='right', padx=(0, 272)
+        )
+        ttk.Button(std_frame, text="定点截图", command=self._on_snapshot_btn_click).pack(
+            side='right', padx=(0, 5)
         )
 
         # === Main: 结果表格（自绘 VideoGridView） ===
@@ -1600,6 +1606,130 @@ class VideoCheckerApp:
         self.grid.clear()
         self.dest_var.set('')
         self.status_var.set("已清除记录")
+
+    def _on_snapshot_btn_click(self):
+        """「定点截图」按钮: 弹输入对话框, 校验后启动 worker."""
+        if self.scanning:
+            messagebox.showinfo("提示", "正在检测中, 请等待完成后再截图。")
+            return
+        if not self.video_results:
+            messagebox.showinfo("提示", "请先扫描视频。")
+            return
+        dlg = SnapshotInputDialog(self.root)
+        self.root.wait_window(dlg.top)
+        if dlg.result is None:
+            return
+        time_tokens, output_dir = dlg.result
+        self._start_snapshot(time_tokens, output_dir)
+
+    def _start_snapshot(self, time_tokens: list[str], output_dir: str) -> None:
+        """启动抽帧 worker; 创建进度弹窗并绑定取消回调."""
+        ffmpeg_path = get_ffmpeg_path()
+        if not (os.path.exists(ffmpeg_path) or shutil.which('ffmpeg')):
+            messagebox.showerror(
+                "错误", f"未找到 ffmpeg (尝试 {ffmpeg_path!r}), 无法截图。\n请安装 ffmpeg 或使用 build.bat 完整构建。"
+            )
+            return
+        self.snapshot_cancel_event = threading.Event()
+        self.snapshot_result_queue = queue.Queue()
+        self.snapshot_progress_dialog = SnapshotProgressDialog(
+            self.root,
+            files=self.video_results,
+            time_tokens=time_tokens,
+            output_dir=output_dir,
+        )
+        self.snapshot_progress_dialog.set_cancel_callback(
+            self.snapshot_cancel_event.set
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        t = threading.Thread(
+            target=self._snapshot_worker,
+            args=(time_tokens, output_dir),
+            daemon=True,
+        )
+        t.start()
+        self._snapshot_check_queue()
+
+    def _snapshot_worker(self, time_tokens: list[str], output_dir: str) -> None:
+        """后台线程: 对每个文件 × 时间点顺序调 ffmpeg 抽帧."""
+        files = self.video_results
+        n_files = len(files)
+        n_times = len(time_tokens)
+        total = n_files * n_times
+        done = 0
+        for r, info in enumerate(files):
+            if self.snapshot_cancel_event.is_set():
+                break
+            for c, token in enumerate(time_tokens):
+                if self.snapshot_cancel_event.is_set():
+                    break
+                self.snapshot_result_queue.put(('cell_start', (r, c)))
+                self.snapshot_result_queue.put(('progress', (done, total, info.title)))
+                try:
+                    seconds = parse_time_token(token, info.frame_rate_fps)
+                except ValueError:
+                    self.snapshot_result_queue.put(('cell_failed', (r, c)))
+                    done += 1
+                    continue
+                base = os.path.splitext(info.title)[0] or 'video'
+                out_name = f"{base}_t{c + 1}_{time_token_to_string(token)}.jpg"
+                out_path = os.path.join(output_dir, out_name)
+                ok = extract_frame(info.full_path, seconds, out_path)
+                if ok:
+                    self.snapshot_result_queue.put(('cell_done', (r, c, out_path)))
+                else:
+                    self.snapshot_result_queue.put(('cell_failed', (r, c)))
+                done += 1
+        self.snapshot_result_queue.put(
+            ('done', (done, total, self.snapshot_cancel_event.is_set()))
+        )
+
+    def _snapshot_check_queue(self) -> None:
+        """主线程 100ms 轮询: 消费 cell 状态/进度消息, 分发到进度弹窗."""
+        try:
+            while True:
+                msg_type, payload = self.snapshot_result_queue.get_nowait()
+                if msg_type == 'cell_start':
+                    r, c = payload
+                    if self.snapshot_progress_dialog is not None:
+                        self.snapshot_progress_dialog.mark_loading(r, c)
+                elif msg_type == 'cell_done':
+                    r, c, path = payload
+                    if self.snapshot_progress_dialog is not None:
+                        self.snapshot_progress_dialog.mark_done(r, c, path)
+                elif msg_type == 'cell_failed':
+                    r, c = payload
+                    if self.snapshot_progress_dialog is not None:
+                        self.snapshot_progress_dialog.mark_failed(r, c)
+                elif msg_type == 'progress':
+                    done, total, current = payload
+                    if self.snapshot_progress_dialog is not None:
+                        self.snapshot_progress_dialog.update_status(done, total, current)
+                elif msg_type == 'done':
+                    done, total, cancelled = payload
+                    if self.snapshot_progress_dialog is not None:
+                        self.snapshot_progress_dialog.mark_complete(done, total, cancelled)
+                    self._on_snapshot_complete(done, total, cancelled)
+                    return
+        except queue.Empty:
+            pass
+        if (self.snapshot_progress_dialog is not None
+                and not self.snapshot_progress_dialog._closed):
+            self.root.after(100, self._snapshot_check_queue)
+
+    def _on_snapshot_complete(self, done: int, total: int, cancelled: bool) -> None:
+        """抽帧完成 (含取消): 改主窗口状态栏."""
+        failed = (self.snapshot_progress_dialog._failed_count
+                  if self.snapshot_progress_dialog is not None else 0)
+        succeeded = max(0, done - failed)
+        if cancelled:
+            self.status_var.set(
+                f"抽帧已取消: 已完成 {done}/{total} ({succeeded} 成功, {failed} 失败)"
+            )
+        else:
+            self.status_var.set(
+                f"抽帧完成: {succeeded}/{total} 成功, {failed} 失败"
+            )
 
     def _move_passing_files(self):
         """移动达标文件到目标目录"""
