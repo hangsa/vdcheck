@@ -179,9 +179,12 @@ def run_ffprobe(file_path: str) -> dict | None:
 
 
 def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
-    """用 ffmpeg 在 seconds 处抽 1 帧, 缩放到 160 px 宽, JPEG q=5 写入 output_path.
+    """用 ffmpeg 在 seconds 处抽 1 帧, 缩放到 160 px 宽, PNG 写入 output_path.
 
     磁盘上保留的就是 160 px 缩略图, 进度弹窗直接 PhotoImage(file=...) 加载。
+    输出格式选 PNG 而非 JPEG: Tk 的 PhotoImage 原生只支持 GIF/PGM/PPM/PNG,
+    不能读 JPEG, 用 PNG 才能让弹窗直接显示。
+    160x90 PNG 单帧 30-100 KB, 500 帧约 15-50 MB, 可接受。
     ffmpeg 不可用 / 文件损坏 / 超时 / 跨平台 AttributeError 均返回 False。
     """
     try:
@@ -205,7 +208,7 @@ def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
                 '-i', input_path,
                 '-frames:v', '1',
                 '-vf', 'scale=160:-1',
-                '-q:v', '5',
+                '-c:v', 'png',
                 output_path,
             ],
             **kwargs,
@@ -1672,7 +1675,7 @@ class VideoCheckerApp:
                     done += 1
                     continue
                 base = os.path.splitext(info.title)[0] or 'video'
-                out_name = f"{base}_t{c + 1}_{time_token_to_string(token)}.jpg"
+                out_name = f"{base}_t{c + 1}_{time_token_to_string(token)}.png"
                 out_path = os.path.join(output_dir, out_name)
                 ok = extract_frame(info.full_path, seconds, out_path)
                 if ok:

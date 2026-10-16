@@ -178,11 +178,13 @@ def time_token_to_string(token: str) -> str:
 
 ### 4.4 抽帧 — `extract_frame(input, seconds, output_path)`
 
-抽帧时同时缩放到 160 px 宽 (高度按原比例), JPEG q=5 写入 output_path。**磁盘上保留的就是缩略图**, 弹窗直接 `PhotoImage(file=...)` 显示, 内存与磁盘都只存一份。
+抽帧时同时缩放到 160 px 宽 (高度按原比例), **PNG** 写入 output_path。**磁盘上保留的就是缩略图**, 弹窗直接 `PhotoImage(file=...)` 显示, 内存与磁盘都只存一份。
+
+> **重要: 输出格式为 PNG, 不是 JPEG**。原 plan 写 JPEG q=5, 但 Tk 的 `PhotoImage` 原生只支持 GIF / PGM / PPM / PNG, **不能读 JPEG**——这会导致弹窗里所有 cell 走 `mark_failed` 兜底显示红 ×, 而磁盘上的 jpg 文件其实生成成功。切换到 PNG 解决。160x90 PNG 单帧 30-100 KB, 500 帧约 15-50 MB, 可接受 (比 JPEG 5-15 KB/帧 略大)。
 
 ```python
 def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
-    """用 ffmpeg 在 seconds 处抽 1 帧, 缩放到 160 px 宽, JPEG q=5 写入 output_path。返回是否成功。"""
+    """用 ffmpeg 在 seconds 处抽 1 帧, 缩放到 160 px 宽, PNG 写入 output_path。返回是否成功。"""
     try:
         ffmpeg = get_ffmpeg_path()
         startupinfo = subprocess.STARTUPINFO()
@@ -195,7 +197,7 @@ def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
                 '-i', input_path,
                 '-frames:v', '1',              # 仅 1 帧
                 '-vf', 'scale=160:-1',         # 缩到 160 px 宽, 高度按比例
-                '-q:v', '5',                   # JPEG 质量
+                '-c:v', 'png',                 # PNG 编码 (Tk PhotoImage 可读)
                 output_path,
             ],
             stdin=subprocess.DEVNULL,

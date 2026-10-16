@@ -110,20 +110,21 @@ if __name__ == "__main__":
             ], check=True, capture_output=True)
             check("合成测试视频成功", os.path.exists(test_mp4))
 
-            out_jpg = os.path.join(td, "frame.jpg")
-            ok = extract_frame(test_mp4, 0.5, out_jpg)
+            out_png = os.path.join(td, "frame.png")
+            ok = extract_frame(test_mp4, 0.5, out_png)
             check("extract_frame 0.5s 成功", ok)
-            check("输出 jpg 存在", os.path.exists(out_jpg))
-            check("输出 jpg 非空", os.path.getsize(out_jpg) > 0)
+            check("输出 png 存在", os.path.exists(out_png))
+            check("输出 png 非空", os.path.getsize(out_png) > 0)
 
-            # 验证 jpg magic bytes
-            with open(out_jpg, 'rb') as f:
-                head = f.read(3)
-            check("输出是 JPEG (FF D8 FF)", head == b'\xff\xd8\xff',
+            # 验证 png magic bytes (89 50 4E 47 0D 0A 1A 0A)
+            with open(out_png, 'rb') as f:
+                head = f.read(8)
+            check("输出是 PNG (89 50 4E 47 0D 0A 1A 0A)",
+                  head == b'\x89PNG\r\n\x1a\n',
                   f"got={head!r}")
 
         # 错误情况: 不存在的文件
-        ok = extract_frame("/nonexistent/video.mp4", 0.0, "/tmp/out.jpg")
+        ok = extract_frame("/nonexistent/video.mp4", 0.0, "/tmp/out.png")
         check("不存在文件 → False", ok is False)
 
         # 错误情况: 损坏文件
@@ -131,7 +132,7 @@ if __name__ == "__main__":
             bad = os.path.join(td, "bad.mp4")
             with open(bad, 'wb') as f:
                 f.write(b'this is not a video')
-            out = os.path.join(td, "out.jpg")
+            out = os.path.join(td, "out.png")
             ok = extract_frame(bad, 0.0, out)
             check("损坏文件 → False", ok is False)
             check("损坏文件 → 无输出", not os.path.exists(out))
