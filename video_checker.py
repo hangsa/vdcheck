@@ -1293,10 +1293,12 @@ class SnapshotProgressDialog:
             self._row_title_labels.append(title_lbl)
             row_cells: list[tk.Label] = []
             for c in range(n_cols):
+                # width/height 不设: 设了会压制 compound='center' + image 的尺寸,
+                # 让 cell 按字符算 14x5 chars ≈ 136x25 px, 装不下 320x180 image。
+                # text-only 状态 (loading/failed) 由 compound='none' + text 自动算尺寸。
                 cell = tk.Label(
                     self._inner, text='…', fg='gray', bg=row_bg,
-                    padx=4, pady=2, width=14, height=5,
-                    cursor='hand2',   # 暗示可点击
+                    padx=4, pady=2, cursor='hand2',
                 )
                 cell.grid(row=r + 1, column=c + 1, sticky='nsew', padx=1, pady=1)
                 # 绑定点击, 只在 completed/cancelled 状态生效
@@ -1338,10 +1340,13 @@ class SnapshotProgressDialog:
         try:
             full = tk.PhotoImage(file=image_path)
             self._photo_refs.append(full)
-            # cell 内显示用缩到 160 宽 (subsample 3); 弹出看原图用 full
+            # cell 内显示用缩到一半 (subsample 2); 弹出看原图用 full
             display = full.subsample(self.THUMB_SUBSAMPLE, self.THUMB_SUBSAMPLE)
             self._photo_refs.append(display)
-            cell.config(image=display, text='', compound='none', fg='black')
+            # compound='center' 必填: tk.Label 只认 none/center/left/right/top/bottom,
+            # 'none' 会忽略 image, cell 按 width=14 chars / height=5 chars ≈ 136x25 px
+            # 装不下 320x180 image; 'center' + text='' 把 image 算进尺寸 (324x244)
+            cell.config(image=display, text='', compound='center', fg='black')
         except (tk.TclError, OSError):
             self.mark_failed(r, c)
             return
