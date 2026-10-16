@@ -1155,14 +1155,55 @@ class SnapshotInputDialog:
         self.top.destroy()
 
 
+class EnlargeDialog:
+    """点击缩略图后弹出的原图查看窗口.
+
+    加载磁盘上的 PNG (extract_frame 写的 480x270 大图) 到 Toplevel,
+    按图实际尺寸 + padding 调整窗口大小。
+    """
+
+    def __init__(
+        self, parent: tk.Toplevel,
+        image_path: str, title: str,
+    ):
+        self.top = tk.Toplevel(parent)
+        self.top.title(title)
+        self.top.transient(parent)
+        self.top.configure(bg='#202020')
+        # 持有 PhotoImage 防 GC
+        self._photo: tk.PhotoImage = tk.PhotoImage(file=image_path)
+        img_label = tk.Label(self.top, image=self._photo, bg='#202020')
+        img_label.pack(padx=12, pady=(12, 6))
+        # 路径信息
+        path_lbl = tk.Label(
+            self.top, text=image_path, fg='#cccccc', bg='#202020',
+            font=('TkDefaultFont', 9), wraplength=max(self._photo.width(), 400),
+        )
+        path_lbl.pack(padx=12)
+        ttk.Button(self.top, text="关闭", command=self.top.destroy).pack(pady=(6, 12))
+        self.top.update_idletasks()
+        # 按图实际尺寸 + padding 调整窗口
+        w = self._photo.width() + 24
+        h = self._photo.height() + 90
+        self.top.geometry(f"{w}x{h}")
+
+
 class SnapshotProgressDialog:
     """定点截图的进度弹窗: 表格 (行=文件, 列=时间点) + 状态栏 + 取消/关闭.
 
     自带 scrollable Canvas+Frame 布局, 不复用 VideoGridView.
+
+    显示特性:
+    - 顶部水平进度条 (X/Y) + 文字状态
+    - 整行染色: pass=浅绿 / fail=浅红, 一眼看出问题文件
+    - 点 cell 弹 EnlargeDialog 看 480x270 原图
     """
 
-    THUMB_W = 160
-    THUMB_H = 90   # 16:9 缩略图 (实际高度由 ffmpeg 按比例算出, 这里是上限)
+    THUMB_DISPLAY_W = 160  # cell 显示宽度 (subsample 3 后)
+    THUMB_FULL_W = 480     # extract_frame 写盘宽度
+    THUMB_SUBSAMPLE = 3    # 480 / 160 = 3
+    ROW_BG_PASS = '#E8F5E9'   # 浅绿
+    ROW_BG_FAIL = '#FFEBEE'   # 浅红
 
     def __init__(
         self, parent: tk.Tk,
@@ -1176,6 +1217,7 @@ class SnapshotProgressDialog:
         self._closed = False
         self._photo_refs: list[tk.PhotoImage] = []   # 阻止 PhotoImage GC
         self._cancel_callback = None   # 由 app 设置: cancel_event.set
+        self._cells_processed = 0       # 已处理 cell 数 (驱动进度条)
 
         self.top = tk.Toplevel(parent)
         self.top.title("截图进度")
@@ -1183,12 +1225,18 @@ class SnapshotProgressDialog:
         self.top.grab_set()
         self.top.geometry("900x600")
 
-        # 顶部工具栏: 状态
+        # 顶部工具栏: 状态 + 进度条
+        top_frame = ttk.Frame(self.top)
+        top_frame.pack(side='top', fill='x')
         self._status_var = tk.StringVar(value="准备中...")
         status_bar = ttk.Label(
-            self.top, textvariable=self._status_var, anchor='w', padding=5,
+            top_frame, textvariable=self._status_var, anchor='w', padding=(8, 5),
         )
         status_bar.pack(side='top', fill='x')
+        self._progress = ttk.Progressbar(
+            top_frame, mode='determinate', length=400,
+        )
+        self._progress.pack(side='top', fill='x', padx=8, pady=(0, 4))
 
         # Canvas + 内嵌 Frame
         self.canvas = tk.Canvas(self.top, highlightthickness=0)
@@ -1221,19 +1269,34 @@ class SnapshotProgressDialog:
             ).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
 
         # 行 (行 = 文件, 列 = 时间点)
+        # 整行染色按 info.is_passing; file title 改 tk.Label (ttk 不支持 bg)
         self._cells: list[list[tk.Label]] = []
+        self._row_title_labels: list[tk.Label] = []
         for r, info in enumerate(files):
-            ttk.Label(
+            row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
+            # 文件名 label (列 0) — tk.Label 支持 bg
+            title_lbl = tk.Label(
                 self._inner, text=info.title, anchor='w',
-                width=20,
-            ).grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
+                width=20, bg=row_bg, font=('TkDefaultFont', 9),
+                padx=4, pady=2,
+            )
+            title_lbl.grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
+            self._row_title_labels.append(title_lbl)
             row_cells: list[tk.Label] = []
             for c in range(n_cols):
                 cell = tk.Label(
-                    self._inner, text='…', fg='gray',
+                    self._inner, text='…', fg='gray', bg=row_bg,
                     padx=4, pady=2, width=14, height=5,
+                    cursor='hand2',   # 暗示可点击
                 )
                 cell.grid(row=r + 1, column=c + 1, sticky='nsew', padx=1, pady=1)
+                # 绑定点击, 只在 completed/cancelled 状态生效
+                cell.bind(
+                    '<Button-1>',
+                    lambda _e, r=r, c=c: self._on_cell_click(r, c),
+                )
+                # image_path 在 mark_done 时填, 给 click 弹窗用
+                cell._image_path: str | None = None
                 row_cells.append(cell)
             self._cells.append(row_cells)
 
@@ -1252,6 +1315,8 @@ class SnapshotProgressDialog:
         self.top.protocol("WM_DELETE_WINDOW", self._on_close)
         self._total = len(files) * n_cols
         self._done = 0
+        self._progress['maximum'] = max(self._total, 1)
+        self._progress['value'] = 0
         self.update_status(0, self._total, "")
 
     def mark_loading(self, r: int, c: int) -> None:
@@ -1260,21 +1325,31 @@ class SnapshotProgressDialog:
 
     def mark_done(self, r: int, c: int, image_path: str) -> None:
         cell = self._cells[r][c]
+        cell._image_path = image_path
         try:
-            img = tk.PhotoImage(file=image_path)
-            self._photo_refs.append(img)
-            cell.config(image=img, text='', compound='none', fg='black')
+            full = tk.PhotoImage(file=image_path)
+            self._photo_refs.append(full)
+            # cell 内显示用缩到 160 宽 (subsample 3); 弹出看原图用 full
+            display = full.subsample(self.THUMB_SUBSAMPLE, self.THUMB_SUBSAMPLE)
+            self._photo_refs.append(display)
+            cell.config(image=display, text='', compound='none', fg='black')
         except (tk.TclError, OSError):
             self.mark_failed(r, c)
+            return
+        self._cells_processed += 1
+        self._progress['value'] = self._cells_processed
 
     def mark_failed(self, r: int, c: int) -> None:
         cell = self._cells[r][c]
+        cell._image_path = None
         cell.config(
             text='×', fg='red',
             font=('TkDefaultFont', 14, 'bold'),
             image='', compound='none',
         )
         self._failed_count += 1
+        self._cells_processed += 1
+        self._progress['value'] = self._cells_processed
 
     def update_status(self, done: int, total: int, current: str) -> None:
         if self._state == 'cancelling':
@@ -1295,9 +1370,25 @@ class SnapshotProgressDialog:
         self._status_var.set(
             f"{status}: {done}/{total} ({done - self._failed_count} 成功, {self._failed_count} 失败)"
         )
+        # 进度条拉满 (cancelled 时也拉, 表示处理进度已完成)
+        self._progress['value'] = self._progress['maximum']
 
     def set_cancel_callback(self, cb) -> None:
         self._cancel_callback = cb
+
+    def _on_cell_click(self, r: int, c: int) -> None:
+        """点 cell 弹 EnlargeDialog 看原图. 仅 completed/cancelled 状态生效."""
+        if self._state not in ('completed', 'cancelled'):
+            return
+        cell = self._cells[r][c]
+        if not cell._image_path:
+            return
+        info = self._files[r]
+        EnlargeDialog(
+            self.top,
+            image_path=cell._image_path,
+            title=f"{info.title} @ T{c + 1}",
+        )
 
     def _on_cancel(self) -> None:
         if self._state != 'running':
