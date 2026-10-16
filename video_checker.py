@@ -1465,7 +1465,7 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
 class VideoCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("视频检测 v2.2")
+        self.root.title("视频检测v3.0")
         self.root.geometry("1280x700")
         self.root.minsize(1000, 500)
 
@@ -1515,6 +1515,10 @@ class VideoCheckerApp:
         self.sample_rate_entry = ttk.Entry(std_frame, textvariable=self.sample_rate_var, width=10)
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
+        # 「定点截图」放在采样率单位 kHz 后面, 与其他 left-pack 控件一行
+        ttk.Button(std_frame, text="定点截图", command=self._on_snapshot_btn_click).pack(
+            side='left', padx=(10, 0)
+        )
 
         # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~272 px,
         # 使之视觉上对齐 Row 1 的「文件路径」输入框右边缘（再往前一个身位,
@@ -1522,9 +1526,6 @@ class VideoCheckerApp:
         # pack 顺序: 所有 side='left' 控件都已在上面调用完毕, 这一行必须是最后。
         ttk.Button(std_frame, text="清除记录", command=self._clear_records).pack(
             side='right', padx=(0, 272)
-        )
-        ttk.Button(std_frame, text="定点截图", command=self._on_snapshot_btn_click).pack(
-            side='right', padx=(0, 5)
         )
 
         # === Main: 结果表格（自绘 VideoGridView） ===
