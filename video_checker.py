@@ -1010,7 +1010,7 @@ class SnapshotInputDialog:
         self._entries: list[ttk.Entry] = []
         self._rows_frame = ttk.Frame(self._time_frame)
         self._rows_frame.pack(fill='x', pady=(5, 0))
-        for default in ("00:00:10:00", "00:01:30:00"):
+        for default in ("00:00:07:24", "00:00:08:00"):
             self._add_time_row(default)
 
         ttk.Button(
