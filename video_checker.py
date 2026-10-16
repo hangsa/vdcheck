@@ -974,6 +974,184 @@ class VideoGridView:
         self._render_visible(force=True)
 
 
+class SnapshotInputDialog:
+    """定点截图的输入对话框: 时间点列表 + 输出目录, 模态.
+
+    关闭后通过 dlg.result 取值:
+        None = 用户取消
+        (time_tokens, output_dir) = 用户确认
+    """
+
+    def __init__(self, parent: tk.Tk):
+        self.result: tuple[list[str], str] | None = None
+        self.top = tk.Toplevel(parent)
+        self.top.title("定点截图")
+        self.top.transient(parent)
+        self.top.grab_set()
+        self.top.resizable(False, False)
+
+        # 时间点区
+        self._time_frame = ttk.Frame(self.top, padding=10)
+        self._time_frame.pack(fill='x')
+
+        ttk.Label(self._time_frame, text="时间点 (HH:MM:SS:frame):").pack(
+            side='top', anchor='w'
+        )
+
+        self._entries: list[ttk.Entry] = []
+        self._rows_frame = ttk.Frame(self._time_frame)
+        self._rows_frame.pack(fill='x', pady=(5, 0))
+        for default in ("00:00:10:00", "00:01:30:00"):
+            self._add_time_row(default)
+
+        ttk.Button(
+            self._time_frame, text="+ 添加时间点",
+            command=lambda: self._add_time_row("00:00:00:00"),
+        ).pack(side='top', anchor='w', pady=(5, 0))
+
+        # 输出目录区
+        self._dir_frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
+        self._dir_frame.pack(fill='x')
+        ttk.Label(self._dir_frame, text="输出目录:").pack(side='left')
+        self.dir_var = tk.StringVar()
+        self.dir_entry = ttk.Entry(self._dir_frame, textvariable=self.dir_var)
+        self.dir_entry.pack(side='left', fill='x', expand=True, padx=(5, 2))
+        ttk.Button(
+            self._dir_frame, text="浏览",
+            command=self._browse_dir,
+        ).pack(side='left')
+
+        # 错误标签 (校验失败时显示)
+        self._err_var = tk.StringVar()
+        self._err_label = ttk.Label(
+            self.top, textvariable=self._err_var, foreground='red',
+            padding=(10, 0),
+        )
+        self._err_label.pack(fill='x')
+
+        # 确认 / 取消
+        btn_frame = ttk.Frame(self.top, padding=10)
+        btn_frame.pack(fill='x')
+        self._confirm_btn = ttk.Button(
+            btn_frame, text="确认", command=self._on_confirm,
+        )
+        self._confirm_btn.pack(side='right', padx=(5, 0))
+        ttk.Button(
+            btn_frame, text="取消", command=self._on_cancel,
+        ).pack(side='right')
+
+        self.top.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        # 居中到 parent
+        self.top.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.top.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.top.winfo_height()) // 2
+        self.top.geometry(f"+{x}+{y}")
+        # 实时校验
+        for e in self._entries:
+            e.bind('<KeyRelease>', lambda _ev: self._validate())
+        self.dir_var.trace_add('write', lambda *_: self._validate())
+        self._validate()
+
+    def _add_time_row(self, default: str) -> None:
+        row = ttk.Frame(self._rows_frame)
+        row.pack(fill='x', pady=2)
+        idx = len(self._entries)
+        lbl = ttk.Label(row, text=f"时间点 {idx + 1}:", width=8)
+        lbl.pack(side='left')
+        var = tk.StringVar(value=default)
+        e = ttk.Entry(row, textvariable=var, width=15)
+        e.pack(side='left', padx=(0, 5))
+        var.trace_add('write', lambda *_: self._validate())
+        e._var = var  # 保持引用, 防 GC
+        del_btn = ttk.Button(
+            row, text="删除", width=6,
+            command=lambda: self._remove_time_row(e),
+        )
+        del_btn.pack(side='left')
+        e._del_btn = del_btn
+        e._lbl = lbl
+        self._entries.append(e)
+        self._refresh_delete_visibility()
+
+    def _remove_time_row(self, entry: ttk.Entry) -> None:
+        if len(self._entries) <= 1:
+            return
+        idx = self._entries.index(entry)
+        entry._var.set('')
+        entry._del_btn.destroy()
+        entry._lbl.destroy()
+        entry.master.destroy()
+        self._entries.pop(idx)
+        # 重编号
+        for i, e in enumerate(self._entries):
+            e._lbl.config(text=f"时间点 {i + 1}:")
+        self._refresh_delete_visibility()
+        self._validate()
+
+    def _refresh_delete_visibility(self) -> None:
+        # 至少保留 1 个时间点, 所以只有 1 个时隐藏删除按钮
+        show = len(self._entries) > 1
+        for e in self._entries:
+            e._del_btn.pack(side='left') if show else e._del_btn.pack_forget()
+
+    def _browse_dir(self) -> None:
+        from tkinter import filedialog
+        folder = filedialog.askdirectory(
+            title="选择截图输出目录", parent=self.top,
+        )
+        if folder:
+            self.dir_var.set(folder.replace('/', '\\'))
+
+    def _validate(self) -> None:
+        """实时校验所有输入; 任一非法时禁用确认按钮 + 标红."""
+        # 时间点
+        for e in self._entries:
+            e.config(foreground='black')
+        bad_time = None
+        for e in self._entries:
+            v = e._var.get().strip()
+            if not v:
+                bad_time = "时间点不能为空"
+                e.config(foreground='red')
+                break
+            parts = v.split(':')
+            if len(parts) != 4:
+                bad_time = f"格式错误: {v!r} (应为 HH:MM:SS:frame)"
+                e.config(foreground='red')
+                break
+            try:
+                h, m, s, f = (int(p) for p in parts)
+                if h < 0 or m < 0 or s < 0 or f < 0 or m > 59 or s > 59:
+                    bad_time = f"数值越界: {v!r}"
+                    e.config(foreground='red')
+                    break
+            except ValueError:
+                bad_time = f"非数字段: {v!r}"
+                e.config(foreground='red')
+                break
+        # 输出目录
+        dir_ok = False
+        d = self.dir_var.get().strip()
+        if d and os.path.isdir(d):
+            dir_ok = True
+
+        err = bad_time
+        if not err and not dir_ok:
+            err = "请选择有效的输出目录"
+        self._err_var.set(err or "")
+        self._confirm_btn.config(state='normal' if (not err) else 'disabled')
+
+    def _on_confirm(self) -> None:
+        tokens = [e._var.get().strip() for e in self._entries]
+        output_dir = self.dir_var.get().strip()
+        self.result = (tokens, output_dir)
+        self.top.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.top.destroy()
+
+
 def scan_video_files(directory: str, recursive: bool) -> list[str]:
     """扫描目录获取视频文件列表"""
     files = []
