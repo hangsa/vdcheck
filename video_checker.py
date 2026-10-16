@@ -1246,11 +1246,14 @@ class SnapshotProgressDialog:
         self._progress.pack(side='top', fill='x', padx=8, pady=(0, 4))
 
         # Canvas + 内嵌 Frame
+        # 关键: vsb 先 pack 抢右侧条, canvas 后 pack 拿 expand 填剩余空间。
+        # 反过来 canvas 先 pack(side='top', expand=True) 会吞掉全部宽,
+        # vsb 后 pack 只剩 ~15x38 浮在右下角, 还盖住 canvas 右 15 px。
         self.canvas = tk.Canvas(self.top, highlightthickness=0)
-        self.canvas.pack(side='top', fill='both', expand=True)
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
-        vsb.pack(side='right', fill='y')
         self.canvas.config(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        self.canvas.pack(side='top', fill='both', expand=True)
         # Mouse wheel: Windows/macOS = <MouseWheel>, Linux (X11) = <Button-4/5>
         # bind (不是 bind_all) 避免和主窗口 grid 冲突; 模态时主窗被 grab 锁, 无冲突
         self.canvas.bind('<MouseWheel>', self._on_mousewheel)
