@@ -1245,17 +1245,30 @@ class SnapshotProgressDialog:
         )
         self._progress.pack(side='top', fill='x', padx=8, pady=(0, 4))
 
-        # Canvas + 内嵌 Frame
-        # 关键: vsb 先 pack 抢右侧条, canvas 后 pack 拿 expand 填剩余空间。
+        # Canvas + 内嵌 Frame + 冻结 header
+        # 关键: vsb 先 pack 抢右侧条, _middle 后 pack 拿 expand 填剩余空间。
         # 反过来 canvas 先 pack(side='top', expand=True) 会吞掉全部宽,
         # vsb 后 pack 只剩 ~15x38 浮在右下角, 还盖住 canvas 右 15 px。
+        # _middle 包住 _header_frame + canvas, 让 header 不被 vsb 盖, 也实现冻结
+        # (header 在 canvas 外, body 滚动 header 不动)。
         self.canvas = tk.Canvas(self.top, highlightthickness=0)
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
         self.canvas.config(yscrollcommand=vsb.set)
         vsb.pack(side='right', fill='y')
-        self.canvas.pack(side='top', fill='both', expand=True)
+
+        self._middle = ttk.Frame(self.top)
+        self._middle.pack(side='top', fill='both', expand=True)
+
+        # 冻结 header (在 canvas 外)
+        self._header_frame = ttk.Frame(self._middle)
+        self._header_frame.pack(side='top', fill='x')
+
+        # canvas (在 _middle 内, 只装 body)
+        self.canvas.pack(in_=self._middle, side='top', fill='both', expand=True)
+
         # Mouse wheel: Windows/macOS = <MouseWheel>, Linux (X11) = <Button-4/5>
-        # bind (不是 bind_all) 避免和主窗口 grid 冲突; 模态时主窗被 grab 锁, 无冲突
+        # bind 到 canvas / _inner / _header_frame: cell 是 canvas window item 的子
+        # widget, 事件不会冒泡到 canvas, 必须显式 bind 到 _inner
         self.canvas.bind('<MouseWheel>', self._on_mousewheel)
         self.canvas.bind('<Button-4>', self._on_mousewheel_linux)
         self.canvas.bind('<Button-5>', self._on_mousewheel_linux)
@@ -1268,24 +1281,38 @@ class SnapshotProgressDialog:
             '<Configure>',
             lambda _e: self.canvas.config(scrollregion=self.canvas.bbox('all')),
         )
+        self._inner.bind('<MouseWheel>', self._on_mousewheel)
+        self._inner.bind('<Button-4>', self._on_mousewheel_linux)
+        self._inner.bind('<Button-5>', self._on_mousewheel_linux)
 
-        # 列头
+        # 列宽: header 与 body 同步 minsize 保证对齐
+        # 标题列 250 px, 时间点列 THUMB_DISPLAY_W (320) + 8 widget padx = 328
         n_cols = len(time_tokens)
-        # 标题列: 宽 = 主表格 title 列 (250 px), 用 minsize 强制最小宽度
+        self._header_frame.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
+        cell_col_w = self.THUMB_DISPLAY_W + 8
+        for c in range(n_cols):
+            self._header_frame.grid_columnconfigure(c + 1, minsize=cell_col_w)
+            self._inner.grid_columnconfigure(c + 1, minsize=cell_col_w)
+
+        # 列头 (在 _header_frame, 不随 body 滚动)
         ttk.Label(
-            self._inner, text="标题", font=('TkDefaultFont', 9, 'bold'),
+            self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
             relief='raised', width=28, anchor='w',
         ).grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
         for c, tok in enumerate(time_tokens):
             ttk.Label(
-                self._inner,
+                self._header_frame,
                 text=f"T{c+1}: {time_token_to_string(tok)}",
                 font=('TkDefaultFont', 9, 'bold'),
                 relief='raised', width=14,
             ).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
+        # 滚轮也要在 header 上能滚
+        self._header_frame.bind('<MouseWheel>', self._on_mousewheel)
+        self._header_frame.bind('<Button-4>', self._on_mousewheel_linux)
+        self._header_frame.bind('<Button-5>', self._on_mousewheel_linux)
 
-        # 行 (行 = 文件, 列 = 时间点)
+        # 行 (行 = 文件, 列 = 时间点) - 在 _inner, row 0 起 (header 已在 _header_frame)
         # 整行染色按 info.is_passing; file title 改 tk.Label (ttk 不支持 bg)
         self._cells: list[list[tk.Label]] = []
         self._row_title_labels: list[tk.Label] = []
@@ -1297,7 +1324,7 @@ class SnapshotProgressDialog:
                 width=28, bg=row_bg, font=('TkDefaultFont', 9),
                 padx=4, pady=2,
             )
-            title_lbl.grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
+            title_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
             self._row_title_labels.append(title_lbl)
             row_cells: list[tk.Label] = []
             for c in range(n_cols):
@@ -1308,7 +1335,7 @@ class SnapshotProgressDialog:
                     self._inner, text='…', fg='gray', bg=row_bg,
                     padx=4, pady=2, cursor='hand2',
                 )
-                cell.grid(row=r + 1, column=c + 1, sticky='nsew', padx=1, pady=1)
+                cell.grid(row=r, column=c + 1, sticky='nsew', padx=1, pady=1)
                 # 绑定点击, 只在 completed/cancelled 状态生效
                 cell.bind(
                     '<Button-1>',
