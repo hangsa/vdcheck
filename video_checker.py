@@ -39,6 +39,21 @@ def get_ffprobe_path() -> str:
     return shutil.which('ffprobe') or 'ffprobe'
 
 
+@lru_cache(maxsize=1)
+def get_ffmpeg_path() -> str:
+    """获取 ffmpeg 路径 (优先使用打包的, fallback 到 PATH).
+
+    与 get_ffprobe_path 完全对称: build.bat 下载 FFmpeg-master-latest 时
+    整个 bin/ 目录被拷到 ffprobe/, ffmpeg.exe 已经在那里。
+    """
+    if getattr(sys, 'frozen', False):
+        base_dir = sys._MEIPASS
+        local_ffmpeg = os.path.join(base_dir, 'ffprobe', 'ffmpeg.exe')
+        if os.path.exists(local_ffmpeg):
+            return local_ffmpeg
+    return shutil.which('ffmpeg') or 'ffmpeg'
+
+
 @dataclass
 class VideoInfo:
     rel_path: str
@@ -81,6 +96,33 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024 ** 2:.1f} MB"
     else:
         return f"{size_bytes / 1024 ** 3:.2f} GB"
+
+
+def parse_time_token(token: str, fps: float) -> float:
+    """把 'HH:MM:SS:frame' 解析为秒 (float).
+
+    帧号除以 fps 得到该帧的秒偏移。非法格式 / 越界 / fps<=0 抛 ValueError。
+    """
+    parts = token.strip().split(':')
+    if len(parts) != 4:
+        raise ValueError(f"时间点格式应为 HH:MM:SS:frame, 得到: {token!r}")
+    try:
+        h, m, s, f = (int(p) for p in parts)
+    except ValueError:
+        raise ValueError(f"时间点含非数字段: {token!r}")
+    if h < 0 or m < 0 or s < 0 or f < 0 or m > 59 or s > 59:
+        raise ValueError(f"时间点数值越界: {token!r}")
+    if fps <= 0:
+        raise ValueError(f"视频帧率无效 ({fps}), 无法解析 frame 字段")
+    return h * 3600 + m * 60 + s + f / fps
+
+
+def time_token_to_string(token: str) -> str:
+    """把 'HH:MM:SS:frame' 中的 ':' 替换为 '-'.
+
+    用于文件名 (Windows 保留 ':') 和进度弹窗列头显示。
+    """
+    return token.replace(':', '-')
 
 
 def _parse_drop_data(data: str) -> list[str]:
