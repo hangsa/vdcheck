@@ -337,11 +337,17 @@ def _header_text_with_arrow(base_text: str, is_active: bool, desc: bool) -> str:
 
 
 class VideoGridView:
-    """自绘的可滚动表格，每个 cell 独立控制 fg。"""
+    """自绘的可滚动表格，每个 cell 独立控制 fg。虚拟滚动版。"""
 
     FG_PASS = '#228B22'
     FG_FAIL = '#DC143C'
     GRAB_WIDTH = 10
+    # 池初始大小: 视区一行约占 24-26 px, 默认窗口 700 - 表头 ≈ 660, 默认可视
+    # 行约 25 行; +2×BUFFER 上下预留 = 池 37. 取整 40, 留 ~30% 余量给超长文件名
+    # 带来的行高膨胀、阈值放大场景。
+    POOL_SIZE = 40
+    VISIBLE_BUFFER = 6
+    RESIZE_THROTTLE_MS = 33
 
     def __init__(self, parent: tk.Widget, columns: dict[str, tuple[str, int]]):
         """
@@ -351,8 +357,29 @@ class VideoGridView:
         self.parent = parent
         # 拷贝一份以避免拖动列宽时回写到外部 dict
         self.columns = {k: (h, w) for k, (h, w) in columns.items()}
-        self._rows: list[ttk.Frame] = []
+        # 单一列宽真理来源。__init__ 从 columns 同步, 后续 _on_col_resize 更新。
+        self._col_widths: dict[str, int] = {
+            k: w for k, (h, w) in self.columns.items()
+        }
+        # 数据列表 (source of truth); 池 widget 仅绑定视图用, 不持数据真值。
+        self._data: list[VideoInfo] = []
+        self._widget_pool: list[ttk.Frame] = []
+        # pool spacer (高度随时可调, 模拟 data 已滚走的部分)
+        self._top_spacer: tk.Frame | None = None
+        self._bottom_spacer: tk.Frame | None = None
+        # 当前可见区间; _render_visible 用于判断是否需要真实重画。
+        self._first_idx: int = 0
+        self._last_idx: int = 0
+        # 真实测得的行高 (首次 render 后用 widget_pool[0] 测量)
+        self._row_height: int = 0
+        # 列宽拖动中的瞬时状态
         self._resize_state: dict | None = None
+        # 节流: 一次拖动期间的延迟重截断句柄与 pending 缓存
+        self._resize_after_id: str | None = None
+        self._pending_resize: tuple[str, int, int] | None = None
+        # 排程: 多次事件合并到 after_idle 一次重画
+        self._render_after_id: str | None = None
+        # 字体 (cell 宽度测算用)
         self._cell_font = tkfont.Font(font=('TkDefaultFont', 9))
         # 排序状态: key=None 表示无排序; desc=False 为升序, True 为降序
         self._sort_key: str | None = None
@@ -389,8 +416,12 @@ class VideoGridView:
 
         self.canvas = tk.Canvas(body, highlightthickness=0)
         self.canvas.pack(side='left', fill='both', expand=True)
-        self.vsb.config(command=self.canvas.yview)
-        self.hsb.config(command=self.canvas.xview)
+        # 备份原生 set, 在 command lambda 里同时更新 scrollbar 与排程 render。
+        self._vsb_set = self.vsb.set
+        self.vsb.config(command=lambda *a: (
+            self.canvas.yview(*a), self._schedule_render()))
+        self.hsb.config(command=lambda *a: (
+            self.canvas.xview(*a), self._schedule_render()))
         self.canvas.config(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
 
         self.data_frame = ttk.Frame(self.canvas)
@@ -398,8 +429,24 @@ class VideoGridView:
             (0, 0), window=self.data_frame, anchor='nw'
         )
         self.canvas.bind('<Configure>', self._on_canvas_configure)
-        self.data_frame.bind('<Configure>', self._on_data_configure)
+        # _on_data_configure 由 _render_visible 显式设置 scrollregion, 不再绑定。
+        # (原 handler 用 canvas.bbox('all') 在虚拟滚动下不可靠。)
         self._bind_mousewheel()
+
+        # --- 虚拟滚动关键: 创建 spacer + 池 ---
+        # data_frame 内层叠顺序: top_spacer, [pool widgets...], bottom_spacer
+        # spacer 高度随时调整; 池 widget 视觉位置固定, 滚动 = 内容切换。
+        self._top_spacer = tk.Frame(self.data_frame, height=0)
+        self._top_spacer.pack(fill='x')
+        # Tk Frame 的 height 需要 pack_propagate(False) 才能强制, 但这里因为
+        # frame 内无 child, height 配置直接生效。
+        for _ in range(self.POOL_SIZE):
+            self._create_pool_widget()
+        self._bottom_spacer = tk.Frame(self.data_frame, height=0)
+        self._bottom_spacer.pack(fill='x')
+        # 触发一次 idle 等 widget mapped 后测量实际行高
+        self.canvas.update_idletasks()
+        self._measure_row_height()
 
     def _build_header(self):
         self.header_frame = ttk.Frame(self.outer)
@@ -454,6 +501,67 @@ class VideoGridView:
                     w.bind('<B1-Motion>', on_drag)
                     w.bind('<ButtonRelease-1>', on_release)
 
+    def _create_pool_widget(self) -> ttk.Frame:
+        """创建一个池 widget: 1 ttk.Frame 内含 12 tk.Label 单元格, 不绑定数据。
+
+        池 widget 始终 pack 在 top_spacer 与 bottom_spacer 之间; 滚动期间
+        通过更新各 widget 的 cell 文本与 fg 来切换显示哪一行数据。
+        """
+        row_frame = ttk.Frame(self.data_frame)
+        # pack 时不放在最前/最后; 而是插在 _bottom_spacer 之前 (保持顺序:
+        # top_spacer | pool[0..] | bottom_spacer)。
+        row_frame.pack(fill='x', before=self._bottom_spacer)
+        row_frame._info = None               # 当前绑定的 VideoInfo
+        row_frame._bound_data_idx: int | None = None
+        # (key, cell_label) — 列宽变化时按 full_text 重新截断
+        row_cells: list[tuple[str, tk.Label]] = []
+        n = len(self.columns)
+        for i, (key, (_heading, _width)) in enumerate(self.columns.items()):
+            anchor = self._column_anchor(key)
+            cell = tk.Label(
+                row_frame,
+                text='',
+                anchor=anchor,
+                padx=4, pady=2,
+                fg='black',
+            )
+            cell.grid(row=0, column=i * 2, sticky='nsew')
+            # 用 _col_widths (而非 self.columns) 同步列宽真理来源
+            row_frame.grid_columnconfigure(i * 2, minsize=self._col_widths[key], weight=1)
+            row_cells.append((key, cell))
+            if i < n - 1:
+                # 与表头 grab 列同宽, 保证列边界对齐; 不放 widget 仅占空间
+                # weight=0: 不参与拉伸/压缩, 始终保持 GRAB_WIDTH
+                row_frame.grid_columnconfigure(i * 2 + 1, minsize=self.GRAB_WIDTH, weight=0)
+        row_frame._cells = row_cells
+        self._widget_pool.append(row_frame)
+        return row_frame
+
+    def _grow_pool(self, need: int) -> None:
+        """扩张池到至少需要 need 个 widget。"""
+        while len(self._widget_pool) < need:
+            self._create_pool_widget()
+
+    def _measure_row_height(self) -> None:
+        """首次测量实际行高。winfo_reqheight 在未 mapped 时返 1, 故配合 idle。"""
+        if not self._widget_pool:
+            return
+        try:
+            h = self._widget_pool[0].winfo_reqheight()
+        except tk.TclError:
+            h = 0
+        if h and h > 1:
+            self._row_height = h
+        # 兜底保持已有 fallback 值 (24-26 px)
+
+    def _compute_total_width(self) -> int:
+        """列总宽 + spacer 总宽."""
+        if not self._col_widths:
+            return 0
+        cols = sum(self._col_widths.values())
+        spaces = max(0, len(self._col_widths) - 1) * self.GRAB_WIDTH
+        return cols + spaces
+
     def _start_col_resize(self, event, key: str):
         self._resize_state = {
             'key': key,
@@ -468,24 +576,70 @@ class VideoGridView:
         new_width = max(20, int(self._resize_state['start_width'] + dx))
         if new_width == self.columns[key][1]:
             return
-        # 更新内部宽度（数据行 add_row 会从这里读）
+
+        # === 即时 (cheap): 更新列宽 dict + header + 池 widget grid minsize ===
         heading = self.columns[key][0]
         self.columns[key] = (heading, new_width)
+        self._col_widths[key] = new_width
         keys = list(self.columns.keys())
         data_idx = keys.index(key)
         header_col_idx = data_idx * 2
         self.header_frame.grid_columnconfigure(header_col_idx, minsize=new_width)
-        # 数据行 cell 现在在 col data_idx*2（与表头列结构对齐）
-        for row_frame in self._rows:
-            row_frame.grid_columnconfigure(data_idx * 2, minsize=new_width)
-        # 已存在的数据行：该列 cell 文本按新列宽重新截断
-        for row_frame in self._rows:
-            k, full_text, cell = row_frame._cells[data_idx]
+        # Header label text may re-truncate (列缩短时)
+        header_lbl = self._header_labels[key]
+        base_text = self.columns[key][0]
+        is_active = (key == self._sort_key)
+        arrow = _header_text_with_arrow(base_text, is_active, self._sort_desc)
+        new_header_text = self._truncate_text(arrow, new_width)
+        if header_lbl.cget('text') != new_header_text:
+            header_lbl.config(text=new_header_text)
+        # 池 widget: 即使未 mapped 也要更新 minsize (Tk 持久化 grid_columnconfigure
+        # 选项; 否则下次 mapped 时 cell 宽度错位)。
+        for widget in self._widget_pool:
+            widget.grid_columnconfigure(data_idx * 2, minsize=new_width)
+        # scrollregion 横向范围也随之变化
+        self.canvas.configure(scrollregion=(
+            0, 0, max(self.canvas.winfo_width(), self._compute_total_width()),
+            max(0, len(self._data) * self._row_height),
+        ))
+
+        # === 节流 (33ms): cell 文本重截断合并到 after() ===
+        self._pending_resize = (key, data_idx, new_width)
+        if self._resize_after_id is not None:
+            return  # 已 schedule, 后续 _pending_resize 覆盖即可
+        self._resize_after_id = self.canvas.after(
+            self.RESIZE_THROTTLE_MS, self._apply_pending_resize)
+
+    def _apply_pending_resize(self):
+        """应用 pending 列宽重截断。仅对 mapped (可见) widget 做 cell 文本写入。"""
+        self._resize_after_id = None
+        pending = self._pending_resize
+        if pending is None:
+            return
+        self._pending_resize = None
+        key, data_idx, new_width = pending
+        for widget in self._widget_pool:
+            if not widget.winfo_ismapped():
+                continue
+            k, cell = widget._cells[data_idx]
+            # bound_data_idx 未绑时不重画 cell (渲染发生在 _render_visible)
+            if widget._bound_data_idx is None:
+                continue
+            info = widget._info
+            full_text = self._format_cell(info, k)
             new_text = self._truncate_text(full_text, new_width)
             if cell.cget('text') != new_text:
                 cell.config(text=new_text)
 
     def _end_col_resize(self):
+        # 立刻 flush pending; 避免 33ms 延迟到释放后才完成最后一次重截断
+        if self._resize_after_id is not None:
+            try:
+                self.canvas.after_cancel(self._resize_after_id)
+            except tk.TclError:
+                pass  # widget 已销毁
+            self._resize_after_id = None
+        self._apply_pending_resize()
         self._resize_state = None
 
     def _truncate_text(self, text: str, col_width: int) -> str:
@@ -519,15 +673,16 @@ class VideoGridView:
         return 'center'
 
     def _on_canvas_configure(self, event):
-        # 横向：让 inner frame 至少和 canvas 等宽（填满）；但当内容（列总 minsize）
-        # 比 canvas 宽时，保持 natural 宽度，让横向滚动条接管
-        natural = self.data_frame.winfo_reqwidth()
+        # 横向: 让 inner frame 至少和 canvas 等宽 (填满); 但当内容 (列总 minsize)
+        # 比 canvas 宽时, 保持 natural 宽度, 让横向滚动条接管。
+        # 虚拟滚动下 data_frame 实际宽 = 池 widget 高度累计, 故用 _compute_total_width
+        # 与 canvas 等宽取大。
+        natural = self._compute_total_width()
         self.canvas.itemconfigure(
             self._canvas_window, width=max(event.width, natural)
         )
-
-    def _on_data_configure(self, _event):
-        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+        # 窗口 resize 后 visible_count 可能变化, 重新计算可见区间
+        self._schedule_render()
 
     def _bind_mousewheel(self):
         self.canvas.bind('<Enter>', lambda _e: self._wheel_bind_id())
@@ -547,53 +702,132 @@ class VideoGridView:
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        # yview 改变后哪些 data 在可见区需要重算 → 排程 render
+        self._schedule_render()
 
     def _on_mousewheel_linux(self, event):
         delta = -1 if event.num == 4 else 1
         self.canvas.yview_scroll(delta, 'units')
+        self._schedule_render()
+
+    # === 虚拟滚动核心 ===
+
+    def _schedule_render(self):
+        """排程在 idle 时调用 _render_visible; 多次调用合并到一次。"""
+        if self._render_after_id is not None:
+            return
+        self._render_after_id = self.canvas.after_idle(self._do_scheduled_render)
+
+    def _do_scheduled_render(self):
+        self._render_after_id = None
+        try:
+            self._render_visible()
+        except tk.TclError:
+            pass  # widget 已被销毁 (扫描中关闭窗口等场景)
+
+    def _render_visible(self, force: bool = False):
+        """按 canvas 当前位置 + 测量行高 计算可见区间, 重新绑定池 widget。
+
+        force=True 时跳过 (first,last) 比较, 用于 reorder / clear 等显式 invalidate。
+        """
+        n = len(self._data)
+        if n == 0:
+            # 空数据: top/bottom spacer 高度 = 0, scrollregion 高 = 0,
+            # 池 widget 全部 map 但 cell 文本已被 _clear 留空。
+            self._top_spacer.configure(height=0)
+            self._bottom_spacer.configure(height=0)
+            self.canvas.yview_moveto(0)
+            self.canvas.configure(scrollregion=(
+                0, 0, self.canvas.winfo_width(), 0,
+            ))
+            self._first_idx, self._last_idx = 0, 0
+            return
+
+        # 行高兜底: 若首次 render 未拿到 (mapped 前), 用 26 px
+        canvas_h = self.canvas.winfo_height()
+        if canvas_h <= 1:
+            canvas_h = 600  # 未 mapped 的窗口兜底
+        if self._row_height <= 0:
+            self._measure_row_height()
+            if self._row_height <= 0:
+                self._row_height = 26
+
+        visible = max(1, canvas_h // self._row_height)
+        first_frac, _ = self.canvas.yview()
+        # 防止 n < visible 时 first_frac * (n-visible) < 0
+        first_frac = max(0.0, min(1.0, first_frac))
+        raw_first = int(first_frac * max(0, n - visible))
+        # 上下各预留 buffer 行, 避免滚动瞬间空白行
+        first = max(0, raw_first - self.VISIBLE_BUFFER)
+        last = min(n, raw_first + visible + self.VISIBLE_BUFFER)
+
+        if not force and first == self._first_idx and last == self._last_idx:
+            return  # 区间无变化, 跳过 (无 main-thread 工作量)
+
+        self._first_idx, self._last_idx = first, last
+
+        # 池扩张 (窗口放大或初次 render)
+        needed = last - first
+        if needed > len(self._widget_pool):
+            self._grow_pool(needed)
+
+        # 高度 spacer: 模拟被滚走的行与未滚到的行
+        self._top_spacer.configure(height=first * self._row_height)
+        self._bottom_spacer.configure(
+            height=max(0, (n - last) * self._row_height)
+        )
+
+        # 池 widget slot → data 绑定 (倒序填充, 视觉顺序不变)
+        for slot, data_idx in enumerate(range(first, last)):
+            widget = self._widget_pool[slot]
+            info = self._data[data_idx]
+            # 未变化就跳过 cell 重写; 这是热路径, 大量命中此分支。
+            if (widget._bound_data_idx == data_idx
+                    and widget._info is info):
+                continue
+            widget._bound_data_idx = data_idx
+            widget._info = info
+            for key, cell in widget._cells:
+                full_text = self._format_cell(info, key)
+                width = self._col_widths[key]
+                new_text = self._truncate_text(full_text, width)
+                if cell.cget('text') != new_text:
+                    cell.config(text=new_text)
+                fg = _cell_fg(info, key)
+                new_fg = fg if fg is not None else 'black'
+                if cell.cget('fg') != new_fg:
+                    cell.config(fg=new_fg)
+
+        # scrollregion: 显式计算, 不用 bbox('all'); 虚拟滚动中 bbox 只含
+        # mapped widget, 但用户感知到的总高是 N × ROW_HEIGHT。
+        total_h = max(0, n * self._row_height)
+        total_w = max(self.canvas.winfo_width(), self._compute_total_width())
+        self.canvas.configure(scrollregion=(0, 0, total_w, total_h))
 
     def clear(self):
         """清空所有数据行，滚动条复位。"""
-        for child in self.data_frame.winfo_children():
-            child.destroy()
-        self._rows.clear()
+        self._data.clear()
+        for widget in self._widget_pool:
+            widget._info = None
+            widget._bound_data_idx = None
+            for _key, cell in widget._cells:
+                cell.config(text='', fg='black')
         self.canvas.yview_moveto(0)
+        # 同步 spacing / scrollregion
+        self._top_spacer.configure(height=0)
+        self._bottom_spacer.configure(height=0)
+        self.canvas.configure(scrollregion=(
+            0, 0, self.canvas.winfo_width(), 0,
+        ))
+        self._first_idx = self._last_idx = 0
+        # 不需要 _render_visible (上面已经手工清空且 n=0 时 _render 也是 noop)
 
     def add_row(self, info: VideoInfo):
-        """往表格里追加一行，cell 颜色由 _cell_fg 决定。
-
-        列结构与表头一致：cell 在 col i*2，间隔列 col i*2+1 占 8px。
-        这样表头 (label+grab) 和数据行 (cell+间隔) 的列边界完全重合。
-        """
-        row_frame = ttk.Frame(self.data_frame)
-        row_frame.pack(fill='x')
-        self._rows.append(row_frame)
-        # 排序时需要从 row widget 找回原始 VideoInfo
-        row_frame._info = info
-
-        n = len(self.columns)
-        # (key, full_text, label) — 列宽变化时按 full_text 重新截断
-        row_cells: list[tuple[str, str, tk.Label]] = []
-        for i, (key, (_heading, width)) in enumerate(self.columns.items()):
-            full_text = self._format_cell(info, key)
-            text = self._truncate_text(full_text, width)
-            anchor = self._column_anchor(key)
-            fg = _cell_fg(info, key)
-            cell = tk.Label(
-                row_frame,
-                text=text,
-                anchor=anchor,
-                padx=4, pady=2,
-                fg=fg if fg is not None else 'black',
-            )
-            cell.grid(row=0, column=i * 2, sticky='nsew')
-            row_frame.grid_columnconfigure(i * 2, minsize=width, weight=1)
-            row_cells.append((key, full_text, cell))
-            if i < n - 1:
-                # 与表头 grab 列同宽，保证列边界对齐；不放 widget 仅占空间
-                # weight=0: 不参与拉伸/压缩, 始终保持 GRAB_WIDTH
-                row_frame.grid_columnconfigure(i * 2 + 1, minsize=self.GRAB_WIDTH, weight=0)
-        row_frame._cells = row_cells
+        """往表格里追加一行。虚拟滚动: 仅 append 到 _data 列表 + 排程 render。"""
+        self._data.append(info)
+        # 如果新行落在可见区间, 重画; 否则仅延后到下一次 _render_visible 调用
+        # (滚动到位时)。排程 after_idle 合并多次 add_row。
+        self._schedule_render()
 
     @staticmethod
     def _format_cell(info: VideoInfo, key: str) -> str:
@@ -647,18 +881,18 @@ class VideoGridView:
                 lbl.config(text=new_text)
 
     def reorder(self):
-        """按当前排序状态重排现有行。无排序状态或 0 行时为 no-op。"""
-        if self._sort_key is None or not self._rows:
+        """按当前排序状态重排现有行。无排序状态或 0 行时为 no-op。
+
+        虚拟滚动: 原地排序 _data 后强制重画 (不销毁 widget), 性能优于旧版。
+        """
+        if self._sort_key is None or not self._data:
             return
-        infos = [r._info for r in self._rows]
         # list.sort 稳定, 同级保留插入序
-        infos.sort(
+        self._data.sort(
             key=lambda i: _extract_sort_key(i, self._sort_key),
             reverse=self._sort_desc,
         )
-        self.clear()
-        for info in infos:
-            self.add_row(info)
+        self._render_visible(force=True)
 
 
 def scan_video_files(directory: str, recursive: bool) -> list[str]:
