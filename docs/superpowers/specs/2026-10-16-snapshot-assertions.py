@@ -9,7 +9,10 @@
 退出码 0 = 全部通过; 非 0 = 有失败。
 """
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
@@ -18,6 +21,7 @@ from video_checker import (
     get_ffmpeg_path,
     parse_time_token,
     time_token_to_string,
+    extract_frame,
 )
 
 
@@ -89,6 +93,48 @@ if __name__ == "__main__":
           time_token_to_string("01:30:45:15") == "01-30-45-15")
     check("无冒号 → 原样",
           time_token_to_string("no-colon-here") == "no-colon-here")
+
+    section("extract_frame — ffmpeg 抽帧 (需 ffmpeg 可用)")
+    if not (shutil.which('ffmpeg') or os.path.exists(get_ffmpeg_path())):
+        print("  ⊘ 跳过: 系统中无 ffmpeg")
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            # 合成 1 秒 30fps 测试视频
+            test_mp4 = os.path.join(td, "test.mp4")
+            subprocess.run([
+                shutil.which('ffmpeg') or get_ffmpeg_path(),
+                '-y', '-f', 'lavfi', '-i',
+                'color=c=red:s=320x240:d=1:r=30',
+                '-pix_fmt', 'yuv420p',
+                test_mp4,
+            ], check=True, capture_output=True)
+            check("合成测试视频成功", os.path.exists(test_mp4))
+
+            out_jpg = os.path.join(td, "frame.jpg")
+            ok = extract_frame(test_mp4, 0.5, out_jpg)
+            check("extract_frame 0.5s 成功", ok)
+            check("输出 jpg 存在", os.path.exists(out_jpg))
+            check("输出 jpg 非空", os.path.getsize(out_jpg) > 0)
+
+            # 验证 jpg magic bytes
+            with open(out_jpg, 'rb') as f:
+                head = f.read(3)
+            check("输出是 JPEG (FF D8 FF)", head == b'\xff\xd8\xff',
+                  f"got={head!r}")
+
+        # 错误情况: 不存在的文件
+        ok = extract_frame("/nonexistent/video.mp4", 0.0, "/tmp/out.jpg")
+        check("不存在文件 → False", ok is False)
+
+        # 错误情况: 损坏文件
+        with tempfile.TemporaryDirectory() as td:
+            bad = os.path.join(td, "bad.mp4")
+            with open(bad, 'wb') as f:
+                f.write(b'this is not a video')
+            out = os.path.join(td, "out.jpg")
+            ok = extract_frame(bad, 0.0, out)
+            check("损坏文件 → False", ok is False)
+            check("损坏文件 → 无输出", not os.path.exists(out))
 
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
     sys.exit(1 if _failures else 0)

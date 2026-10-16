@@ -178,6 +178,43 @@ def run_ffprobe(file_path: str) -> dict | None:
         return None
 
 
+def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
+    """用 ffmpeg 在 seconds 处抽 1 帧, 缩放到 160 px 宽, JPEG q=5 写入 output_path.
+
+    磁盘上保留的就是 160 px 缩略图, 进度弹窗直接 PhotoImage(file=...) 加载。
+    ffmpeg 不可用 / 文件损坏 / 超时 / 跨平台 AttributeError 均返回 False。
+    """
+    try:
+        ffmpeg = get_ffmpeg_path()
+        kwargs = {
+            'stdin': subprocess.DEVNULL,
+            'stdout': subprocess.DEVNULL,
+            'stderr': subprocess.PIPE,
+            'timeout': 30,
+        }
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            kwargs['startupinfo'] = startupinfo
+            kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(
+            [
+                ffmpeg, '-y',
+                '-ss', f'{seconds:.6f}',
+                '-i', input_path,
+                '-frames:v', '1',
+                '-vf', 'scale=160:-1',
+                '-q:v', '5',
+                output_path,
+            ],
+            **kwargs,
+        )
+        return result.returncode == 0 and os.path.exists(output_path)
+    except (subprocess.TimeoutExpired, OSError, AttributeError):
+        return False
+
+
 def parse_video_info(
     data: dict, full_path: str, base_path: str,
     bitrate_std: float, sample_rate_std: float,
