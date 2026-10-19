@@ -1277,9 +1277,17 @@ class SnapshotProgressDialog:
         self._window = self.canvas.create_window(
             (0, 0), window=self._inner, anchor='nw',
         )
+        # inner frame 几何变化时更新 scrollregion。
+        # 用 winfo_reqwidth/reqheight 不用 bbox('all'): Windows 上 bbox 对
+        # window item 经常返 (0,0,0,0), scrollregion 几乎为 0 什么都显示不了。
+        # winfo_req* 是 grid layout 算出的"想要"尺寸, 永远 ≥ 实际 children。
         self._inner.bind(
             '<Configure>',
-            lambda _e: self.canvas.config(scrollregion=self.canvas.bbox('all')),
+            lambda _e: self.canvas.config(scrollregion=(
+                0, 0,
+                self._inner.winfo_reqwidth(),
+                self._inner.winfo_reqheight(),
+            )),
         )
         self._inner.bind('<MouseWheel>', self._on_mousewheel)
         self._inner.bind('<Button-4>', self._on_mousewheel_linux)
