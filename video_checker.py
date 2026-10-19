@@ -1532,94 +1532,6 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
     return files
 
 
-class PathPickerDialog:
-    """浏览源对话框: 让用户选「文件夹」或「文件 (多选)」.
-
-    关闭后通过 dlg.result 取值:
-        None = 取消
-        ('folder', path) = 选了文件夹
-        ('files', [paths]) = 选了多个文件 (来自 askopenfilenames)
-    """
-
-    _VIDEO_FILETYPES = [
-        ("视频文件",
-         "*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.ts *.m2ts "
-         "*.mpg *.mpeg *.webm *.3gp *.m4v *.vob *.ogv "
-         "*.rm *.rmvb *.asf *.divx *.f4v *.mxf *.mts"),
-        ("所有文件", "*.*"),
-    ]
-
-    def __init__(self, parent: tk.Tk):
-        self.result = None
-        self.top = tk.Toplevel(parent)
-        self.top.title("选择扫描源")
-        self.top.transient(parent)
-        self.top.grab_set()
-        self.top.resizable(False, False)
-
-        ttk.Label(
-            self.top, text="选择扫描方式:", padding=(10, 10, 10, 5),
-        ).pack(anchor='w')
-
-        btn_frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
-        btn_frame.pack(fill='x')
-        ttk.Button(
-            btn_frame, text="选文件夹", width=12,
-            command=self._pick_folder,
-        ).pack(side='left', padx=(0, 5))
-        ttk.Button(
-            btn_frame, text="选文件 (可多选)", width=18,
-            command=self._pick_files,
-        ).pack(side='left')
-
-        ttk.Separator(self.top, orient='horizontal').pack(fill='x', padx=10, pady=5)
-
-        # 当前选择预览
-        ttk.Label(self.top, text="当前选择:", padding=(10, 0, 0, 0)).pack(anchor='w')
-        self._current_var = tk.StringVar(value="(未选择)")
-        ttk.Label(
-            self.top, textvariable=self._current_var,
-            padding=(10, 0, 10, 5), wraplength=420,
-            foreground='#444',
-        ).pack(fill='x')
-
-        # 底部取消
-        bottom = ttk.Frame(self.top, padding=10)
-        bottom.pack(fill='x')
-        ttk.Button(bottom, text="取消", command=self._on_cancel).pack(side='right')
-
-        # 居中
-        self.top.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width() - self.top.winfo_width()) // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - self.top.winfo_height()) // 2
-        self.top.geometry(f"+{x}+{y}")
-
-    def _pick_folder(self):
-        folder = filedialog.askdirectory(
-            title="选择视频文件夹", parent=self.top,
-        )
-        if folder:
-            self.result = ('folder', folder)
-            self._current_var.set(f"文件夹: {folder}")
-            self.top.destroy()
-
-    def _pick_files(self):
-        files = filedialog.askopenfilenames(
-            title="选择视频文件 (可多选)", parent=self.top,
-            filetypes=self._VIDEO_FILETYPES,
-        )
-        if files:
-            self.result = ('files', list(files))
-            self._current_var.set(
-                f"已选 {len(files)} 个文件, 来自: {os.path.dirname(files[0])}"
-            )
-            self.top.destroy()
-
-    def _on_cancel(self):
-        self.result = None
-        self.top.destroy()
-
-
 class VideoCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -1745,27 +1657,40 @@ class VideoCheckerApp:
     # ---- 事件处理 ----
 
     def _browse_path(self):
-        """浏览源: 弹 PathPickerDialog 让用户选文件夹或具体文件.
+        """浏览源: 系统自动判断选的是文件还是文件夹.
 
-        选文件夹 → self.path_var = 文件夹, self._selected_files = None
-                     (扫整个文件夹)
-        选文件   → self.path_var = 首个文件所在文件夹, self._selected_files = [paths]
-                     (只扫这些文件)
+        tkinter 没有「选文件夹或文件」的统一对话框, 用 fallback 模式:
+          1. 弹 askopenfilenames (文件选择器)
+          2. 用户选了文件 → 按文件加载
+          3. 用户取消 → 弹 askdirectory (文件夹选择器)
+          4. 用户选了文件夹 → 按文件夹扫整个
+          5. 用户又取消 → 啥也不动
+
+        用户体感: 点一下「浏览」, 系统根据行为自动分流, 不需要
+        提前选「我要选文件夹还是文件」。
         """
-        dlg = PathPickerDialog(self.root)
-        self.root.wait_window(dlg.top)
-        if dlg.result is None:
-            return
-        kind, payload = dlg.result
-        if kind == 'folder':
-            self._selected_files = None
-            folder = payload
-        else:  # 'files'
-            files = payload
+        files = filedialog.askopenfilenames(
+            title="选择视频文件 (可多选, 取消可改为选整个文件夹)",
+            filetypes=[
+                ("视频文件",
+                 "*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.ts *.m2ts "
+                 "*.mpg *.mpeg *.webm *.3gp *.m4v *.vob *.ogv "
+                 "*.rm *.rmvb *.asf *.divx *.f4v *.mxf *.mts"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if files:
+            self._selected_files = list(files)
             folder = os.path.dirname(files[0])
-            self._selected_files = files
-        self.path_var.set(folder)
-        self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
+            self.path_var.set(folder)
+            self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
+            return
+        # 文件选择器取消 → 弹文件夹选择器 (用户大概想扫整个目录)
+        folder = filedialog.askdirectory(title="选择视频文件夹")
+        if folder:
+            self._selected_files = None
+            self.path_var.set(folder)
+            self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
 
     def _browse_dest(self):
         folder = filedialog.askdirectory(title="选择目标文件夹")
