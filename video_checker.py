@@ -1072,6 +1072,8 @@ class SnapshotInputDialog:
         e.pack(side='left', padx=(0, 5))
         var.trace_add('write', lambda *_: self._validate())
         e._var = var  # 保持引用, 防 GC
+        # 双击只选所在段 (HH / MM / SS / frame), 不全选
+        e.bind('<Double-Button-1>', self._on_entry_double_click)
         del_btn = ttk.Button(
             row, text="删除", width=6,
             command=lambda: self._remove_time_row(e),
@@ -1081,6 +1083,39 @@ class SnapshotInputDialog:
         e._lbl = lbl
         self._entries.append(e)
         self._refresh_delete_visibility()
+
+    def _on_entry_double_click(self, event) -> str:
+        """双击 Entry: 按 x 坐标定位所在段, select_range 选该段, 阻止默认全选.
+
+        段定义: HH:MM:SS:frame — colons 是分隔符, 每段是 2 字符
+        (frame 段可能更长, 取决于帧号位数)。
+        """
+        entry = event.widget
+        try:
+            idx = entry.index(f'@{event.x}')
+        except tk.TclError:
+            return 'break'
+        text = entry.get()
+        if not text:
+            return 'break'
+        colons = [i for i, c in enumerate(text) if c == ':']
+        # 没有冒号 (e.g. 用户清空) → 全选
+        if not colons:
+            entry.select_range(0, len(text))
+            entry.icursor('end')
+            return 'break'
+        # 按 idx 定位段: idx <= 第 k 个 colon → 选第 k 段
+        if idx <= colons[0]:
+            sec_start, sec_end = 0, colons[0]
+        elif len(colons) >= 2 and idx <= colons[1]:
+            sec_start, sec_end = colons[0] + 1, colons[1]
+        elif len(colons) >= 3 and idx <= colons[2]:
+            sec_start, sec_end = colons[1] + 1, colons[2]
+        else:
+            sec_start, sec_end = colons[-1] + 1, len(text)
+        entry.select_range(sec_start, sec_end)
+        entry.icursor(sec_end)
+        return 'break'
 
     def _remove_time_row(self, entry: ttk.Entry) -> None:
         if len(self._entries) <= 1:
@@ -1497,6 +1532,94 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
     return files
 
 
+class PathPickerDialog:
+    """浏览源对话框: 让用户选「文件夹」或「文件 (多选)」.
+
+    关闭后通过 dlg.result 取值:
+        None = 取消
+        ('folder', path) = 选了文件夹
+        ('files', [paths]) = 选了多个文件 (来自 askopenfilenames)
+    """
+
+    _VIDEO_FILETYPES = [
+        ("视频文件",
+         "*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.ts *.m2ts "
+         "*.mpg *.mpeg *.webm *.3gp *.m4v *.vob *.ogv "
+         "*.rm *.rmvb *.asf *.divx *.f4v *.mxf *.mts"),
+        ("所有文件", "*.*"),
+    ]
+
+    def __init__(self, parent: tk.Tk):
+        self.result = None
+        self.top = tk.Toplevel(parent)
+        self.top.title("选择扫描源")
+        self.top.transient(parent)
+        self.top.grab_set()
+        self.top.resizable(False, False)
+
+        ttk.Label(
+            self.top, text="选择扫描方式:", padding=(10, 10, 10, 5),
+        ).pack(anchor='w')
+
+        btn_frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
+        btn_frame.pack(fill='x')
+        ttk.Button(
+            btn_frame, text="选文件夹", width=12,
+            command=self._pick_folder,
+        ).pack(side='left', padx=(0, 5))
+        ttk.Button(
+            btn_frame, text="选文件 (可多选)", width=18,
+            command=self._pick_files,
+        ).pack(side='left')
+
+        ttk.Separator(self.top, orient='horizontal').pack(fill='x', padx=10, pady=5)
+
+        # 当前选择预览
+        ttk.Label(self.top, text="当前选择:", padding=(10, 0, 0, 0)).pack(anchor='w')
+        self._current_var = tk.StringVar(value="(未选择)")
+        ttk.Label(
+            self.top, textvariable=self._current_var,
+            padding=(10, 0, 10, 5), wraplength=420,
+            foreground='#444',
+        ).pack(fill='x')
+
+        # 底部取消
+        bottom = ttk.Frame(self.top, padding=10)
+        bottom.pack(fill='x')
+        ttk.Button(bottom, text="取消", command=self._on_cancel).pack(side='right')
+
+        # 居中
+        self.top.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.top.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.top.winfo_height()) // 2
+        self.top.geometry(f"+{x}+{y}")
+
+    def _pick_folder(self):
+        folder = filedialog.askdirectory(
+            title="选择视频文件夹", parent=self.top,
+        )
+        if folder:
+            self.result = ('folder', folder)
+            self._current_var.set(f"文件夹: {folder}")
+            self.top.destroy()
+
+    def _pick_files(self):
+        files = filedialog.askopenfilenames(
+            title="选择视频文件 (可多选)", parent=self.top,
+            filetypes=self._VIDEO_FILETYPES,
+        )
+        if files:
+            self.result = ('files', list(files))
+            self._current_var.set(
+                f"已选 {len(files)} 个文件, 来自: {os.path.dirname(files[0])}"
+            )
+            self.top.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.top.destroy()
+
+
 class VideoCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -1509,6 +1632,8 @@ class VideoCheckerApp:
         self.cancel_event = threading.Event()
         self.total_files: int = 0
         self.result_queue: queue.Queue = queue.Queue()
+        # 浏览「选文件」时记下具体文件列表 (None = 扫整个目录; list = 只扫这些)
+        self._selected_files: list[str] | None = None
         self.snapshot_cancel_event: threading.Event = threading.Event()
         self.snapshot_result_queue: queue.Queue = queue.Queue()
         self.snapshot_progress_dialog: SnapshotProgressDialog | None = None
@@ -1620,10 +1745,27 @@ class VideoCheckerApp:
     # ---- 事件处理 ----
 
     def _browse_path(self):
-        folder = filedialog.askdirectory(title="选择视频文件夹")
-        if folder:
-            self.path_var.set(folder)
-            self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
+        """浏览源: 弹 PathPickerDialog 让用户选文件夹或具体文件.
+
+        选文件夹 → self.path_var = 文件夹, self._selected_files = None
+                     (扫整个文件夹)
+        选文件   → self.path_var = 首个文件所在文件夹, self._selected_files = [paths]
+                     (只扫这些文件)
+        """
+        dlg = PathPickerDialog(self.root)
+        self.root.wait_window(dlg.top)
+        if dlg.result is None:
+            return
+        kind, payload = dlg.result
+        if kind == 'folder':
+            self._selected_files = None
+            folder = payload
+        else:  # 'files'
+            files = payload
+            folder = os.path.dirname(files[0])
+            self._selected_files = files
+        self.path_var.set(folder)
+        self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
 
     def _browse_dest(self):
         folder = filedialog.askdirectory(title="选择目标文件夹")
@@ -1674,11 +1816,19 @@ class VideoCheckerApp:
 
         self.result_queue = queue.Queue()
 
-        t = threading.Thread(
-            target=self._scan_worker,
-            args=(directory, self.recursive_var.get(), bitrate_std, sample_rate_std),
-            daemon=True,
-        )
+        # 浏览「选文件」时只扫选中的; 否则扫整个目录
+        if self._selected_files:
+            t = threading.Thread(
+                target=self._scan_files_worker,
+                args=(self._selected_files, bitrate_std, sample_rate_std),
+                daemon=True,
+            )
+        else:
+            t = threading.Thread(
+                target=self._scan_worker,
+                args=(directory, self.recursive_var.get(), bitrate_std, sample_rate_std),
+                daemon=True,
+            )
         t.start()
         self._check_queue()
 
@@ -1763,6 +1913,7 @@ class VideoCheckerApp:
         self.video_results.clear()
         self.grid.clear()
         self.dest_var.set('')
+        self._selected_files = None
         self.status_var.set("已清除记录")
 
     def _on_snapshot_btn_click(self):
@@ -2035,6 +2186,8 @@ class VideoCheckerApp:
         self.dest_var.set(
             os.path.join(os.path.dirname(video_files[0]), "Checked").replace('/', '\\')
         )
+        # 记下拖入的具体文件, 跟浏览「选文件」走同一条路径
+        self._selected_files = video_files
 
         self.cancel_event.clear()
         self.scanning = True
