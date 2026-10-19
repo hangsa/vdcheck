@@ -1246,25 +1246,22 @@ class SnapshotProgressDialog:
         self._progress.pack(side='top', fill='x', padx=8, pady=(0, 4))
 
         # Canvas + 内嵌 Frame + 冻结 header
-        # 关键: vsb 先 pack 抢右侧条, _middle 后 pack 拿 expand 填剩余空间。
-        # 反过来 canvas 先 pack(side='top', expand=True) 会吞掉全部宽,
-        # vsb 后 pack 只剩 ~15x38 浮在右下角, 还盖住 canvas 右 15 px。
-        # _middle 包住 _header_frame + canvas, 让 header 不被 vsb 盖, 也实现冻结
-        # (header 在 canvas 外, body 滚动 header 不动)。
-        self.canvas = tk.Canvas(self.top, highlightthickness=0)
+        # pack 顺序: vsb 先 pack 抢右侧条, _middle 后 pack 拿 expand 填剩余。
+        # 反过来 _middle 先 pack 会吞掉全部宽, vsb 后 pack 没空间。
+        # _middle 包住 _header_frame + canvas, 让 header 不被 vsb 盖,
+        # 也实现冻结 (header 在 canvas 外, body 滚动 header 不动)。
+        # 关键: canvas 的 master 直接设为 _middle (不是 self.top), 否则
+        # master ≠ pack parent 的非标准模式在 Windows 上会让 canvas 显示
+        # 为 0 尺寸, 整个 _middle 不显示, 表头 + body + 滚轮全部失效。
+        self._middle = ttk.Frame(self.top)
+        self.canvas = tk.Canvas(self._middle, highlightthickness=0)
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
         self.canvas.config(yscrollcommand=vsb.set)
-        vsb.pack(side='right', fill='y')
-
-        self._middle = ttk.Frame(self.top)
-        self._middle.pack(side='top', fill='both', expand=True)
-
-        # 冻结 header (在 canvas 外)
         self._header_frame = ttk.Frame(self._middle)
         self._header_frame.pack(side='top', fill='x')
-
-        # canvas (在 _middle 内, 只装 body)
-        self.canvas.pack(in_=self._middle, side='top', fill='both', expand=True)
+        self.canvas.pack(side='top', fill='both', expand=True)
+        vsb.pack(side='right', fill='y')
+        self._middle.pack(side='top', fill='both', expand=True)
 
         # Mouse wheel: Windows/macOS = <MouseWheel>, Linux (X11) = <Button-4/5>
         # bind 到 canvas / _inner / _header_frame: cell 是 canvas window item 的子
