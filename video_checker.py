@@ -1587,10 +1587,7 @@ class VideoCheckerApp:
         self.sample_rate_entry = ttk.Entry(std_frame, textvariable=self.sample_rate_var, width=10)
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
-        # 「定点截图」放在采样率单位 kHz 后面, 与其他 left-pack 控件一行
-        ttk.Button(std_frame, text="定点截图", command=self._on_snapshot_btn_click).pack(
-            side='left', padx=(10, 0)
-        )
+        # 「定点截图」按钮挪到底部 截图地址-浏览 后面 (见 bottom_frame)
 
         # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~272 px,
         # 使之视觉上对齐 Row 1 的「文件路径」输入框右边缘（再往前一个身位,
@@ -1635,20 +1632,43 @@ class VideoCheckerApp:
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief='sunken', anchor='w', padding=3)
         status_bar.pack(fill='x', padx=5)
 
-        # === Bottom: 移动文件行 ===
+        # === Bottom: 3 行 — 迁移地址 / 截图地址+定点截图 / 移动按钮 ===
         bottom_frame = ttk.Frame(self.root, padding=5)
         bottom_frame.pack(fill='x')
 
-        ttk.Label(bottom_frame, text="目标路径:").pack(side='left')
+        # Row 1: 迁移地址
+        dest_row = ttk.Frame(bottom_frame)
+        dest_row.pack(fill='x', pady=(0, 5))
+        ttk.Label(dest_row, text="迁移地址:").pack(side='left')
         self.dest_var = tk.StringVar()
-        self.dest_entry = ttk.Entry(bottom_frame, textvariable=self.dest_var, width=50)
+        self.dest_entry = ttk.Entry(dest_row, textvariable=self.dest_var, width=50)
         self.dest_entry.pack(side='left', padx=(5, 2), fill='x', expand=True)
+        ttk.Button(dest_row, text="浏览", command=self._browse_dest).pack(side='left', padx=2)
 
-        ttk.Button(bottom_frame, text="浏览", command=self._browse_dest).pack(side='left', padx=2)
+        # Row 2: 截图地址 (默认 = <文件路径>/snapshot, 可手动覆盖)
+        snap_row = ttk.Frame(bottom_frame)
+        snap_row.pack(fill='x', pady=(0, 5))
+        ttk.Label(snap_row, text="截图地址:").pack(side='left')
+        self.snapshot_dest_var = tk.StringVar()
+        self.snapshot_dest_entry = ttk.Entry(snap_row, textvariable=self.snapshot_dest_var, width=50)
+        self.snapshot_dest_entry.pack(side='left', padx=(5, 2), fill='x', expand=True)
+        ttk.Button(snap_row, text="浏览", command=self._browse_snapshot_dest).pack(side='left', padx=2)
+        # 「定点截图」按钮挪到这里, 在 截图地址-浏览 之后
+        self.snapshot_btn = ttk.Button(
+            snap_row, text="定点截图", command=self._on_snapshot_btn_click,
+        )
+        self.snapshot_btn.pack(side='left', padx=(5, 0))
 
-        self.move_btn = ttk.Button(bottom_frame, text="移动达标文件", command=self._move_passing_files)
+        # Row 3: 移动按钮
+        move_row = ttk.Frame(bottom_frame)
+        move_row.pack(fill='x')
+        self.move_btn = ttk.Button(
+            move_row, text="移动达标文件", command=self._move_passing_files,
+        )
         self.move_btn.pack(side='left', padx=(10, 0))
-        self.move_all_btn = ttk.Button(bottom_frame, text="移动全部文件", command=self._move_all_files)
+        self.move_all_btn = ttk.Button(
+            move_row, text="移动全部文件", command=self._move_all_files,
+        )
         self.move_all_btn.pack(side='left', padx=(5, 0))
 
         # 启用拖拽文件到表格
@@ -1684,6 +1704,7 @@ class VideoCheckerApp:
             folder = os.path.dirname(files[0])
             self.path_var.set(folder)
             self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
+            self.snapshot_dest_var.set(os.path.join(folder, 'snapshot').replace('/', '\\'))
             return
         # 文件选择器取消 → 弹文件夹选择器 (用户大概想扫整个目录)
         folder = filedialog.askdirectory(title="选择视频文件夹")
@@ -1691,11 +1712,18 @@ class VideoCheckerApp:
             self._selected_files = None
             self.path_var.set(folder)
             self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
+            self.snapshot_dest_var.set(os.path.join(folder, 'snapshot').replace('/', '\\'))
 
     def _browse_dest(self):
-        folder = filedialog.askdirectory(title="选择目标文件夹")
+        folder = filedialog.askdirectory(title="选择迁移地址")
         if folder:
             self.dest_var.set(folder.replace('/', '\\'))
+
+    def _browse_snapshot_dest(self):
+        """选截图输出文件夹: 直接写入, 不自动建子目录 (用户自己挑)"""
+        folder = filedialog.askdirectory(title="选择截图存放文件夹")
+        if folder:
+            self.snapshot_dest_var.set(folder.replace('/', '\\'))
 
     def _on_scan_btn_click(self):
         """扫描按钮点击: 空闲时启动检测, 检测中触发停止。"""
@@ -1849,24 +1877,27 @@ class VideoCheckerApp:
         if not self.video_results:
             messagebox.showinfo("提示", "请先扫描视频。")
             return
-        # 默认输出目录 = <文件路径>\snapshot; 若父目录存在则自动建子目录
-        # Windows 路径用反斜杠保持与项目其余处一致; macOS 留正斜杠
-        # (macOS 上 os.path.isdir 不识别反斜杠路径, 不能盲目套用)
-        default_dir = ''
-        parent = self.path_var.get().strip()
-        if parent and os.path.isdir(parent):
-            default_dir = os.path.join(parent, 'snapshot')
-            if sys.platform == 'win32':
-                default_dir = default_dir.replace('/', '\\')
-            try:
-                os.makedirs(default_dir, exist_ok=True)
-            except OSError:
-                default_dir = ''  # 建不出来就留空, 让用户自己填
+        # 默认输出目录: 优先用「截图地址」字段, 空时退回自动算 <文件路径>/snapshot
+        # Windows 用反斜杠 (与项目其余处一致), macOS 留正斜杠
+        # (macOS 上 os.path.isdir 不识别反斜杠路径, 不能套用)
+        default_dir = self.snapshot_dest_var.get().strip()
+        if not default_dir:
+            parent = self.path_var.get().strip()
+            if parent and os.path.isdir(parent):
+                default_dir = os.path.join(parent, 'snapshot')
+                if sys.platform == 'win32':
+                    default_dir = default_dir.replace('/', '\\')
+                try:
+                    os.makedirs(default_dir, exist_ok=True)
+                except OSError:
+                    default_dir = ''  # 建不出来就留空, 让用户自己填
         dlg = SnapshotInputDialog(self.root, default_output_dir=default_dir)
         self.root.wait_window(dlg.top)
         if dlg.result is None:
             return
         time_tokens, output_dir = dlg.result
+        # 把对话框确定的输出目录回写到「截图地址」字段, 下次直接用
+        self.snapshot_dest_var.set(output_dir.replace('/', '\\'))
         self._start_snapshot(time_tokens, output_dir)
 
     def _start_snapshot(self, time_tokens: list[str], output_dir: str) -> None:
