@@ -984,15 +984,19 @@ class VideoGridView:
 
 
 class SnapshotInputDialog:
-    """定点截图的输入对话框: 时间点列表 + 输出目录, 模态.
+    """定点截图的时间点输入对话框: 模态.
+
+    输出目录不由对话框管理: 主界面的「截图地址」字段是唯一来源,
+    通过 default_output_dir 传入, 用户只填时间点 + 确认。
 
     关闭后通过 dlg.result 取值:
         None = 用户取消
-        (time_tokens, output_dir) = 用户确认
+        (time_tokens, output_dir) = 用户确认 (output_dir = default_output_dir)
     """
 
     def __init__(self, parent: tk.Tk, default_output_dir: str = ''):
         self.result: tuple[list[str], str] | None = None
+        self._output_dir = default_output_dir  # 对话框唯一的输出目录值
         self.top = tk.Toplevel(parent)
         self.top.title("定点截图")
         self.top.transient(parent)
@@ -1017,18 +1021,6 @@ class SnapshotInputDialog:
             self._time_frame, text="+ 添加时间点",
             command=lambda: self._add_time_row("00:00:00:00"),
         ).pack(side='top', anchor='w', pady=(5, 0))
-
-        # 输出目录区
-        self._dir_frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
-        self._dir_frame.pack(fill='x')
-        ttk.Label(self._dir_frame, text="输出目录:").pack(side='left')
-        self.dir_var = tk.StringVar(value=default_output_dir)
-        self.dir_entry = ttk.Entry(self._dir_frame, textvariable=self.dir_var)
-        self.dir_entry.pack(side='left', fill='x', expand=True, padx=(5, 2))
-        ttk.Button(
-            self._dir_frame, text="浏览",
-            command=self._browse_dir,
-        ).pack(side='left')
 
         # 错误标签 (校验失败时显示)
         self._err_var = tk.StringVar()
@@ -1058,7 +1050,6 @@ class SnapshotInputDialog:
         # 实时校验
         for e in self._entries:
             e.bind('<KeyRelease>', lambda _ev: self._validate())
-        self.dir_var.trace_add('write', lambda *_: self._validate())
         self._validate()
 
     def _add_time_row(self, default: str) -> None:
@@ -1138,16 +1129,8 @@ class SnapshotInputDialog:
         for e in self._entries:
             e._del_btn.pack(side='left') if show else e._del_btn.pack_forget()
 
-    def _browse_dir(self) -> None:
-        from tkinter import filedialog
-        folder = filedialog.askdirectory(
-            title="选择截图输出目录", parent=self.top,
-        )
-        if folder:
-            self.dir_var.set(folder.replace('/', '\\'))
-
     def _validate(self) -> None:
-        """实时校验所有输入; 任一非法时禁用确认按钮 + 标红."""
+        """实时校验时间点; 输出目录在外层主界面管理, 此处不校验."""
         # 时间点
         for e in self._entries:
             e.config(foreground='black')
@@ -1173,22 +1156,12 @@ class SnapshotInputDialog:
                 bad_time = f"非数字段: {v!r}"
                 e.config(foreground='red')
                 break
-        # 输出目录
-        dir_ok = False
-        d = self.dir_var.get().strip()
-        if d and os.path.isdir(d):
-            dir_ok = True
-
-        err = bad_time
-        if not err and not dir_ok:
-            err = "请选择有效的输出目录"
-        self._err_var.set(err or "")
-        self._confirm_btn.config(state='normal' if (not err) else 'disabled')
+        self._err_var.set(bad_time or "")
+        self._confirm_btn.config(state='normal' if (not bad_time) else 'disabled')
 
     def _on_confirm(self) -> None:
         tokens = [e._var.get().strip() for e in self._entries]
-        output_dir = self.dir_var.get().strip()
-        self.result = (tokens, output_dir)
+        self.result = (tokens, self._output_dir)  # 输出目录沿用主界面传入
         self.top.destroy()
 
     def _on_cancel(self) -> None:
@@ -1636,7 +1609,7 @@ class VideoCheckerApp:
         bottom_frame = ttk.Frame(self.root, padding=5)
         bottom_frame.pack(fill='x')
 
-        # Row 1: 迁移地址
+        # Row 1: 迁移地址 + 移动按钮
         dest_row = ttk.Frame(bottom_frame)
         dest_row.pack(fill='x', pady=(0, 5))
         ttk.Label(dest_row, text="迁移地址:").pack(side='left')
@@ -1644,6 +1617,15 @@ class VideoCheckerApp:
         self.dest_entry = ttk.Entry(dest_row, textvariable=self.dest_var, width=50)
         self.dest_entry.pack(side='left', padx=(5, 2), fill='x', expand=True)
         ttk.Button(dest_row, text="浏览", command=self._browse_dest).pack(side='left', padx=2)
+        # 移动按钮合到迁移地址行, 在浏览后
+        self.move_btn = ttk.Button(
+            dest_row, text="移动达标文件", command=self._move_passing_files,
+        )
+        self.move_btn.pack(side='left', padx=(10, 0))
+        self.move_all_btn = ttk.Button(
+            dest_row, text="移动全部文件", command=self._move_all_files,
+        )
+        self.move_all_btn.pack(side='left', padx=(5, 0))
 
         # Row 2: 截图地址 (默认 = <文件路径>/snapshot, 可手动覆盖)
         snap_row = ttk.Frame(bottom_frame)
@@ -1658,18 +1640,6 @@ class VideoCheckerApp:
             snap_row, text="定点截图", command=self._on_snapshot_btn_click,
         )
         self.snapshot_btn.pack(side='left', padx=(5, 0))
-
-        # Row 3: 移动按钮
-        move_row = ttk.Frame(bottom_frame)
-        move_row.pack(fill='x')
-        self.move_btn = ttk.Button(
-            move_row, text="移动达标文件", command=self._move_passing_files,
-        )
-        self.move_btn.pack(side='left', padx=(10, 0))
-        self.move_all_btn = ttk.Button(
-            move_row, text="移动全部文件", command=self._move_all_files,
-        )
-        self.move_all_btn.pack(side='left', padx=(5, 0))
 
         # 启用拖拽文件到表格
         self.grid.bind_drop(self._on_file_drop)
@@ -1755,9 +1725,20 @@ class VideoCheckerApp:
             messagebox.showerror("错误", "采样率标准必须为正数。")
             return
 
-        # 设置默认目标路径
+        # 设置默认迁移地址 + 截图地址
         if not self.dest_var.get().strip():
             self.dest_var.set(os.path.join(directory, "Checked").replace('/', '\\'))
+        # 截图地址: 默认 <文件路径>\snapshot; 自动建子目录 (Win 反斜杠,
+        # macOS 留正斜杠——后者 os.path.isdir 不识别反斜杠路径)
+        snap_default = os.path.join(directory, 'snapshot')
+        if sys.platform == 'win32':
+            snap_default = snap_default.replace('/', '\\')
+        try:
+            os.makedirs(snap_default, exist_ok=True)
+        except OSError:
+            snap_default = ''  # 建不出来就清空
+        if not self.snapshot_dest_var.get().strip():
+            self.snapshot_dest_var.set(snap_default)
 
         self.cancel_event.clear()
         self.scanning = True
