@@ -254,6 +254,67 @@ if __name__ == "__main__":
     check("reorder 降序: data[-1] 是最小",
           grid._data[-1].bitrate_kbps == 1000.0)
 
+    section("Scroll — 滚动时无上/下空白 (spacer 不参与, 靠 window coords)")
+    # 补足数据量, 保证可滚动 (前面 reorder 只用了 8 行, 少于可视行数)
+    grid.clear()
+    for i in range(100):
+        grid.add_row(make_info(i))
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+
+    # 1) spacer 恒为 0 (滚动表达交给 canvas window item 的 y 坐标)
+    grid.canvas.yview_moveto(0.0)
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    check("顶部时 top_spacer == 0",
+          int(grid._top_spacer.cget('height')) == 0,
+          f"got={grid._top_spacer.cget('height')}")
+    check("顶部时 bottom_spacer == 0",
+          int(grid._bottom_spacer.cget('height')) == 0,
+          f"got={grid._bottom_spacer.cget('height')}")
+
+    # 2) scrollregion 高 == N * row_height (与池大小无关, 不会偏短露白)
+    n = len(grid._data)
+    sr_h = float(grid.canvas.cget('scrollregion').split()[3])
+    check("scrollregion 高 == N * row_height",
+          sr_h == n * grid._row_height,
+          f"sr_h={sr_h}, N*rh={n * grid._row_height}")
+
+    # 3) 滚到底: window item 下移, 最后一行有内容
+    grid.canvas.yview_moveto(1.0)
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    coords_y = grid.canvas.coords(grid._canvas_window)[1]
+    check("滚到底时 window item 下移 (coords y > 0)",
+          coords_y > 0,
+          f"coords y={coords_y}")
+    last_slot = min(len(grid._widget_pool), grid._last_idx - grid._first_idx) - 1
+    last_bound = grid._widget_pool[last_slot]._bound_data_idx
+    check("滚到底时最后一行绑定到 data[-1]",
+          last_bound == n - 1,
+          f"got={last_bound}, expect={n - 1}")
+    check("滚到底时 spacer 仍为 0",
+          int(grid._top_spacer.cget('height')) == 0
+          and int(grid._bottom_spacer.cget('height')) == 0)
+
+    # 4) 中间位置: 池覆盖可视区 (content_bot >= vis_bot), 无底部空白
+    grid.canvas.yview_moveto(0.5)
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    sr_h = float(grid.canvas.cget('scrollregion').split()[3])
+    f0, f1 = grid.canvas.yview()
+    vis_bot = f1 * sr_h
+    first = grid._first_idx
+    used = min(len(grid._widget_pool), grid._last_idx - grid._first_idx)
+    content_bot = (first + used) * grid._row_height
+    check("中段滚动时池内容覆盖可视区底部 (无下空白)",
+          content_bot >= vis_bot,
+          f"content_bot={content_bot}, vis_bot={vis_bot:.0f}")
+
     section("Public API — preserved")
     # add_row / clear / reorder / bind_drop / is_sorted 都存在且不抛
     methods = {'add_row', 'clear', 'reorder', 'bind_drop', 'is_sorted',

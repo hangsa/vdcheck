@@ -670,6 +670,20 @@ class VideoGridView:
         spaces = max(0, len(self._col_widths) - 1) * self.GRAB_WIDTH
         return cols + spaces
 
+    def _scroll_height(self) -> int:
+        """可滚动总高度 = 数据总行数 × 行高.
+
+        不用 top/bottom spacer 表达滚动: spacer 高度依赖 first/last, 而
+        first/last 又从 scrollregion 位置反推, 会形成正反馈 (滚动越深
+        spacer 越大, 把内容越推越下, 顶部露出空白)。
+        改用 canvas window item 的 y 坐标偏移 (见 _render_visible),
+        scrollregion 高度恒为 N × row_height, 与池大小无关。
+        """
+        n = len(self._data)
+        if n <= 0 or self._row_height <= 0:
+            return 0
+        return n * self._row_height
+
     def _start_col_resize(self, event, key: str):
         self._resize_state = {
             'key': key,
@@ -708,7 +722,7 @@ class VideoGridView:
         # scrollregion 横向范围也随之变化
         self.canvas.configure(scrollregion=(
             0, 0, max(self.canvas.winfo_width(), self._compute_total_width()),
-            max(0, len(self._data) * self._row_height),
+            self._scroll_height(),
         ))
 
         # === 节流 (33ms): cell 文本重截断合并到 after() ===
@@ -861,10 +875,16 @@ class VideoGridView:
                 self._row_height = 26
 
         visible = max(1, canvas_h // self._row_height)
+        # 可视区顶部在 scrollregion 中的像素位置
         first_frac, _ = self.canvas.yview()
-        # 防止 n < visible 时 first_frac * (n-visible) < 0
         first_frac = max(0.0, min(1.0, first_frac))
-        raw_first = int(first_frac * max(0, n - visible))
+        sr_h = self._scroll_height()
+        if sr_h > canvas_h:
+            vis_top = first_frac * sr_h
+        else:
+            vis_top = 0.0
+        # 可视区顶部对应的数据行号 (除掉 top_spacer 的偏移)
+        raw_first = int(vis_top // self._row_height)
         # 上下各预留 buffer 行, 避免滚动瞬间空白行
         first = max(0, raw_first - self.VISIBLE_BUFFER)
         last = min(n, raw_first + visible + self.VISIBLE_BUFFER)
@@ -879,11 +899,11 @@ class VideoGridView:
         if needed > len(self._widget_pool):
             self._grow_pool(needed)
 
-        # 高度 spacer: 模拟被滚走的行与未滚到的行
-        self._top_spacer.configure(height=first * self._row_height)
-        self._bottom_spacer.configure(
-            height=max(0, (n - last) * self._row_height)
-        )
+        # 不用 spacer 表达滚动 (会与 first/last 形成正反馈导致顶部空白);
+        # 改用 canvas window item 的 y 坐标偏移: 数据窗整体下移 first*rh。
+        self._top_spacer.configure(height=0)
+        self._bottom_spacer.configure(height=0)
+        self.canvas.coords(self._canvas_window, 0, first * self._row_height)
 
         # 池 widget slot → data 绑定 (倒序填充, 视觉顺序不变)
         for slot, data_idx in enumerate(range(first, last)):
@@ -910,9 +930,10 @@ class VideoGridView:
                 if cell.cget('fg') != new_fg:
                     cell.config(fg=new_fg)
 
-        # scrollregion: 显式计算, 不用 bbox('all'); 虚拟滚动中 bbox 只含
-        # mapped widget, 但用户感知到的总高是 N × ROW_HEIGHT。
-        total_h = max(0, n * self._row_height)
+        # scrollregion: 显式计算, 不用 bbox('all'); bbox 只含 mapped widget。
+        # 高度用 _scroll_height() (实际渲染内容总高), 不用 N * row_height —
+        # 后者比真实内容短, 滚到两端时可视区会露白。
+        total_h = self._scroll_height()
         total_w = max(self.canvas.winfo_width(), self._compute_total_width())
         self.canvas.configure(scrollregion=(0, 0, total_w, total_h))
 
