@@ -1114,8 +1114,8 @@ class SnapshotProgressDialog:
         row.pack(side='top', fill='x')
         ttk.Label(row, text="截图地址:").pack(side='left', padx=(0, 5))
         self._output_dir_var = tk.StringVar(value=self._output_dir)
-        e = ttk.Entry(row, textvariable=self._output_dir_var)
-        e.pack(side='left', padx=(0, 5), fill='x', expand=True)
+        self._output_dir_entry = ttk.Entry(row, textvariable=self._output_dir_var)
+        self._output_dir_entry.pack(side='left', padx=(0, 5), fill='x', expand=True)
         ttk.Button(
             row, text="浏览", command=self._browse_output_dir,
         ).pack(side='left', padx=2)
@@ -1385,7 +1385,7 @@ class SnapshotProgressDialog:
         self._state = 'running'
         self._action_btn.config(text="截图中", state='normal')
         self._set_time_points_state('disabled')
-        self._output_dir_var.config(state='disabled')
+        self._output_dir_entry.config(state='disabled')
 
         self._result_queue = queue.Queue()
         self._worker_thread = threading.Thread(
@@ -1461,7 +1461,7 @@ class SnapshotProgressDialog:
         self._state = 'done' if not cancelled else 'idle'  # 取消 → 回 idle 允许重抽
         self._action_btn.config(text="开始截图", state='normal')
         self._set_time_points_state('normal')
-        self._output_dir_var.config(state='normal')
+        self._output_dir_entry.config(state='normal')
         status = "抽帧已取消" if cancelled else "抽帧完成"
         self._status_var.set(
             f"{status}: {done}/{total} ({done - self._failed_count} 成功, {self._failed_count} 失败)"
@@ -1610,7 +1610,10 @@ class VideoCheckerApp:
         self.sample_rate_entry = ttk.Entry(std_frame, textvariable=self.sample_rate_var, width=10)
         self.sample_rate_entry.pack(side='left', padx=(5, 2))
         ttk.Label(std_frame, text="kHz").pack(side='left')
-        # 「定点截图」按钮挪到底部 截图地址-浏览 后面 (见 bottom_frame)
+        # 「定点截图」按钮放在采样率单位 kHz 后面, 与其他 left-pack 控件一行
+        ttk.Button(std_frame, text="定点截图", command=self._on_snapshot_btn_click).pack(
+            side='left', padx=(10, 0)
+        )
 
         # 「清除记录」放在 std_frame 行右端, 通过右侧 padx 把按钮向左推 ~272 px,
         # 使之视觉上对齐 Row 1 的「文件路径」输入框右边缘（再往前一个身位,
@@ -1674,11 +1677,6 @@ class VideoCheckerApp:
             dest_row, text="移动全部文件", command=self._move_all_files,
         )
         self.move_all_btn.pack(side='left', padx=(5, 0))
-        # 「定点截图」按钮: 截图地址已移入弹窗顶部, 按钮跟迁移地址同排最右
-        self.snapshot_btn = ttk.Button(
-            dest_row, text="定点截图", command=self._on_snapshot_btn_click,
-        )
-        self.snapshot_btn.pack(side='left', padx=(15, 0))
 
         # 截图输出目录 (弹窗内可改; 这里只存默认值, 由 _start_scan 自动填 <dir>/snapshot)
         self.snapshot_dest_var = tk.StringVar()
