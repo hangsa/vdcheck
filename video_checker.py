@@ -436,6 +436,7 @@ class VideoGridView:
     POOL_SIZE = 40
     VISIBLE_BUFFER = 6
     RESIZE_THROTTLE_MS = 33
+    IDX_COL_WIDTH = 45   # 序号列宽 (固定, 不可拖拽, 不参与排序)
 
     def __init__(self, parent: tk.Widget, columns: dict[str, tuple[str, int]]):
         """
@@ -540,13 +541,24 @@ class VideoGridView:
         self.header_frame = ttk.Frame(self.outer)
         self.header_frame.pack(side='top', fill='x')
 
-        # 表头 grid 里：偶数列 = 列标签，奇数列 = 列间拖拽手柄。
-        # 数据行 grid 里没有手柄，所以列索引仍然是 0,1,2,...
+        # grid 列布局: col0 = 序号 (固定), 然后数据列沿用「偶数=标签, 奇数=grab」
+        # 但整体右移 1 位 → 数据列 i 的标签在 col 2*i+1, grab 在 col 2*i+2。
+        idx_lbl = tk.Label(
+            self.header_frame,
+            text="序号",
+            font=('TkDefaultFont', 9),
+            anchor='center',
+            padx=4, pady=2,
+            relief='raised', bd=1,
+        )
+        idx_lbl.grid(row=0, column=0, sticky='nsew')
+        self.header_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH, weight=0)
+
         keys = list(self.columns.keys())
         n = len(keys)
         for i, key in enumerate(keys):
             heading, width = self.columns[key]
-            col_idx = i * 2
+            col_idx = i * 2 + 1
 
             anchor = self._column_anchor(key)
             display_heading = self._truncate_text(heading, width)
@@ -602,6 +614,14 @@ class VideoGridView:
         row_frame._info = None               # 当前绑定的 VideoInfo
         row_frame._bound_data_idx: int | None = None
         # (key, cell_label) — 列宽变化时按 full_text 重新截断
+        # col 0 = 序号 cell (固定宽, 与表头 col0 对齐; 不进 _cells 列表, 单独存 _idx_cell)
+        idx_cell = tk.Label(
+            row_frame, text='', anchor='center', padx=4, pady=2, fg='black',
+        )
+        idx_cell.grid(row=0, column=0, sticky='nsew')
+        row_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH, weight=0)
+        row_frame._idx_cell = idx_cell
+
         row_cells: list[tuple[str, tk.Label]] = []
         n = len(self.columns)
         for i, (key, (_heading, _width)) in enumerate(self.columns.items()):
@@ -613,14 +633,14 @@ class VideoGridView:
                 padx=4, pady=2,
                 fg='black',
             )
-            cell.grid(row=0, column=i * 2, sticky='nsew')
+            cell.grid(row=0, column=i * 2 + 1, sticky='nsew')
             # 用 _col_widths (而非 self.columns) 同步列宽真理来源
-            row_frame.grid_columnconfigure(i * 2, minsize=self._col_widths[key], weight=1)
+            row_frame.grid_columnconfigure(i * 2 + 1, minsize=self._col_widths[key], weight=1)
             row_cells.append((key, cell))
             if i < n - 1:
                 # 与表头 grab 列同宽, 保证列边界对齐; 不放 widget 仅占空间
                 # weight=0: 不参与拉伸/压缩, 始终保持 GRAB_WIDTH
-                row_frame.grid_columnconfigure(i * 2 + 1, minsize=self.GRAB_WIDTH, weight=0)
+                row_frame.grid_columnconfigure(i * 2 + 2, minsize=self.GRAB_WIDTH, weight=0)
         row_frame._cells = row_cells
         self._widget_pool.append(row_frame)
         return row_frame
@@ -643,10 +663,10 @@ class VideoGridView:
         # 兜底保持已有 fallback 值 (24-26 px)
 
     def _compute_total_width(self) -> int:
-        """列总宽 + spacer 总宽."""
+        """列总宽 + spacer 总宽 (含固定宽的序号列)."""
         if not self._col_widths:
             return 0
-        cols = sum(self._col_widths.values())
+        cols = self.IDX_COL_WIDTH + sum(self._col_widths.values())
         spaces = max(0, len(self._col_widths) - 1) * self.GRAB_WIDTH
         return cols + spaces
 
@@ -671,7 +691,7 @@ class VideoGridView:
         self._col_widths[key] = new_width
         keys = list(self.columns.keys())
         data_idx = keys.index(key)
-        header_col_idx = data_idx * 2
+        header_col_idx = data_idx * 2 + 1   # +1: col0 预留给固定宽序号列
         self.header_frame.grid_columnconfigure(header_col_idx, minsize=new_width)
         # Header label text may re-truncate (列缩短时)
         header_lbl = self._header_labels[key]
@@ -684,7 +704,7 @@ class VideoGridView:
         # 池 widget: 即使未 mapped 也要更新 minsize (Tk 持久化 grid_columnconfigure
         # 选项; 否则下次 mapped 时 cell 宽度错位)。
         for widget in self._widget_pool:
-            widget.grid_columnconfigure(data_idx * 2, minsize=new_width)
+            widget.grid_columnconfigure(data_idx * 2 + 1, minsize=new_width)  # +1 序号列偏移
         # scrollregion 横向范围也随之变化
         self.canvas.configure(scrollregion=(
             0, 0, max(self.canvas.winfo_width(), self._compute_total_width()),
@@ -875,6 +895,10 @@ class VideoGridView:
                 continue
             widget._bound_data_idx = data_idx
             widget._info = info
+            # 序号列: 显示 1-based 全局行号 (data_idx + 1)
+            idx_text = str(data_idx + 1)
+            if widget._idx_cell.cget('text') != idx_text:
+                widget._idx_cell.config(text=idx_text)
             for key, cell in widget._cells:
                 full_text = self._format_cell(info, key)
                 width = self._col_widths[key]
@@ -898,6 +922,7 @@ class VideoGridView:
         for widget in self._widget_pool:
             widget._info = None
             widget._bound_data_idx = None
+            widget._idx_cell.config(text='', fg='black')  # 序号列也要清
             for _key, cell in widget._cells:
                 cell.config(text='', fg='black')
         self.canvas.yview_moveto(0)
@@ -1038,6 +1063,7 @@ class SnapshotProgressDialog:
     ROW_BG_PASS = '#E8F5E9'   # 浅绿
     ROW_BG_FAIL = '#FFEBEE'   # 浅红
     TITLE_COL_WIDTH = 250     # 与主表格 title 列宽一致
+    IDX_COL_WIDTH = 45       # 序号列宽 (固定, 不随时间点数量变化)
 
     def __init__(
         self, parent: tk.Tk,
@@ -1065,6 +1091,7 @@ class SnapshotProgressDialog:
         self.top.grab_set()
         self.top.geometry("1200x700")
 
+        self._build_output_dir_row()
         self._build_time_points_row()
         self._build_table_initial()
         self._build_status_row()
@@ -1081,9 +1108,37 @@ class SnapshotProgressDialog:
         )
         self._action_btn.pack(side='left')
 
+    def _build_output_dir_row(self):
+        """最顶一行: 截图地址 label + Entry + 「浏览」+ 「开始截图」按钮 (最右)"""
+        row = ttk.Frame(self.top, padding=(10, 5, 10, 0))
+        row.pack(side='top', fill='x')
+        ttk.Label(row, text="截图地址:").pack(side='left', padx=(0, 5))
+        self._output_dir_var = tk.StringVar(value=self._output_dir)
+        e = ttk.Entry(row, textvariable=self._output_dir_var)
+        e.pack(side='left', padx=(0, 5), fill='x', expand=True)
+        ttk.Button(
+            row, text="浏览", command=self._browse_output_dir,
+        ).pack(side='left', padx=2)
+        # 「开始截图」按钮 (与截图地址同一行, 最右; state 切换 idle/running/done)
+        self._action_btn = ttk.Button(
+            row, text="开始截图", width=14, command=self._on_action_btn,
+        )
+        self._action_btn.pack(side='right')
+
+    def _browse_output_dir(self) -> None:
+        """「浏览」按钮: 选截图输出文件夹, 写进 截图地址 Entry"""
+        from tkinter import filedialog
+        folder = filedialog.askdirectory(
+            title="选择截图存放文件夹", parent=self.top,
+        )
+        if folder:
+            if sys.platform == 'win32':
+                folder = folder.replace('/', '\\')
+            self._output_dir_var.set(folder)
+
     def _build_time_points_row(self):
-        """一行: 时间点 label + N 个 Entry + 「+」+ 「开始截图」按钮 (最右)"""
-        row = ttk.Frame(self.top, padding=(10, 5, 10, 5))
+        """一行: 时间点 label + N 个 Entry + 「+」按钮 (最后)"""
+        row = ttk.Frame(self.top, padding=(10, 0, 10, 5))
         row.pack(side='top', fill='x')
         ttk.Label(row, text="时间点:").pack(side='left', padx=(0, 5))
         self._tp_row = ttk.Frame(row)
@@ -1095,15 +1150,10 @@ class SnapshotProgressDialog:
             row, text="+", width=3,
             command=lambda: self._add_time_token_entry("00:00:00:00"),
         )
-        # 再建 entries (pack before=self._add_btn 保持 + 一直在最后)
+        # 再建 entries (pack after= 保持 + 一直在最后)
         for tok in self._time_tokens:
             self._add_time_token_entry(tok)
         self._add_btn.pack(side='left', padx=(5, 0))
-        # 「开始截图」按钮 (与时间点同一行, 最右; state 切换文字 idle/running/done)
-        self._action_btn = ttk.Button(
-            row, text="开始截图", width=14, command=self._on_action_btn,
-        )
-        self._action_btn.pack(side='right')
 
     def _add_time_token_entry(self, default: str = "00:00:00:00") -> None:
         """新加 (或初始化时) 一个时间点 Entry; 用 pack(after=...) 让新 entry 跟在
@@ -1174,21 +1224,31 @@ class SnapshotProgressDialog:
             w.bind('<Button-4>', self._on_mousewheel_linux)
             w.bind('<Button-5>', self._on_mousewheel_linux)
 
-        # 初始 col 0 (标题), 无时间点 col
-        self._header_frame.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
-        self._inner.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
+        # 列 0 = 序号 (固定宽), 列 1 = 标题 (250px), 无时间点 col
+        self._header_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
+        self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
+        self._header_frame.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
+        self._inner.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
+        ttk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9, 'bold'),
+                  relief='raised', width=5, anchor='center').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
         ttk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
-                  relief='raised', width=28, anchor='w').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+                  relief='raised', width=28, anchor='w').grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
 
-        # 行: 只文件名列 (无 cell)
+        # 行: 序号 + 文件名列 (无时间点 cell)
         self._cells: list[list[tk.Label]] = []
         self._row_title_labels: list[tk.Label] = []
+        self._row_idx_labels: list[tk.Label] = []
         for r, info in enumerate(self._files):
             row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
+            idx_lbl = tk.Label(self._inner, text=str(r + 1), anchor='center',
+                               width=5, bg=row_bg, font=('TkDefaultFont', 9),
+                               padx=4, pady=2)
+            idx_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+            self._row_idx_labels.append(idx_lbl)
             title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
                                  width=28, bg=row_bg, font=('TkDefaultFont', 9),
                                  padx=4, pady=2)
-            title_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+            title_lbl.grid(row=r, column=1, sticky='nsew', padx=4, pady=2)
             self._row_title_labels.append(title_lbl)
             self._cells.append([])  # 空行 cells, 跟 n_cols=0 对应
 
@@ -1214,37 +1274,47 @@ class SnapshotProgressDialog:
             except tk.TclError:
                 pass
 
-        # 设置列宽
-        self._header_frame.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
-        self._inner.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
+        # 设置列宽: col0=序号, col1=标题, col2..=时间点
+        self._header_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
+        self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
+        self._header_frame.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
+        self._inner.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         for c in range(n_cols):
-            self._header_frame.grid_columnconfigure(c + 1, minsize=cell_col_w)
-            self._inner.grid_columnconfigure(c + 1, minsize=cell_col_w)
+            self._header_frame.grid_columnconfigure(c + 2, minsize=cell_col_w)
+            self._inner.grid_columnconfigure(c + 2, minsize=cell_col_w)
 
-        # 表头: 标题 + N 个时间点
+        # 表头: 序号 + 标题 + N 个时间点
+        ttk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9, 'bold'),
+                  relief='raised', width=5, anchor='center').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
         ttk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
-                  relief='raised', width=28, anchor='w').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+                  relief='raised', width=28, anchor='w').grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
         for c, tok in enumerate(new_tokens):
             ttk.Label(self._header_frame,
                       text=f"T{c + 1}: {time_token_to_string(tok)}",
                       font=('TkDefaultFont', 9, 'bold'),
-                      relief='raised', width=14).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
+                      relief='raised', width=14).grid(row=0, column=c + 2, sticky='nsew', padx=4, pady=2)
 
-        # body cells: 行 × 时间点, 初始 '…' (loading)
+        # body: 序号 + 标题 + N 个时间点 cell (初始 '…')
         self._cells = []
         self._row_title_labels = []
+        self._row_idx_labels = []
         for r, info in enumerate(self._files):
             row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
+            idx_lbl = tk.Label(self._inner, text=str(r + 1), anchor='center',
+                               width=5, bg=row_bg, font=('TkDefaultFont', 9),
+                               padx=4, pady=2)
+            idx_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+            self._row_idx_labels.append(idx_lbl)
             title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
                                  width=28, bg=row_bg, font=('TkDefaultFont', 9),
                                  padx=4, pady=2)
-            title_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+            title_lbl.grid(row=r, column=1, sticky='nsew', padx=4, pady=2)
             self._row_title_labels.append(title_lbl)
             row_cells: list[tk.Label] = []
             for c in range(n_cols):
                 cell = tk.Label(self._inner, text='…', fg='gray', bg=row_bg,
                                 padx=4, pady=2, cursor='hand2')
-                cell.grid(row=r, column=c + 1, sticky='nsew', padx=1, pady=1)
+                cell.grid(row=r, column=c + 2, sticky='nsew', padx=1, pady=1)
                 cell.bind('<Button-1>', lambda _e, r=r, c=c: self._on_cell_click(r, c))
                 cell._image_path = None
                 row_cells.append(cell)
@@ -1291,13 +1361,15 @@ class SnapshotProgressDialog:
             except ValueError as e:
                 messagebox.showerror("错误", f"时间点格式错误: {e}")
                 return
+        # 输出目录以「截图地址」Entry 为准 (可在弹窗内改 / 浏览)
+        self._output_dir = self._output_dir_var.get().strip()
         if not self._output_dir:
-            messagebox.showwarning("提示", "没有输出目录。")
+            messagebox.showwarning("提示", "请先设置截图地址。")
             return
         try:
             os.makedirs(self._output_dir, exist_ok=True)
         except OSError as e:
-            messagebox.showerror("错误", f"无法创建输出目录:\n{e}")
+            messagebox.showerror("错误", f"无法创建截图地址:\n{e}")
             return
 
         self._time_tokens = tokens
@@ -1313,6 +1385,7 @@ class SnapshotProgressDialog:
         self._state = 'running'
         self._action_btn.config(text="截图中", state='normal')
         self._set_time_points_state('disabled')
+        self._output_dir_var.config(state='disabled')
 
         self._result_queue = queue.Queue()
         self._worker_thread = threading.Thread(
@@ -1388,6 +1461,7 @@ class SnapshotProgressDialog:
         self._state = 'done' if not cancelled else 'idle'  # 取消 → 回 idle 允许重抽
         self._action_btn.config(text="开始截图", state='normal')
         self._set_time_points_state('normal')
+        self._output_dir_var.config(state='normal')
         status = "抽帧已取消" if cancelled else "抽帧完成"
         self._status_var.set(
             f"{status}: {done}/{total} ({done - self._failed_count} 成功, {self._failed_count} 失败)"
@@ -1581,19 +1655,17 @@ class VideoCheckerApp:
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief='sunken', anchor='w', padding=3)
         status_bar.pack(fill='x', padx=5)
 
-        # === Bottom: 3 行 — 迁移地址 / 截图地址+定点截图 / 移动按钮 ===
+        # === Bottom: 迁移地址 + 移动/截图按钮 ===
         bottom_frame = ttk.Frame(self.root, padding=5)
         bottom_frame.pack(fill='x')
 
-        # Row 1: 迁移地址 + 移动按钮
         dest_row = ttk.Frame(bottom_frame)
-        dest_row.pack(fill='x', pady=(0, 5))
+        dest_row.pack(fill='x')
         ttk.Label(dest_row, text="迁移地址:").pack(side='left')
         self.dest_var = tk.StringVar()
         self.dest_entry = ttk.Entry(dest_row, textvariable=self.dest_var, width=50)
         self.dest_entry.pack(side='left', padx=(5, 2), fill='x', expand=True)
         ttk.Button(dest_row, text="浏览", command=self._browse_dest).pack(side='left', padx=2)
-        # 移动按钮合到迁移地址行, 在浏览后
         self.move_btn = ttk.Button(
             dest_row, text="移动达标文件", command=self._move_passing_files,
         )
@@ -1602,20 +1674,14 @@ class VideoCheckerApp:
             dest_row, text="移动全部文件", command=self._move_all_files,
         )
         self.move_all_btn.pack(side='left', padx=(5, 0))
-
-        # Row 2: 截图地址 (默认 = <文件路径>/snapshot, 可手动覆盖)
-        snap_row = ttk.Frame(bottom_frame)
-        snap_row.pack(fill='x', pady=(0, 5))
-        ttk.Label(snap_row, text="截图地址:").pack(side='left')
-        self.snapshot_dest_var = tk.StringVar()
-        self.snapshot_dest_entry = ttk.Entry(snap_row, textvariable=self.snapshot_dest_var, width=50)
-        self.snapshot_dest_entry.pack(side='left', padx=(5, 2), fill='x', expand=True)
-        ttk.Button(snap_row, text="浏览", command=self._browse_snapshot_dest).pack(side='left', padx=2)
-        # 「定点截图」按钮挪到这里, 在 截图地址-浏览 之后
+        # 「定点截图」按钮: 截图地址已移入弹窗顶部, 按钮跟迁移地址同排最右
         self.snapshot_btn = ttk.Button(
-            snap_row, text="定点截图", command=self._on_snapshot_btn_click,
+            dest_row, text="定点截图", command=self._on_snapshot_btn_click,
         )
-        self.snapshot_btn.pack(side='left', padx=(5, 0))
+        self.snapshot_btn.pack(side='left', padx=(15, 0))
+
+        # 截图输出目录 (弹窗内可改; 这里只存默认值, 由 _start_scan 自动填 <dir>/snapshot)
+        self.snapshot_dest_var = tk.StringVar()
 
         # 启用拖拽文件到表格
         self.grid.bind_drop(self._on_file_drop)
@@ -1664,12 +1730,6 @@ class VideoCheckerApp:
         folder = filedialog.askdirectory(title="选择迁移地址")
         if folder:
             self.dest_var.set(folder.replace('/', '\\'))
-
-    def _browse_snapshot_dest(self):
-        """选截图输出文件夹: 直接写入, 不自动建子目录 (用户自己挑)"""
-        folder = filedialog.askdirectory(title="选择截图存放文件夹")
-        if folder:
-            self.snapshot_dest_var.set(folder.replace('/', '\\'))
 
     def _on_scan_btn_click(self):
         """扫描按钮点击: 空闲时启动检测, 检测中触发停止。"""

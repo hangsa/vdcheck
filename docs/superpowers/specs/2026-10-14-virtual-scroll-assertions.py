@@ -161,11 +161,18 @@ if __name__ == "__main__":
           and grid._pending_resize[2] == grid._col_widths['title'])
 
     # 所有 widget (mapped 或否) 的 minsize 都应被即时更新
-    minsizes = [w.grid_columnconfigure(0, 'minsize') for w in grid._widget_pool]
+    # col 0 = 序号 (固定宽), title 列在 col 1 (数据列整体右移 1 位)
+    minsizes = [w.grid_columnconfigure(1, 'minsize') for w in grid._widget_pool]
     expected = grid._col_widths['title']
-    check("所有 widget 的 col 0 minsize 已更新 (无 mapped/not 分别)",
+    check("所有 widget 的 title col (col 1) minsize 已更新 (无 mapped/not 分别)",
           all(m == expected for m in minsizes),
           f"uniform={expected}, varied={list(set(minsizes))[:5]}...")
+
+    # col 0 = 序号列, 固定宽且不随列宽拖动变化
+    idx_minsizes = [w.grid_columnconfigure(0, 'minsize') for w in grid._widget_pool]
+    check("序号列 col 0 固定为 IDX_COL_WIDTH, 不受 title resize 影响",
+          all(m == grid.IDX_COL_WIDTH for m in idx_minsizes),
+          f"IDX_COL_WIDTH={grid.IDX_COL_WIDTH}, varied={list(set(idx_minsizes))[:5]}...")
 
     section("Column resize — release flushes pending text")
     # 验证 _end_col_resize 立即 flush (而非等 33ms)
