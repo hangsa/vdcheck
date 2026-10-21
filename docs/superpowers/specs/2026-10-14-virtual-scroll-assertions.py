@@ -351,6 +351,77 @@ if __name__ == "__main__":
           abs((wy8 + df_h8) - sr8) <= 4,
           f"window bottom={wy8 + df_h8}, sr_h={sr8}")
 
+    section("Scroll — 无隐藏内容时滚轮/滚动条禁用")
+    # 无头环境下 canvas 未映射 (winfo_height()==1), 不能依赖真实视口高度。
+    # 直接 mock canvas.winfo_height 返回已知视口, 验证判定逻辑与门控行为。
+    rh = grid._row_height or 24
+    VIEWPORT = 20 * rh          # 视口能放 20 行
+
+    orig_height = grid.canvas.winfo_height
+    grid.canvas.winfo_height = lambda: VIEWPORT   # type: ignore[method-assign]
+
+    # 视口放得下 (N=8 <= 20 行) → 无隐藏内容
+    grid.clear()
+    root.update_idletasks()
+    for i in range(8):
+        grid.add_row(make_info(i))
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    check("_has_hidden_rows 在数据装得下时为 False (8 行 <= 视口 20 行)",
+          not grid._has_hidden_rows(),
+          f"N={len(grid._data)}, sr_h={grid._scroll_height()}, viewport={VIEWPORT}")
+
+    # 滚轮无效: yview 不变
+    y_before = grid.canvas.yview()[0]
+    class _WheelEvt:
+        delta = -120
+        x = y = 0
+    grid._on_mousewheel(_WheelEvt())
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    check("数据装得下时滚轮无效 (yview 不变)",
+          grid.canvas.yview()[0] == y_before,
+          f"before={y_before:.3f}, after={grid.canvas.yview()[0]:.3f}")
+
+    # 滚动条拖动无效: command 换成空实现, 调用后 yview 不变
+    y_before = grid.canvas.yview()[0]
+    tk_cmd = grid.vsb.tk.call(grid.vsb._w, 'cget', '-command')
+    grid.vsb.tk.call(tk_cmd, 'moveto', 0.5)
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    check("数据装得下时滚动条拖动无效 (yview 不变)",
+          grid.canvas.yview()[0] == y_before,
+          f"before={y_before:.3f}, after={grid.canvas.yview()[0]:.3f}")
+
+    # 数据超过视口 (N=60 > 20 行) → 恢复可用
+    grid.clear()
+    root.update_idletasks()
+    for i in range(60):
+        grid.add_row(make_info(i))
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    check("数据超出视口时 _has_hidden_rows 为 True (60 行 > 视口 20 行)",
+          grid._has_hidden_rows(),
+          f"N={len(grid._data)}, sr_h={grid._scroll_height()}, viewport={VIEWPORT}")
+    # 无头环境下 yview_scroll 不推进 (canvas 未映射), 所以用 scrollbar 的
+    # command 验证「恢复可用」——它和滚轮走同一道 _has_hidden_rows 门控。
+    tk_cmd = grid.vsb.tk.call(grid.vsb._w, 'cget', '-command')
+    y_before = grid.canvas.yview()[0]
+    grid.vsb.tk.call(tk_cmd, 'moveto', 0.5)
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    check("数据超出视口时滚动条恢复可拖 (yview 推进)",
+          grid.canvas.yview()[0] != y_before,
+          f"before={y_before:.3f}, after={grid.canvas.yview()[0]:.3f}")
+
+    # 还原真实 winfo_height (后续 section 不受影响)
+    grid.canvas.winfo_height = orig_height  # type: ignore[method-assign]
+
     section("Public API — preserved")
     # add_row / clear / reorder / bind_drop / is_sorted 都存在且不抛
     methods = {'add_row', 'clear', 'reorder', 'bind_drop', 'is_sorted',

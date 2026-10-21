@@ -803,6 +803,8 @@ class VideoGridView:
         self.canvas.itemconfigure(
             self._canvas_window, width=max(event.width, natural)
         )
+        # 窗口高度变化 → 一页能放几行变了 → 重新判断有无隐藏内容
+        self._sync_scroll_enabled()
         # 窗口 resize 后 visible_count 可能变化, 重新计算可见区间
         self._schedule_render()
 
@@ -822,12 +824,44 @@ class VideoGridView:
         self.canvas.unbind_all('<Button-4>')
         self.canvas.unbind_all('<Button-5>')
 
+    def _has_hidden_rows(self) -> bool:
+        """是否还有被滚动隐藏的行 (内容总高 > 视口高).
+
+        内容未超出视口时 (如视口能放 40 行但只有 30 行数据),
+        滚轮和滚动条都应禁用 — 没有可滚的内容。
+        """
+        canvas_h = self.canvas.winfo_height()
+        if canvas_h <= 1:
+            canvas_h = self.canvas.winfo_reqheight()
+        if canvas_h <= 1:
+            return False
+        return self._scroll_height() > canvas_h
+
+    def _sync_scroll_enabled(self) -> None:
+        """按有无隐藏内容同步滚动条: 无内容可滚时 command 置空 (拖不动).
+
+        ttk.Scrollbar 没有 -state 选项 (ttk 样式控制), 所以用
+        command 换成空实现来真正禁用拖动 — 否则用户仍能拖 thumb,
+        只是 yview 立即被 clamp 回 0, 视觉上像是"拖了没反应"。
+        """
+        if not hasattr(self, 'vsb'):
+            return
+        if self._has_hidden_rows():
+            self.vsb.config(command=lambda *a: (
+                self.canvas.yview(*a), self._schedule_render()))
+        else:
+            self.vsb.config(command=lambda *a: None)
+
     def _on_mousewheel(self, event):
+        if not self._has_hidden_rows():
+            return  # 无隐藏内容 → 滚轮无效
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
         # yview 改变后哪些 data 在可见区需要重算 → 排程 render
         self._schedule_render()
 
     def _on_mousewheel_linux(self, event):
+        if not self._has_hidden_rows():
+            return  # 无隐藏内容 → 滚轮无效
         delta = -1 if event.num == 4 else 1
         self.canvas.yview_scroll(delta, 'units')
         self._schedule_render()
@@ -863,6 +897,7 @@ class VideoGridView:
                 0, 0, self.canvas.winfo_width(), 0,
             ))
             self._first_idx, self._last_idx = 0, 0
+            self._sync_scroll_enabled()  # 无数据 → 滚动条禁用
             return
 
         # 行高兜底: 若首次 render 未拿到 (mapped 前), 用 26 px
@@ -950,6 +985,7 @@ class VideoGridView:
         total_h = self._scroll_height()
         total_w = max(self.canvas.winfo_width(), self._compute_total_width())
         self.canvas.configure(scrollregion=(0, 0, total_w, total_h))
+        self._sync_scroll_enabled()  # 无隐藏内容 → 滚动条置灰
 
     def clear(self):
         """清空所有数据行，滚动条复位。"""
@@ -968,6 +1004,7 @@ class VideoGridView:
             0, 0, self.canvas.winfo_width(), 0,
         ))
         self._first_idx = self._last_idx = 0
+        self._sync_scroll_enabled()  # 无数据 → 滚动条禁用
         # 不需要 _render_visible (上面已经手工清空且 n=0 时 _render 也是 noop)
 
     def add_row(self, info: VideoInfo):
