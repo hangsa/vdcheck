@@ -1132,8 +1132,12 @@ class SnapshotProgressDialog:
     THUMB_DISPLAY_W = EXTRACT_THUMB_W // 2  # cell 显示宽度 (subsample 2 后) = 320
     THUMB_FULL_W = EXTRACT_THUMB_W          # extract_frame 写盘宽度; click-enlarge 也用这个尺寸
     THUMB_SUBSAMPLE = 2                     # 640 / 320 = 2
-    ROW_BG_PASS = '#E8F5E9'   # 浅绿
+    ROW_BG_PASS = '#E8F5E9'   # 浅绿 (保留常量, 供未来可选开启)
     ROW_BG_FAIL = '#FFEBEE'   # 浅红
+    # 文字色: 与主界面 VideoGridView.FG_PASS / FG_FAIL 保持一致。
+    # 主界面不画整行底色, 只用 fg 区分达标/不达标; 这里对齐该做法。
+    FG_PASS = '#228B22'       # 绿字 (达标)
+    FG_FAIL = '#DC143C'       # 红字 (不达标)
     TITLE_COL_WIDTH = 250     # 与主表格 title 列宽一致
     IDX_COL_WIDTH = 45       # 序号列宽 (固定, 不随时间点数量变化)
 
@@ -1173,7 +1177,7 @@ class SnapshotProgressDialog:
 
     def _build_top_bar(self):
         """顶部一行: 「开始截图」/「截图中」按钮"""
-        bar = ttk.Frame(self.top, padding=(10, 5, 10, 0))
+        bar = ttk.Frame(self.top, padding=5)
         bar.pack(side='top', fill='x')
         self._action_btn = ttk.Button(
             bar, text="开始截图", width=14, command=self._on_action_btn,
@@ -1182,7 +1186,7 @@ class SnapshotProgressDialog:
 
     def _build_output_dir_row(self):
         """最顶一行: 截图地址 label + Entry + 「浏览」+ 「开始截图」按钮 (最右)"""
-        row = ttk.Frame(self.top, padding=(10, 5, 10, 0))
+        row = ttk.Frame(self.top, padding=5)
         row.pack(side='top', fill='x')
         ttk.Label(row, text="截图地址:").pack(side='left', padx=(0, 5))
         self._output_dir_var = tk.StringVar(value=self._output_dir)
@@ -1210,7 +1214,7 @@ class SnapshotProgressDialog:
 
     def _build_time_points_row(self):
         """一行: 时间点 label + N 个 Entry + 「+」按钮 (最后)"""
-        row = ttk.Frame(self.top, padding=(10, 0, 10, 5))
+        row = ttk.Frame(self.top, padding=5)
         row.pack(side='top', fill='x')
         ttk.Label(row, text="时间点:").pack(side='left', padx=(0, 5))
         self._tp_row = ttk.Frame(row)
@@ -1301,28 +1305,44 @@ class SnapshotProgressDialog:
         self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
         self._header_frame.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
-        ttk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9, 'bold'),
-                  relief='raised', width=5, anchor='center').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
-        ttk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
-                  relief='raised', width=28, anchor='w').grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
+        # 表头: 与主界面 VideoGridView 一致 — tk.Label / TkDefaultFont 9 (非粗) /
+        # relief='raised' + bd=1 / padx=4 pady=2
+        tk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9),
+                 relief='raised', bd=1, width=5, anchor='center').grid(
+            row=0, column=0, sticky='nsew', padx=4, pady=2)
+        tk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9),
+                 relief='raised', bd=1, width=28, anchor='w').grid(
+            row=0, column=1, sticky='nsew', padx=4, pady=2)
 
         # 行: 序号 + 文件名列 (无时间点 cell)
         self._cells: list[list[tk.Label]] = []
         self._row_title_labels: list[tk.Label] = []
         self._row_idx_labels: list[tk.Label] = []
         for r, info in enumerate(self._files):
-            row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
-            idx_lbl = tk.Label(self._inner, text=str(r + 1), anchor='center',
-                               width=5, bg=row_bg, font=('TkDefaultFont', 9),
-                               padx=4, pady=2)
-            idx_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+            idx_lbl, title_lbl = self._make_row_labels(r, info)
             self._row_idx_labels.append(idx_lbl)
-            title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
-                                 width=28, bg=row_bg, font=('TkDefaultFont', 9),
-                                 padx=4, pady=2)
-            title_lbl.grid(row=r, column=1, sticky='nsew', padx=4, pady=2)
             self._row_title_labels.append(title_lbl)
             self._cells.append([])  # 空行 cells, 跟 n_cols=0 对应
+
+    def _make_row_labels(self, r: int, info) -> tuple[tk.Label, tk.Label]:
+        """建一行的「序号」+「标题」两个 label.
+
+        配色对齐主界面 VideoGridView._cell_fg 的语义 — 不画整行底色,
+        只用 fg 区分: 达标全绿字, 不达标标题红字。
+        """
+        if info.is_passing:
+            fg = self.FG_PASS
+        else:
+            fg = self.FG_FAIL
+        idx_lbl = tk.Label(self._inner, text=str(r + 1), anchor='center',
+                           width=5, font=('TkDefaultFont', 9),
+                           padx=4, pady=2, fg=fg)
+        idx_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+        title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
+                             width=28, font=('TkDefaultFont', 9),
+                             padx=4, pady=2, fg=fg)
+        title_lbl.grid(row=r, column=1, sticky='nsew', padx=4, pady=2)
+        return idx_lbl, title_lbl
 
     def _update_table(self, new_tokens: list[str]) -> None:
         """起跑前调用: 按 new_tokens 重建表头 + cells.
@@ -1356,35 +1376,33 @@ class SnapshotProgressDialog:
             self._inner.grid_columnconfigure(c + 2, minsize=cell_col_w)
 
         # 表头: 序号 + 标题 + N 个时间点
-        ttk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9, 'bold'),
-                  relief='raised', width=5, anchor='center').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
-        ttk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
-                  relief='raised', width=28, anchor='w').grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
+        # 表头: 与主界面 VideoGridView 一致 — tk.Label / TkDefaultFont 9 (非粗) /
+        # relief='raised' + bd=1 / padx=4 pady=2
+        tk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9),
+                 relief='raised', bd=1, width=5, anchor='center').grid(
+            row=0, column=0, sticky='nsew', padx=4, pady=2)
+        tk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9),
+                 relief='raised', bd=1, width=28, anchor='w').grid(
+            row=0, column=1, sticky='nsew', padx=4, pady=2)
         for c, tok in enumerate(new_tokens):
-            ttk.Label(self._header_frame,
-                      text=f"T{c + 1}: {time_token_to_string(tok)}",
-                      font=('TkDefaultFont', 9, 'bold'),
-                      relief='raised', width=14).grid(row=0, column=c + 2, sticky='nsew', padx=4, pady=2)
+            tk.Label(self._header_frame,
+                     text=f"T{c + 1}: {time_token_to_string(tok)}",
+                     font=('TkDefaultFont', 9),
+                     relief='raised', bd=1, width=14).grid(
+                row=0, column=c + 2, sticky='nsew', padx=4, pady=2)
 
         # body: 序号 + 标题 + N 个时间点 cell (初始 '…')
         self._cells = []
         self._row_title_labels = []
         self._row_idx_labels = []
         for r, info in enumerate(self._files):
-            row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
-            idx_lbl = tk.Label(self._inner, text=str(r + 1), anchor='center',
-                               width=5, bg=row_bg, font=('TkDefaultFont', 9),
-                               padx=4, pady=2)
-            idx_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+            idx_lbl, title_lbl = self._make_row_labels(r, info)
             self._row_idx_labels.append(idx_lbl)
-            title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
-                                 width=28, bg=row_bg, font=('TkDefaultFont', 9),
-                                 padx=4, pady=2)
-            title_lbl.grid(row=r, column=1, sticky='nsew', padx=4, pady=2)
             self._row_title_labels.append(title_lbl)
             row_cells: list[tk.Label] = []
             for c in range(n_cols):
-                cell = tk.Label(self._inner, text='…', fg='gray', bg=row_bg,
+                # 图片 cell 无底色 (与主界面一致), 加载中用灰色「…」提示
+                cell = tk.Label(self._inner, text='…', fg='gray',
                                 padx=4, pady=2, cursor='hand2')
                 cell.grid(row=r, column=c + 2, sticky='nsew', padx=1, pady=1)
                 cell.bind('<Button-1>', lambda _e, r=r, c=c: self._on_cell_click(r, c))
@@ -1400,7 +1418,7 @@ class SnapshotProgressDialog:
 
     def _build_status_row(self):
         """底部: 状态文字 + 进度条 (从原版顶部挪下来)"""
-        row = ttk.Frame(self.top, padding=(10, 5, 10, 10))
+        row = ttk.Frame(self.top, padding=5)
         row.pack(side='bottom', fill='x')
         self._status_var = tk.StringVar(value="就绪 — 点「开始截图」开始")
         ttk.Label(row, textvariable=self._status_var, anchor='w').pack(side='top', fill='x')
