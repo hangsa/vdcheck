@@ -1065,9 +1065,8 @@ class SnapshotProgressDialog:
         self.top.grab_set()
         self.top.geometry("1200x700")
 
-        self._build_top_bar()
         self._build_time_points_row()
-        self._build_table()
+        self._build_table_initial()
         self._build_status_row()
         self.top.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1083,26 +1082,38 @@ class SnapshotProgressDialog:
         self._action_btn.pack(side='left')
 
     def _build_time_points_row(self):
-        """一行: 时间点 label + N 个 Entry + 「+」加按钮"""
-        row = ttk.Frame(self.top, padding=(10, 0, 10, 5))
+        """一行: 时间点 label + N 个 Entry + 「+」+ 「开始截图」按钮 (最右)"""
+        row = ttk.Frame(self.top, padding=(10, 5, 10, 5))
         row.pack(side='top', fill='x')
         ttk.Label(row, text="时间点:").pack(side='left', padx=(0, 5))
         self._tp_row = ttk.Frame(row)
         self._tp_row.pack(side='left', fill='x', expand=True)
         self._time_token_vars: list[tk.StringVar] = []
         self._time_token_entries: list[ttk.Entry] = []
-        for tok in self._time_tokens:
-            self._add_time_token_entry(tok)
-        ttk.Button(
+        # 先建 + 按钮 (作为「最后位置」标记, entries 排它前面)
+        self._add_btn = ttk.Button(
             row, text="+", width=3,
             command=lambda: self._add_time_token_entry("00:00:00:00"),
-        ).pack(side='left', padx=(5, 0))
+        )
+        # 再建 entries (pack before=self._add_btn 保持 + 一直在最后)
+        for tok in self._time_tokens:
+            self._add_time_token_entry(tok)
+        self._add_btn.pack(side='left', padx=(5, 0))
+        # 「开始截图」按钮 (与时间点同一行, 最右; state 切换文字 idle/running/done)
+        self._action_btn = ttk.Button(
+            row, text="开始截图", width=14, command=self._on_action_btn,
+        )
+        self._action_btn.pack(side='right')
 
     def _add_time_token_entry(self, default: str = "00:00:00:00") -> None:
-        """新加 (或初始化时) 一个时间点 Entry 到 _tp_row"""
+        """新加 (或初始化时) 一个时间点 Entry; 用 pack(after=...) 让新 entry 跟在
+        当前最后 entry 之后 (即 + 按钮之前), 保持 + 按钮永远在末位"""
         var = tk.StringVar(value=default)
         e = ttk.Entry(self._tp_row, textvariable=var, width=10)
-        e.pack(side='left', padx=(0, 5))
+        # after=self._time_token_entries[-1] 让新 entry 排在最后一个 entry 之后
+        # (= + 按钮之前); entries 空时 after=None 走默认 (leftmost)
+        after_widget = self._time_token_entries[-1] if self._time_token_entries else None
+        e.pack(side='left', padx=(0, 5), after=after_widget)
         # 双击只选所在段 (HH/MM/SS/frame), 不全选
         e.bind('<Double-Button-1>', self._on_entry_double_click)
         self._time_token_vars.append(var)
@@ -1135,8 +1146,8 @@ class SnapshotProgressDialog:
         entry.icursor(sec_end)
         return 'break'
 
-    def _build_table(self):
-        """中间: 冻结 header + canvas + cells (跟原版一样的布局, 关键是 canvas master=_middle)"""
+    def _build_table_initial(self):
+        """初始表 (无时间点列): 只「标题」col, 文件名列. 时间点列在起跑时按选中 tokens 加."""
         self._middle = ttk.Frame(self.top)
         self.canvas = tk.Canvas(self._middle, highlightthickness=0)
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
@@ -1163,24 +1174,13 @@ class SnapshotProgressDialog:
             w.bind('<Button-4>', self._on_mousewheel_linux)
             w.bind('<Button-5>', self._on_mousewheel_linux)
 
-        n_cols = len(self._time_tokens)
+        # 初始 col 0 (标题), 无时间点 col
         self._header_frame.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
-        cell_col_w = self.THUMB_DISPLAY_W + 8
-        for c in range(n_cols):
-            self._header_frame.grid_columnconfigure(c + 1, minsize=cell_col_w)
-            self._inner.grid_columnconfigure(c + 1, minsize=cell_col_w)
-
-        # 列头 (在 _header_frame, 不随 body 滚动)
         ttk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
                   relief='raised', width=28, anchor='w').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
-        for c, tok in enumerate(self._time_tokens):
-            ttk.Label(self._header_frame,
-                      text=f"T{c+1}: {time_token_to_string(tok)}",
-                      font=('TkDefaultFont', 9, 'bold'),
-                      relief='raised', width=14).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
 
-        # 行 (行 = 文件, 列 = 时间点)
+        # 行: 只文件名列 (无 cell)
         self._cells: list[list[tk.Label]] = []
         self._row_title_labels: list[tk.Label] = []
         for r, info in enumerate(self._files):
@@ -1190,16 +1190,71 @@ class SnapshotProgressDialog:
                                  padx=4, pady=2)
             title_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
             self._row_title_labels.append(title_lbl)
+            self._cells.append([])  # 空行 cells, 跟 n_cols=0 对应
+
+    def _update_table(self, new_tokens: list[str]) -> None:
+        """起跑前调用: 按 new_tokens 重建表头 + cells.
+        (清掉旧 photo refs; 销毁旧子 widget; 重建; 重设 column minsize.)"""
+        self._time_tokens = list(new_tokens)
+        n_cols = len(new_tokens)
+        cell_col_w = self.THUMB_DISPLAY_W + 8
+
+        # 清掉旧子 widget + 旧 photo refs (避免内存泄漏)
+        for w in self._header_frame.winfo_children():
+            w.destroy()
+        for w in self._inner.winfo_children():
+            w.destroy()
+        self._photo_refs.clear()
+
+        # 重置所有 columnconfigure (清掉旧列的 minsize, 避免空列占位)
+        for c in range(max(20, n_cols + 2)):
+            try:
+                self._header_frame.grid_columnconfigure(c, minsize=0)
+                self._inner.grid_columnconfigure(c, minsize=0)
+            except tk.TclError:
+                pass
+
+        # 设置列宽
+        self._header_frame.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
+        self._inner.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
+        for c in range(n_cols):
+            self._header_frame.grid_columnconfigure(c + 1, minsize=cell_col_w)
+            self._inner.grid_columnconfigure(c + 1, minsize=cell_col_w)
+
+        # 表头: 标题 + N 个时间点
+        ttk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
+                  relief='raised', width=28, anchor='w').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+        for c, tok in enumerate(new_tokens):
+            ttk.Label(self._header_frame,
+                      text=f"T{c + 1}: {time_token_to_string(tok)}",
+                      font=('TkDefaultFont', 9, 'bold'),
+                      relief='raised', width=14).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
+
+        # body cells: 行 × 时间点, 初始 '…' (loading)
+        self._cells = []
+        self._row_title_labels = []
+        for r, info in enumerate(self._files):
+            row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
+            title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
+                                 width=28, bg=row_bg, font=('TkDefaultFont', 9),
+                                 padx=4, pady=2)
+            title_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+            self._row_title_labels.append(title_lbl)
             row_cells: list[tk.Label] = []
             for c in range(n_cols):
-                # width/height 不设: 设了会压制 compound='center' + image 的尺寸
                 cell = tk.Label(self._inner, text='…', fg='gray', bg=row_bg,
                                 padx=4, pady=2, cursor='hand2')
                 cell.grid(row=r, column=c + 1, sticky='nsew', padx=1, pady=1)
                 cell.bind('<Button-1>', lambda _e, r=r, c=c: self._on_cell_click(r, c))
-                cell._image_path: str | None = None
+                cell._image_path = None
                 row_cells.append(cell)
             self._cells.append(row_cells)
+
+        # 强制 inner re-layout, 重设 scrollregion
+        self._inner.update_idletasks()
+        self.canvas.config(scrollregion=(
+            0, 0, self._inner.winfo_reqwidth(), self._inner.winfo_reqheight()))
+        self.canvas.yview_moveto(0)
 
     def _build_status_row(self):
         """底部: 状态文字 + 进度条 (从原版顶部挪下来)"""
@@ -1246,7 +1301,8 @@ class SnapshotProgressDialog:
             return
 
         self._time_tokens = tokens
-        self._reset_cells_for_new_run()
+        # 按当前 tokens 重建表头 + cells (用户在跑之前可能改了时间点)
+        self._update_table(tokens)
 
         self._cancel_event.clear()
         self._cells_processed = 0
@@ -1266,15 +1322,6 @@ class SnapshotProgressDialog:
         )
         self._worker_thread.start()
         self._poll_queue()
-
-    def _reset_cells_for_new_run(self):
-        """重新扫描时清空 cell 显示, 回到 '...' (loading) 状态"""
-        for r in range(len(self._files)):
-            for c in range(len(self._time_tokens)):
-                cell = self._cells[r][c]
-                cell._image_path = None
-                self.mark_loading(r, c)
-        self._photo_refs.clear()
 
     def _worker_entry(self, time_tokens: list[str], output_dir: str):
         """后台 worker: 对每个文件 × 时间点顺序调 ffmpeg 抽帧"""
