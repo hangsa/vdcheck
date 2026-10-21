@@ -906,8 +906,12 @@ class VideoGridView:
         self.canvas.coords(self._canvas_window, 0, first * self._row_height)
 
         # 池 widget slot → data 绑定 (倒序填充, 视觉顺序不变)
+        used = last - first
         for slot, data_idx in enumerate(range(first, last)):
             widget = self._widget_pool[slot]
+            # 用到的 slot 必须在布局里 (上次可能被 pack_forget 过)
+            if not widget.winfo_manager():
+                widget.pack(fill='x', before=self._bottom_spacer)
             info = self._data[data_idx]
             # 未变化就跳过 cell 重写; 这是热路径, 大量命中此分支。
             if (widget._bound_data_idx == data_idx
@@ -930,9 +934,19 @@ class VideoGridView:
                 if cell.cget('fg') != new_fg:
                     cell.config(fg=new_fg)
 
-        # scrollregion: 显式计算, 不用 bbox('all'); bbox 只含 mapped widget。
-        # 高度用 _scroll_height() (实际渲染内容总高), 不用 N * row_height —
-        # 后者比真实内容短, 滚到两端时可视区会露白。
+        # 用不到的池 widget 必须移出布局: 否则它们仍占 data_frame 高度
+        # (POOL_SIZE × rh), 让 window item 比 scrollregion 高出几百 px,
+        # 滚动时可视区露白。N < 可视行数时最明显 (池 40 vs 数据 8)。
+        for slot in range(used, len(self._widget_pool)):
+            widget = self._widget_pool[slot]
+            if widget.winfo_manager():
+                widget.pack_forget()
+            widget._bound_data_idx = None
+            widget._info = None
+
+        # scrollregion 高 = N × row_height (恒定, 与池大小无关; 未用 slot 已
+        # pack_forget, 所以 window item 实际高恰好等于可视行数 × rh,
+        # 滚动时不会出现露白)。
         total_h = self._scroll_height()
         total_w = max(self.canvas.winfo_width(), self._compute_total_width())
         self.canvas.configure(scrollregion=(0, 0, total_w, total_h))

@@ -315,6 +315,42 @@ if __name__ == "__main__":
           content_bot >= vis_bot,
           f"content_bot={content_bot}, vis_bot={vis_bot:.0f}")
 
+    section("Scroll — 未用池 slot 移出布局 (data < 可视行数时不露白)")
+    # 回归: 池 POOL_SIZE=40 恒定, 但数据可能只有 8 行。未用的 slot 若仍
+    # pack 在 data_frame 里, 会占 32×rh 空白, 让 window item 比 scrollregion
+    # 高出几百 px, 滚动时可视区露白 (用户截图: 8 行数据, 上下都有空白)。
+    grid.clear()
+    for i in range(8):
+        grid.add_row(make_info(i))
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    mapped = sum(1 for w in grid._widget_pool if w.winfo_manager())
+    check("N=8 时只有 8 个池 widget 在布局中 (其余 pack_forget)",
+          mapped == 8,
+          f"mapped={mapped}, pool={len(grid._widget_pool)}")
+    df_h = grid.data_frame.winfo_reqheight()
+    check("N=8 时 data_frame 高 ≈ 8 × row_height (无多余空白)",
+          abs(df_h - 8 * grid._row_height) <= 4,
+          f"df_h={df_h}, 8×rh={8 * grid._row_height}")
+    sr_h8 = float(grid.canvas.cget('scrollregion').split()[3])
+    check("N=8 时 scrollregion 高 == N × row_height",
+          sr_h8 == 8 * grid._row_height,
+          f"sr_h={sr_h8}")
+
+    # 滚到底时 window item 仍贴合内容 (无底部空白)
+    grid.canvas.yview_moveto(1.0)
+    root.update_idletasks()
+    grid._render_visible(force=True)
+    root.update_idletasks()
+    wy8 = grid.canvas.coords(grid._canvas_window)[1]
+    df_h8 = grid.data_frame.winfo_reqheight()
+    f0b, f1b = grid.canvas.yview()
+    sr8 = float(grid.canvas.cget('scrollregion').split()[3])
+    check("N=8 滚到底时 window item 底 == scrollregion 底 (无露白)",
+          abs((wy8 + df_h8) - sr8) <= 4,
+          f"window bottom={wy8 + df_h8}, sr_h={sr8}")
+
     section("Public API — preserved")
     # add_row / clear / reorder / bind_drop / is_sorted 都存在且不抛
     methods = {'add_row', 'clear', 'reorder', 'bind_drop', 'is_sorted',
