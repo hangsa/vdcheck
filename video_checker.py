@@ -983,190 +983,6 @@ class VideoGridView:
         self._render_visible(force=True)
 
 
-class SnapshotInputDialog:
-    """定点截图的时间点输入对话框: 模态.
-
-    输出目录不由对话框管理: 主界面的「截图地址」字段是唯一来源,
-    通过 default_output_dir 传入, 用户只填时间点 + 确认。
-
-    关闭后通过 dlg.result 取值:
-        None = 用户取消
-        (time_tokens, output_dir) = 用户确认 (output_dir = default_output_dir)
-    """
-
-    def __init__(self, parent: tk.Tk, default_output_dir: str = ''):
-        self.result: tuple[list[str], str] | None = None
-        self._output_dir = default_output_dir  # 对话框唯一的输出目录值
-        self.top = tk.Toplevel(parent)
-        self.top.title("定点截图")
-        self.top.transient(parent)
-        self.top.grab_set()
-        self.top.resizable(False, False)
-
-        # 时间点区
-        self._time_frame = ttk.Frame(self.top, padding=10)
-        self._time_frame.pack(fill='x')
-
-        ttk.Label(self._time_frame, text="时间点 (HH:MM:SS:frame):").pack(
-            side='top', anchor='w'
-        )
-
-        self._entries: list[ttk.Entry] = []
-        self._rows_frame = ttk.Frame(self._time_frame)
-        self._rows_frame.pack(fill='x', pady=(5, 0))
-        for default in ("00:00:07:24", "00:00:08:00"):
-            self._add_time_row(default)
-
-        ttk.Button(
-            self._time_frame, text="+ 添加时间点",
-            command=lambda: self._add_time_row("00:00:00:00"),
-        ).pack(side='top', anchor='w', pady=(5, 0))
-
-        # 错误标签 (校验失败时显示)
-        self._err_var = tk.StringVar()
-        self._err_label = ttk.Label(
-            self.top, textvariable=self._err_var, foreground='red',
-            padding=(10, 0),
-        )
-        self._err_label.pack(fill='x')
-
-        # 确认 / 取消
-        btn_frame = ttk.Frame(self.top, padding=10)
-        btn_frame.pack(fill='x')
-        self._confirm_btn = ttk.Button(
-            btn_frame, text="确认", command=self._on_confirm,
-        )
-        self._confirm_btn.pack(side='right', padx=(5, 0))
-        ttk.Button(
-            btn_frame, text="取消", command=self._on_cancel,
-        ).pack(side='right')
-
-        self.top.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        # 居中到 parent
-        self.top.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width() - self.top.winfo_width()) // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - self.top.winfo_height()) // 2
-        self.top.geometry(f"+{x}+{y}")
-        # 实时校验
-        for e in self._entries:
-            e.bind('<KeyRelease>', lambda _ev: self._validate())
-        self._validate()
-
-    def _add_time_row(self, default: str) -> None:
-        row = ttk.Frame(self._rows_frame)
-        row.pack(fill='x', pady=2)
-        idx = len(self._entries)
-        lbl = ttk.Label(row, text=f"时间点 {idx + 1}:", width=8)
-        lbl.pack(side='left')
-        var = tk.StringVar(value=default)
-        e = ttk.Entry(row, textvariable=var, width=15)
-        e.pack(side='left', padx=(0, 5))
-        var.trace_add('write', lambda *_: self._validate())
-        e._var = var  # 保持引用, 防 GC
-        # 双击只选所在段 (HH / MM / SS / frame), 不全选
-        e.bind('<Double-Button-1>', self._on_entry_double_click)
-        del_btn = ttk.Button(
-            row, text="删除", width=6,
-            command=lambda: self._remove_time_row(e),
-        )
-        del_btn.pack(side='left')
-        e._del_btn = del_btn
-        e._lbl = lbl
-        self._entries.append(e)
-        self._refresh_delete_visibility()
-
-    def _on_entry_double_click(self, event) -> str:
-        """双击 Entry: 按 x 坐标定位所在段, select_range 选该段, 阻止默认全选.
-
-        段定义: HH:MM:SS:frame — colons 是分隔符, 每段是 2 字符
-        (frame 段可能更长, 取决于帧号位数)。
-        """
-        entry = event.widget
-        try:
-            idx = entry.index(f'@{event.x}')
-        except tk.TclError:
-            return 'break'
-        text = entry.get()
-        if not text:
-            return 'break'
-        colons = [i for i, c in enumerate(text) if c == ':']
-        # 没有冒号 (e.g. 用户清空) → 全选
-        if not colons:
-            entry.select_range(0, len(text))
-            entry.icursor('end')
-            return 'break'
-        # 按 idx 定位段: idx <= 第 k 个 colon → 选第 k 段
-        if idx <= colons[0]:
-            sec_start, sec_end = 0, colons[0]
-        elif len(colons) >= 2 and idx <= colons[1]:
-            sec_start, sec_end = colons[0] + 1, colons[1]
-        elif len(colons) >= 3 and idx <= colons[2]:
-            sec_start, sec_end = colons[1] + 1, colons[2]
-        else:
-            sec_start, sec_end = colons[-1] + 1, len(text)
-        entry.select_range(sec_start, sec_end)
-        entry.icursor(sec_end)
-        return 'break'
-
-    def _remove_time_row(self, entry: ttk.Entry) -> None:
-        if len(self._entries) <= 1:
-            return
-        idx = self._entries.index(entry)
-        entry._var.set('')
-        entry._del_btn.destroy()
-        entry._lbl.destroy()
-        entry.master.destroy()
-        self._entries.pop(idx)
-        # 重编号
-        for i, e in enumerate(self._entries):
-            e._lbl.config(text=f"时间点 {i + 1}:")
-        self._refresh_delete_visibility()
-        self._validate()
-
-    def _refresh_delete_visibility(self) -> None:
-        # 至少保留 1 个时间点, 所以只有 1 个时隐藏删除按钮
-        show = len(self._entries) > 1
-        for e in self._entries:
-            e._del_btn.pack(side='left') if show else e._del_btn.pack_forget()
-
-    def _validate(self) -> None:
-        """实时校验时间点; 输出目录在外层主界面管理, 此处不校验."""
-        # 时间点
-        for e in self._entries:
-            e.config(foreground='black')
-        bad_time = None
-        for e in self._entries:
-            v = e._var.get().strip()
-            if not v:
-                bad_time = "时间点不能为空"
-                e.config(foreground='red')
-                break
-            parts = v.split(':')
-            if len(parts) != 4:
-                bad_time = f"格式错误: {v!r} (应为 HH:MM:SS:frame)"
-                e.config(foreground='red')
-                break
-            try:
-                h, m, s, f = (int(p) for p in parts)
-                if h < 0 or m < 0 or s < 0 or f < 0 or m > 59 or s > 59:
-                    bad_time = f"数值越界: {v!r}"
-                    e.config(foreground='red')
-                    break
-            except ValueError:
-                bad_time = f"非数字段: {v!r}"
-                e.config(foreground='red')
-                break
-        self._err_var.set(bad_time or "")
-        self._confirm_btn.config(state='normal' if (not bad_time) else 'disabled')
-
-    def _on_confirm(self) -> None:
-        tokens = [e._var.get().strip() for e in self._entries]
-        self.result = (tokens, self._output_dir)  # 输出目录沿用主界面传入
-        self.top.destroy()
-
-    def _on_cancel(self) -> None:
-        self.result = None
-        self.top.destroy()
 
 
 class EnlargeDialog:
@@ -1203,14 +1019,17 @@ class EnlargeDialog:
 
 
 class SnapshotProgressDialog:
-    """定点截图的进度弹窗: 表格 (行=文件, 列=时间点) + 状态栏 + 取消/关闭.
+    """定点截图单窗口界面 (代替原 弹窗+输入对话框 两段式):
+       顶部: 开始/截图中 按钮 + 时间点输入栏 (一行, 默认 2 个, 可加)
+       中间: 文件 × 时间点 表格 (canvas + cells, 与原版布局相同)
+       底部: 状态文字 + 进度条 (从原版顶部挪下来)
 
-    自带 scrollable Canvas+Frame 布局, 不复用 VideoGridView.
+    状态机:
+      idle:   初始 / 取消后 — 按钮「开始截图」
+      running: worker 跑 — 按钮「截图中」(点击取消当前扫描)
+      done:   全部跑完 — 按钮「开始截图」(重抽)
 
-    显示特性:
-    - 顶部水平进度条 (X/Y) + 文字状态
-    - 整行染色: pass=浅绿 / fail=浅红, 一眼看出问题文件
-    - 点 cell 弹 EnlargeDialog 看 480x270 原图
+    关闭用窗口 X 按钮; running 时点 X 弹确认。
     """
 
     THUMB_DISPLAY_W = EXTRACT_THUMB_W // 2  # cell 显示宽度 (subsample 2 后) = 320
@@ -1222,17 +1041,23 @@ class SnapshotProgressDialog:
 
     def __init__(
         self, parent: tk.Tk,
-        files: list, time_tokens: list[str], output_dir: str,
+        files: list, output_dir: str,
+        default_time_tokens: tuple[str, ...] = ("00:00:07:24", "00:00:08:00"),
     ):
+        """files: 已扫描好的 VideoInfo 列表; output_dir: 截图保存目录;
+        default_time_tokens: 初始时间点列表 (默认 2 个, 用户可在 UI 里编辑/添加)"""
         self._files = files
-        self._time_tokens = time_tokens
         self._output_dir = output_dir
-        self._state = 'running'
+        self._time_tokens = list(default_time_tokens)
+        self._state = 'idle'   # idle / running / done
         self._failed_count = 0
+        self._cells_processed = 0
         self._closed = False
         self._photo_refs: list[tk.PhotoImage] = []   # 阻止 PhotoImage GC
-        self._cancel_callback = None   # 由 app 设置: cancel_event.set
-        self._cells_processed = 0       # 已处理 cell 数 (驱动进度条)
+        self._cancel_event = threading.Event()
+        self._worker_thread = None
+        self._result_queue: queue.Queue | None = None
+        self._total = len(self._files) * len(self._time_tokens)
 
         self.top = tk.Toplevel(parent)
         self.top.title("定点截图")
@@ -1240,27 +1065,78 @@ class SnapshotProgressDialog:
         self.top.grab_set()
         self.top.geometry("1200x700")
 
-        # 顶部工具栏: 状态 + 进度条
-        top_frame = ttk.Frame(self.top)
-        top_frame.pack(side='top', fill='x')
-        self._status_var = tk.StringVar(value="准备中...")
-        status_bar = ttk.Label(
-            top_frame, textvariable=self._status_var, anchor='w', padding=(8, 5),
-        )
-        status_bar.pack(side='top', fill='x')
-        self._progress = ttk.Progressbar(
-            top_frame, mode='determinate', length=400,
-        )
-        self._progress.pack(side='top', fill='x', padx=8, pady=(0, 4))
+        self._build_top_bar()
+        self._build_time_points_row()
+        self._build_table()
+        self._build_status_row()
+        self.top.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Canvas + 内嵌 Frame + 冻结 header
-        # pack 顺序: vsb 先 pack 抢右侧条, _middle 后 pack 拿 expand 填剩余。
-        # 反过来 _middle 先 pack 会吞掉全部宽, vsb 后 pack 没空间。
-        # _middle 包住 _header_frame + canvas, 让 header 不被 vsb 盖,
-        # 也实现冻结 (header 在 canvas 外, body 滚动 header 不动)。
-        # 关键: canvas 的 master 直接设为 _middle (不是 self.top), 否则
-        # master ≠ pack parent 的非标准模式在 Windows 上会让 canvas 显示
-        # 为 0 尺寸, 整个 _middle 不显示, 表头 + body + 滚轮全部失效。
+    # ---- UI 构建 ----
+
+    def _build_top_bar(self):
+        """顶部一行: 「开始截图」/「截图中」按钮"""
+        bar = ttk.Frame(self.top, padding=(10, 5, 10, 0))
+        bar.pack(side='top', fill='x')
+        self._action_btn = ttk.Button(
+            bar, text="开始截图", width=14, command=self._on_action_btn,
+        )
+        self._action_btn.pack(side='left')
+
+    def _build_time_points_row(self):
+        """一行: 时间点 label + N 个 Entry + 「+」加按钮"""
+        row = ttk.Frame(self.top, padding=(10, 0, 10, 5))
+        row.pack(side='top', fill='x')
+        ttk.Label(row, text="时间点:").pack(side='left', padx=(0, 5))
+        self._tp_row = ttk.Frame(row)
+        self._tp_row.pack(side='left', fill='x', expand=True)
+        self._time_token_vars: list[tk.StringVar] = []
+        self._time_token_entries: list[ttk.Entry] = []
+        for tok in self._time_tokens:
+            self._add_time_token_entry(tok)
+        ttk.Button(
+            row, text="+", width=3,
+            command=lambda: self._add_time_token_entry("00:00:00:00"),
+        ).pack(side='left', padx=(5, 0))
+
+    def _add_time_token_entry(self, default: str = "00:00:00:00") -> None:
+        """新加 (或初始化时) 一个时间点 Entry 到 _tp_row"""
+        var = tk.StringVar(value=default)
+        e = ttk.Entry(self._tp_row, textvariable=var, width=10)
+        e.pack(side='left', padx=(0, 5))
+        # 双击只选所在段 (HH/MM/SS/frame), 不全选
+        e.bind('<Double-Button-1>', self._on_entry_double_click)
+        self._time_token_vars.append(var)
+        self._time_token_entries.append(e)
+
+    def _on_entry_double_click(self, event) -> str:
+        """双击 Entry: 按 x 坐标定位所在段, select_range 选该段, 阻止默认全选"""
+        entry = event.widget
+        try:
+            idx = entry.index(f'@{event.x}')
+        except tk.TclError:
+            return 'break'
+        text = entry.get()
+        if not text:
+            return 'break'
+        colons = [i for i, c in enumerate(text) if c == ':']
+        if not colons:
+            entry.select_range(0, len(text))
+            entry.icursor('end')
+            return 'break'
+        if idx <= colons[0]:
+            sec_start, sec_end = 0, colons[0]
+        elif len(colons) >= 2 and idx <= colons[1]:
+            sec_start, sec_end = colons[0] + 1, colons[1]
+        elif len(colons) >= 3 and idx <= colons[2]:
+            sec_start, sec_end = colons[1] + 1, colons[2]
+        else:
+            sec_start, sec_end = colons[-1] + 1, len(text)
+        entry.select_range(sec_start, sec_end)
+        entry.icursor(sec_end)
+        return 'break'
+
+    def _build_table(self):
+        """中间: 冻结 header + canvas + cells (跟原版一样的布局, 关键是 canvas master=_middle)"""
         self._middle = ttk.Frame(self.top)
         self.canvas = tk.Canvas(self._middle, highlightthickness=0)
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
@@ -1271,36 +1147,23 @@ class SnapshotProgressDialog:
         vsb.pack(side='right', fill='y')
         self._middle.pack(side='top', fill='both', expand=True)
 
-        # Mouse wheel: Windows/macOS = <MouseWheel>, Linux (X11) = <Button-4/5>
-        # bind 到 canvas / _inner / _header_frame: cell 是 canvas window item 的子
-        # widget, 事件不会冒泡到 canvas, 必须显式 bind 到 _inner
-        self.canvas.bind('<MouseWheel>', self._on_mousewheel)
-        self.canvas.bind('<Button-4>', self._on_mousewheel_linux)
-        self.canvas.bind('<Button-5>', self._on_mousewheel_linux)
+        # Mouse wheel: bind 到 canvas / _inner / _header_frame (cell 是 canvas window item 的子)
+        for w in (self.canvas, self._header_frame):
+            w.bind('<MouseWheel>', self._on_mousewheel)
+            w.bind('<Button-4>', self._on_mousewheel_linux)
+            w.bind('<Button-5>', self._on_mousewheel_linux)
 
         self._inner = ttk.Frame(self.canvas)
-        self._window = self.canvas.create_window(
-            (0, 0), window=self._inner, anchor='nw',
-        )
-        # inner frame 几何变化时更新 scrollregion。
-        # 用 winfo_reqwidth/reqheight 不用 bbox('all'): Windows 上 bbox 对
-        # window item 经常返 (0,0,0,0), scrollregion 几乎为 0 什么都显示不了。
-        # winfo_req* 是 grid layout 算出的"想要"尺寸, 永远 ≥ 实际 children。
-        self._inner.bind(
-            '<Configure>',
-            lambda _e: self.canvas.config(scrollregion=(
-                0, 0,
-                self._inner.winfo_reqwidth(),
-                self._inner.winfo_reqheight(),
-            )),
-        )
-        self._inner.bind('<MouseWheel>', self._on_mousewheel)
-        self._inner.bind('<Button-4>', self._on_mousewheel_linux)
-        self._inner.bind('<Button-5>', self._on_mousewheel_linux)
+        self._window = self.canvas.create_window((0, 0), window=self._inner, anchor='nw')
+        # inner frame 几何变化时更新 scrollregion (用 winfo_req*, 不用 bbox('all'))
+        self._inner.bind('<Configure>', lambda _e: self.canvas.config(scrollregion=(
+            0, 0, self._inner.winfo_reqwidth(), self._inner.winfo_reqheight())))
+        for w in (self._inner,):
+            w.bind('<MouseWheel>', self._on_mousewheel)
+            w.bind('<Button-4>', self._on_mousewheel_linux)
+            w.bind('<Button-5>', self._on_mousewheel_linux)
 
-        # 列宽: header 与 body 同步 minsize 保证对齐
-        # 标题列 250 px, 时间点列 THUMB_DISPLAY_W (320) + 8 widget padx = 328
-        n_cols = len(time_tokens)
+        n_cols = len(self._time_tokens)
         self._header_frame.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(0, minsize=self.TITLE_COL_WIDTH)
         cell_col_w = self.THUMB_DISPLAY_W + 8
@@ -1309,74 +1172,187 @@ class SnapshotProgressDialog:
             self._inner.grid_columnconfigure(c + 1, minsize=cell_col_w)
 
         # 列头 (在 _header_frame, 不随 body 滚动)
-        ttk.Label(
-            self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
-            relief='raised', width=28, anchor='w',
-        ).grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
-        for c, tok in enumerate(time_tokens):
-            ttk.Label(
-                self._header_frame,
-                text=f"T{c+1}: {time_token_to_string(tok)}",
-                font=('TkDefaultFont', 9, 'bold'),
-                relief='raised', width=14,
-            ).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
-        # 滚轮也要在 header 上能滚
-        self._header_frame.bind('<MouseWheel>', self._on_mousewheel)
-        self._header_frame.bind('<Button-4>', self._on_mousewheel_linux)
-        self._header_frame.bind('<Button-5>', self._on_mousewheel_linux)
+        ttk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9, 'bold'),
+                  relief='raised', width=28, anchor='w').grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+        for c, tok in enumerate(self._time_tokens):
+            ttk.Label(self._header_frame,
+                      text=f"T{c+1}: {time_token_to_string(tok)}",
+                      font=('TkDefaultFont', 9, 'bold'),
+                      relief='raised', width=14).grid(row=0, column=c + 1, sticky='nsew', padx=4, pady=2)
 
-        # 行 (行 = 文件, 列 = 时间点) - 在 _inner, row 0 起 (header 已在 _header_frame)
-        # 整行染色按 info.is_passing; file title 改 tk.Label (ttk 不支持 bg)
+        # 行 (行 = 文件, 列 = 时间点)
         self._cells: list[list[tk.Label]] = []
         self._row_title_labels: list[tk.Label] = []
-        for r, info in enumerate(files):
+        for r, info in enumerate(self._files):
             row_bg = self.ROW_BG_PASS if info.is_passing else self.ROW_BG_FAIL
-            # 文件名 label (列 0) — tk.Label 支持 bg; width=28 接近 250 px
-            title_lbl = tk.Label(
-                self._inner, text=info.title, anchor='w',
-                width=28, bg=row_bg, font=('TkDefaultFont', 9),
-                padx=4, pady=2,
-            )
+            title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
+                                 width=28, bg=row_bg, font=('TkDefaultFont', 9),
+                                 padx=4, pady=2)
             title_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
             self._row_title_labels.append(title_lbl)
             row_cells: list[tk.Label] = []
             for c in range(n_cols):
-                # width/height 不设: 设了会压制 compound='center' + image 的尺寸,
-                # 让 cell 按字符算 14x5 chars ≈ 136x25 px, 装不下 320x180 image。
-                # text-only 状态 (loading/failed) 由 compound='none' + text 自动算尺寸。
-                cell = tk.Label(
-                    self._inner, text='…', fg='gray', bg=row_bg,
-                    padx=4, pady=2, cursor='hand2',
-                )
+                # width/height 不设: 设了会压制 compound='center' + image 的尺寸
+                cell = tk.Label(self._inner, text='…', fg='gray', bg=row_bg,
+                                padx=4, pady=2, cursor='hand2')
                 cell.grid(row=r, column=c + 1, sticky='nsew', padx=1, pady=1)
-                # 绑定点击, 只在 completed/cancelled 状态生效
-                cell.bind(
-                    '<Button-1>',
-                    lambda _e, r=r, c=c: self._on_cell_click(r, c),
-                )
-                # image_path 在 mark_done 时填, 给 click 弹窗用
+                cell.bind('<Button-1>', lambda _e, r=r, c=c: self._on_cell_click(r, c))
                 cell._image_path: str | None = None
                 row_cells.append(cell)
             self._cells.append(row_cells)
 
-        # 底部按钮
-        btn_frame = ttk.Frame(self.top, padding=5)
-        btn_frame.pack(side='bottom', fill='x')
-        self._cancel_btn = ttk.Button(
-            btn_frame, text="取消", command=self._on_cancel,
-        )
-        self._cancel_btn.pack(side='right', padx=(5, 0))
-        self._close_btn = ttk.Button(
-            btn_frame, text="关闭", command=self._on_close, state='disabled',
-        )
-        self._close_btn.pack(side='right')
-
-        self.top.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._total = len(files) * n_cols
-        self._done = 0
+    def _build_status_row(self):
+        """底部: 状态文字 + 进度条 (从原版顶部挪下来)"""
+        row = ttk.Frame(self.top, padding=(10, 5, 10, 10))
+        row.pack(side='bottom', fill='x')
+        self._status_var = tk.StringVar(value="就绪 — 点「开始截图」开始")
+        ttk.Label(row, textvariable=self._status_var, anchor='w').pack(side='top', fill='x')
+        self._progress = ttk.Progressbar(row, mode='determinate', length=400)
+        self._progress.pack(side='top', fill='x', pady=(2, 0))
         self._progress['maximum'] = max(self._total, 1)
         self._progress['value'] = 0
-        self.update_status(0, self._total, "")
+
+    # ---- 状态机 + worker ----
+
+    def _on_action_btn(self):
+        """按钮点击: idle/done → 起新一次; running → 取消当前"""
+        if self._state == 'running':
+            self._cancel_event.set()
+            self._action_btn.config(state='disabled')
+            return
+        self._start_snap()
+
+    def _start_snap(self):
+        """校验 → 锁 UI → 清旧 cell → 起 worker"""
+        from tkinter import messagebox
+        tokens = [v.get().strip() for v in self._time_token_vars]
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            messagebox.showwarning("提示", "请输入至少一个时间点。")
+            return
+        for tok in tokens:
+            try:
+                parse_time_token(tok, 30.0)  # fps 仅做语法校验
+            except ValueError as e:
+                messagebox.showerror("错误", f"时间点格式错误: {e}")
+                return
+        if not self._output_dir:
+            messagebox.showwarning("提示", "没有输出目录。")
+            return
+        try:
+            os.makedirs(self._output_dir, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("错误", f"无法创建输出目录:\n{e}")
+            return
+
+        self._time_tokens = tokens
+        self._reset_cells_for_new_run()
+
+        self._cancel_event.clear()
+        self._cells_processed = 0
+        self._failed_count = 0
+        self._total = len(self._files) * len(tokens)
+        self._progress['maximum'] = max(self._total, 1)
+        self._progress['value'] = 0
+        self._state = 'running'
+        self._action_btn.config(text="截图中", state='normal')
+        self._set_time_points_state('disabled')
+
+        self._result_queue = queue.Queue()
+        self._worker_thread = threading.Thread(
+            target=self._worker_entry,
+            args=(tokens, self._output_dir),
+            daemon=True,
+        )
+        self._worker_thread.start()
+        self._poll_queue()
+
+    def _reset_cells_for_new_run(self):
+        """重新扫描时清空 cell 显示, 回到 '...' (loading) 状态"""
+        for r in range(len(self._files)):
+            for c in range(len(self._time_tokens)):
+                cell = self._cells[r][c]
+                cell._image_path = None
+                self.mark_loading(r, c)
+        self._photo_refs.clear()
+
+    def _worker_entry(self, time_tokens: list[str], output_dir: str):
+        """后台 worker: 对每个文件 × 时间点顺序调 ffmpeg 抽帧"""
+        files = self._files
+        n_files = len(files)
+        n_times = len(time_tokens)
+        total = n_files * n_times
+        done = 0
+        for r, info in enumerate(files):
+            if self._cancel_event.is_set():
+                break
+            for c, token in enumerate(time_tokens):
+                if self._cancel_event.is_set():
+                    break
+                self._result_queue.put(('cell_start', (r, c)))
+                self._result_queue.put(('progress', (done, total, info.title)))
+                try:
+                    seconds = parse_time_token(token, info.frame_rate_fps)
+                except ValueError:
+                    self._result_queue.put(('cell_failed', (r, c)))
+                    done += 1
+                    continue
+                base = os.path.splitext(info.title)[0] or 'video'
+                out_name = f"{base}_t{c + 1}_{time_token_to_string(token)}.png"
+                out_path = os.path.join(output_dir, out_name)
+                ok = extract_frame(info.full_path, seconds, out_path)
+                if ok:
+                    self._result_queue.put(('cell_done', (r, c, out_path)))
+                else:
+                    self._result_queue.put(('cell_failed', (r, c)))
+                done += 1
+        self._result_queue.put(('done', (done, total, self._cancel_event.is_set())))
+
+    def _poll_queue(self):
+        """主线程 100ms 轮询: 消费 cell 状态/进度消息"""
+        try:
+            while True:
+                msg_type, payload = self._result_queue.get_nowait()
+                if self._closed:
+                    return
+                if msg_type == 'cell_start':
+                    r, c = payload
+                    self.mark_loading(r, c)
+                elif msg_type == 'cell_done':
+                    r, c, path = payload
+                    self.mark_done(r, c, path)
+                elif msg_type == 'cell_failed':
+                    r, c = payload
+                    self.mark_failed(r, c)
+                elif msg_type == 'progress':
+                    done, total, current = payload
+                    self.update_status(done, total, current)
+                elif msg_type == 'done':
+                    done, total, cancelled = payload
+                    self._on_snap_done(done, total, cancelled)
+                    return
+        except queue.Empty:
+            pass
+        if not self._closed:
+            self.top.after(100, self._poll_queue)
+
+    def _on_snap_done(self, done: int, total: int, cancelled: bool):
+        """worker 报告 done: 解锁 UI, 改按钮文字"""
+        self._state = 'done' if not cancelled else 'idle'  # 取消 → 回 idle 允许重抽
+        self._action_btn.config(text="开始截图", state='normal')
+        self._set_time_points_state('normal')
+        status = "抽帧已取消" if cancelled else "抽帧完成"
+        self._status_var.set(
+            f"{status}: {done}/{total} ({done - self._failed_count} 成功, {self._failed_count} 失败)"
+        )
+        self._progress['value'] = self._progress['maximum']
+
+    def _set_time_points_state(self, state: str):
+        """锁/解锁所有时间点 Entry"""
+        for e in self._time_token_entries:
+            e.config(state=state)
+
+    # ---- cell 状态 ----
 
     def mark_loading(self, r: int, c: int) -> None:
         cell = self._cells[r][c]
@@ -1388,12 +1364,9 @@ class SnapshotProgressDialog:
         try:
             full = tk.PhotoImage(file=image_path)
             self._photo_refs.append(full)
-            # cell 内显示用缩到一半 (subsample 2); 弹出看原图用 full
             display = full.subsample(self.THUMB_SUBSAMPLE, self.THUMB_SUBSAMPLE)
             self._photo_refs.append(display)
-            # compound='center' 必填: tk.Label 只认 none/center/left/right/top/bottom,
-            # 'none' 会忽略 image, cell 按 width=14 chars / height=5 chars ≈ 136x25 px
-            # 装不下 320x180 image; 'center' + text='' 把 image 算进尺寸 (324x244)
+            # compound='center' 必填 (tk.Label 只认 none/center/left/right/top/bottom)
             cell.config(image=display, text='', compound='center', fg='black')
         except (tk.TclError, OSError):
             self.mark_failed(r, c)
@@ -1404,83 +1377,42 @@ class SnapshotProgressDialog:
     def mark_failed(self, r: int, c: int) -> None:
         cell = self._cells[r][c]
         cell._image_path = None
-        cell.config(
-            text='×', fg='red',
-            font=('TkDefaultFont', 14, 'bold'),
-            image='', compound='none',
-        )
+        cell.config(text='×', fg='red', font=('TkDefaultFont', 14, 'bold'),
+                   image='', compound='none')
         self._failed_count += 1
         self._cells_processed += 1
         self._progress['value'] = self._cells_processed
 
     def update_status(self, done: int, total: int, current: str) -> None:
-        if self._state == 'cancelling':
-            return
-        prefix = "抽帧中" if self._state == 'running' else "已取消"
+        if self._state == 'idle':
+            return  # 起跑前 worker 可能递进来 progress, 忽略
         suffix = f" ({current})" if current else ""
-        self._status_var.set(f"{prefix} {done}/{total}{suffix}")
-
-    def mark_complete(self, done: int, total: int, cancelled: bool) -> None:
-        if cancelled:
-            self._state = 'cancelled'
-        else:
-            self._state = 'completed'
-        self._done = done
-        self._cancel_btn.config(state='disabled')
-        self._close_btn.config(state='normal')
-        status = "抽帧已取消" if cancelled else "抽帧完成"
-        self._status_var.set(
-            f"{status}: {done}/{total} ({done - self._failed_count} 成功, {self._failed_count} 失败)"
-        )
-        # 进度条拉满 (cancelled 时也拉, 表示处理进度已完成)
-        self._progress['value'] = self._progress['maximum']
-
-    def set_cancel_callback(self, cb) -> None:
-        self._cancel_callback = cb
+        self._status_var.set(f"抽帧中 {done}/{total}{suffix}")
 
     def _on_cell_click(self, r: int, c: int) -> None:
-        """点 cell 弹 EnlargeDialog 看原图. 仅 completed/cancelled 状态生效."""
-        if self._state not in ('completed', 'cancelled'):
-            return
+        """点 cell 弹放大图. 任何状态都可 (running 也能看已完成那些)"""
         cell = self._cells[r][c]
         if not cell._image_path:
             return
         info = self._files[r]
-        EnlargeDialog(
-            self.top,
-            image_path=cell._image_path,
-            title=f"{info.title} @ T{c + 1}",
-        )
+        EnlargeDialog(self.top, image_path=cell._image_path,
+                      title=f"{info.title} @ T{c + 1}")
 
     def _on_mousewheel(self, event) -> None:
-        """Windows / macOS 滚轮: yview_scroll 按 delta/120 滚动行数"""
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
 
     def _on_mousewheel_linux(self, event) -> None:
-        """Linux (X11) 滚轮: Button-4 向上 / Button-5 向下"""
         delta = -1 if event.num == 4 else 1
         self.canvas.yview_scroll(delta, 'units')
 
-    def _on_cancel(self) -> None:
-        if self._state != 'running':
-            return
-        self._state = 'cancelling'
-        self._cancel_btn.config(state='disabled')
-        self._status_var.set("正在取消... 等待当前帧完成")
-        if self._cancel_callback is not None:
-            self._cancel_callback()
-
     def _on_close(self) -> None:
-        if self._state in ('running', 'cancelling'):
+        if self._state == 'running':
             from tkinter import messagebox
-            ok = messagebox.askyesno(
-                "确认关闭", "抽帧还在进行中, 确定要关闭吗?",
-                parent=self.top,
-            )
+            ok = messagebox.askyesno("确认关闭", "抽帧还在进行中, 确定要关闭吗?",
+                                     parent=self.top)
             if not ok:
                 return
-            if self._cancel_callback is not None:
-                self._cancel_callback()
+            self._cancel_event.set()
         self._closed = True
         self._photo_refs.clear()
         self.top.destroy()
@@ -1519,9 +1451,6 @@ class VideoCheckerApp:
         self.result_queue: queue.Queue = queue.Queue()
         # 浏览「选文件」时记下具体文件列表 (None = 扫整个目录; list = 只扫这些)
         self._selected_files: list[str] | None = None
-        self.snapshot_cancel_event: threading.Event = threading.Event()
-        self.snapshot_result_queue: queue.Queue = queue.Queue()
-        self.snapshot_progress_dialog: SnapshotProgressDialog | None = None
 
         self._create_widgets()
 
@@ -1851,144 +1780,24 @@ class VideoCheckerApp:
         self.status_var.set("已清除记录")
 
     def _on_snapshot_btn_click(self):
-        """「定点截图」按钮: 弹输入对话框, 校验后启动 worker."""
+        """「定点截图」按钮: 直接开 SnapshotProgressDialog (单窗口, 内嵌时间点输入)"""
         if self.scanning:
             messagebox.showinfo("提示", "正在检测中, 请等待完成后再截图。")
             return
         if not self.video_results:
             messagebox.showinfo("提示", "请先扫描视频。")
             return
-        # 默认输出目录: 优先用「截图地址」字段, 空时退回自动算 <文件路径>/snapshot
-        # Windows 用反斜杠 (与项目其余处一致), macOS 留正斜杠
-        # (macOS 上 os.path.isdir 不识别反斜杠路径, 不能套用)
-        default_dir = self.snapshot_dest_var.get().strip()
-        if not default_dir:
+        # 输出目录: 主窗口「截图地址」字段, 已被 _start_scan 自动填过 <dir>/snapshot
+        output_dir = self.snapshot_dest_var.get().strip()
+        if not output_dir:
+            # 兜底 (用户从未触发 scan): 用 path_var/snapshot
             parent = self.path_var.get().strip()
             if parent and os.path.isdir(parent):
-                default_dir = os.path.join(parent, 'snapshot')
+                output_dir = os.path.join(parent, 'snapshot')
                 if sys.platform == 'win32':
-                    default_dir = default_dir.replace('/', '\\')
-                try:
-                    os.makedirs(default_dir, exist_ok=True)
-                except OSError:
-                    default_dir = ''  # 建不出来就留空, 让用户自己填
-        dlg = SnapshotInputDialog(self.root, default_output_dir=default_dir)
-        self.root.wait_window(dlg.top)
-        if dlg.result is None:
-            return
-        time_tokens, output_dir = dlg.result
-        # 把对话框确定的输出目录回写到「截图地址」字段, 下次直接用
-        self.snapshot_dest_var.set(output_dir.replace('/', '\\'))
-        self._start_snapshot(time_tokens, output_dir)
-
-    def _start_snapshot(self, time_tokens: list[str], output_dir: str) -> None:
-        """启动抽帧 worker; 创建进度弹窗并绑定取消回调."""
-        ffmpeg_path = get_ffmpeg_path()
-        if not (os.path.exists(ffmpeg_path) or shutil.which('ffmpeg')):
-            messagebox.showerror(
-                "错误", f"未找到 ffmpeg (尝试 {ffmpeg_path!r}), 无法截图。\n请安装 ffmpeg 或使用 build.bat 完整构建。"
-            )
-            return
-        self.snapshot_cancel_event = threading.Event()
-        self.snapshot_result_queue = queue.Queue()
-        self.snapshot_progress_dialog = SnapshotProgressDialog(
-            self.root,
-            files=self.video_results,
-            time_tokens=time_tokens,
-            output_dir=output_dir,
-        )
-        self.snapshot_progress_dialog.set_cancel_callback(
-            self.snapshot_cancel_event.set
-        )
-        os.makedirs(output_dir, exist_ok=True)
-        t = threading.Thread(
-            target=self._snapshot_worker,
-            args=(time_tokens, output_dir),
-            daemon=True,
-        )
-        t.start()
-        self._snapshot_check_queue()
-
-    def _snapshot_worker(self, time_tokens: list[str], output_dir: str) -> None:
-        """后台线程: 对每个文件 × 时间点顺序调 ffmpeg 抽帧."""
-        files = self.video_results
-        n_files = len(files)
-        n_times = len(time_tokens)
-        total = n_files * n_times
-        done = 0
-        for r, info in enumerate(files):
-            if self.snapshot_cancel_event.is_set():
-                break
-            for c, token in enumerate(time_tokens):
-                if self.snapshot_cancel_event.is_set():
-                    break
-                self.snapshot_result_queue.put(('cell_start', (r, c)))
-                self.snapshot_result_queue.put(('progress', (done, total, info.title)))
-                try:
-                    seconds = parse_time_token(token, info.frame_rate_fps)
-                except ValueError:
-                    self.snapshot_result_queue.put(('cell_failed', (r, c)))
-                    done += 1
-                    continue
-                base = os.path.splitext(info.title)[0] or 'video'
-                out_name = f"{base}_t{c + 1}_{time_token_to_string(token)}.png"
-                out_path = os.path.join(output_dir, out_name)
-                ok = extract_frame(info.full_path, seconds, out_path)
-                if ok:
-                    self.snapshot_result_queue.put(('cell_done', (r, c, out_path)))
-                else:
-                    self.snapshot_result_queue.put(('cell_failed', (r, c)))
-                done += 1
-        self.snapshot_result_queue.put(
-            ('done', (done, total, self.snapshot_cancel_event.is_set()))
-        )
-
-    def _snapshot_check_queue(self) -> None:
-        """主线程 100ms 轮询: 消费 cell 状态/进度消息, 分发到进度弹窗."""
-        try:
-            while True:
-                msg_type, payload = self.snapshot_result_queue.get_nowait()
-                if msg_type == 'cell_start':
-                    r, c = payload
-                    if self.snapshot_progress_dialog is not None:
-                        self.snapshot_progress_dialog.mark_loading(r, c)
-                elif msg_type == 'cell_done':
-                    r, c, path = payload
-                    if self.snapshot_progress_dialog is not None:
-                        self.snapshot_progress_dialog.mark_done(r, c, path)
-                elif msg_type == 'cell_failed':
-                    r, c = payload
-                    if self.snapshot_progress_dialog is not None:
-                        self.snapshot_progress_dialog.mark_failed(r, c)
-                elif msg_type == 'progress':
-                    done, total, current = payload
-                    if self.snapshot_progress_dialog is not None:
-                        self.snapshot_progress_dialog.update_status(done, total, current)
-                elif msg_type == 'done':
-                    done, total, cancelled = payload
-                    if self.snapshot_progress_dialog is not None:
-                        self.snapshot_progress_dialog.mark_complete(done, total, cancelled)
-                    self._on_snapshot_complete(done, total, cancelled)
-                    return
-        except queue.Empty:
-            pass
-        if (self.snapshot_progress_dialog is not None
-                and not self.snapshot_progress_dialog._closed):
-            self.root.after(100, self._snapshot_check_queue)
-
-    def _on_snapshot_complete(self, done: int, total: int, cancelled: bool) -> None:
-        """抽帧完成 (含取消): 改主窗口状态栏."""
-        failed = (self.snapshot_progress_dialog._failed_count
-                  if self.snapshot_progress_dialog is not None else 0)
-        succeeded = max(0, done - failed)
-        if cancelled:
-            self.status_var.set(
-                f"抽帧已取消: 已完成 {done}/{total} ({succeeded} 成功, {failed} 失败)"
-            )
-        else:
-            self.status_var.set(
-                f"抽帧完成: {succeeded}/{total} 成功, {failed} 失败"
-            )
+                    output_dir = output_dir.replace('/', '\\')
+        SnapshotProgressDialog(self.root, files=self.video_results, output_dir=output_dir)
+        # 不 wait_window — 弹窗自带按钮 (开始/截图中) 与关闭 X 按钮, 不需要返回 result
 
     def _move_passing_files(self):
         """移动达标文件到目标目录"""
