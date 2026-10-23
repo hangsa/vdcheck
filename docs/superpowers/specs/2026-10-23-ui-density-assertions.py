@@ -50,6 +50,17 @@ def make_info(title='a.mp4', rel_path='./', **kw) -> VideoInfo:
     return VideoInfo(**base)
 
 
+def app_widgets_body() -> str:
+    """读 video_checker.py 的 _create_widgets 函数体 (headers 定义在那里)。"""
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), 'video_checker.py')
+    # newline='' 必须: 源码是 CRLF, 不指定的话 Python 会把 \r\n 转成 \n,
+    # 下标/正则对不上源文件。这里只读不写。
+    src = open(path, encoding='utf-8', newline='').read()
+    return src[src.index("    def _create_widgets(self):"):
+               src.index("    # ---- 事件处理 ----")]
+
+
 def main() -> None:
     section("format_title — rel_path 各种形态")
     cases = [
@@ -262,6 +273,35 @@ def main() -> None:
     check("未截断时 shown == full", tl[0].cget('text') == tl[0]._full_text)
 
     d3.top.destroy(); d4.top.destroy()
+
+    section("_format_cell — spec 列 (Review Focus #2)")
+    spec_cases = [
+        (dict(container_format='mp4', video_codec='h264', audio_codec='aac'),
+         'mp4/h264/aac'),
+        (dict(container_format='matroska', video_codec='h264', audio_codec='aac'),
+         'matroska/h264/aac'),
+        (dict(container_format='mp4', video_codec='h264', audio_codec='N/A'),
+         'mp4/h264/N/A'),
+        (dict(container_format='mp4', video_codec='N/A', audio_codec='N/A'),
+         'mp4/N/A/N/A'),
+    ]
+    for kw, want in spec_cases:
+        got = VideoGridView._format_cell(make_info(**kw), 'spec')
+        check(f"spec{kw} → {want!r}", got == want, f"got={got!r}")
+
+    section("列集合 — 10 列 + 四个可排序列仍存在")
+    import re
+    from video_checker import _SORTABLE_COLUMNS
+    app_body = app_widgets_body()
+    header_keys = re.findall(r"'(\w+)':\s*\('", app_body)
+    check("headers 恰好 10 列", len(header_keys) == 10, f"got={len(header_keys)}: {header_keys}")
+    for removed in ('container_format', 'video_codec', 'audio_codec'):
+        check(f"headers 已移除 {removed}", removed not in header_keys)
+    check("headers 含 spec", 'spec' in header_keys)
+    for sortable in sorted(_SORTABLE_COLUMNS):
+        check(f"可排序列 {sortable} 仍在 headers 中", sortable in header_keys)
+    check("死代码 columns 元组已删除", not re.search(r'^\s*columns\s*=\s*\(', app_body, re.M),
+          "App._create_widgets 里还有未被读取的 columns 元组")
 
     section("VideoGridView._truncate_text — 委托且行为一致")
     grid = VideoGridView(ttk.Frame(root), {'title': ('标题', 250)})

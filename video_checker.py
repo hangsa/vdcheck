@@ -1049,14 +1049,13 @@ class VideoGridView:
             return format_title(info)
         if key == 'bitrate':
             return f"{info.bitrate_kbps:.0f}"
+        if key == 'spec':
+            return f"{info.container_format}/{info.video_codec}/{info.audio_codec}"
         if key == 'result':
             return "达标" if info.is_passing else "不达标"
         return {
             'resolution': info.resolution,
             'frame_rate': info.frame_rate,
-            'video_codec': info.video_codec,
-            'container_format': info.container_format,
-            'audio_codec': info.audio_codec,
             'audio_channels': info.audio_channels,
             'audio_sample_rate': info.audio_sample_rate,
             'duration': info.duration,
@@ -1789,19 +1788,14 @@ class VideoCheckerApp:
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill='both', expand=True, padx=5, pady=5)
 
-        columns = (
-            'title', 'resolution', 'frame_rate', 'bitrate',
-            'video_codec', 'container_format', 'audio_codec', 'audio_channels',
-            'audio_sample_rate', 'duration', 'file_size', 'result',
-        )
+        # 注意: 原来这里还有一个 columns 元组, 赋值后从未被读取 (死代码) —
+        # VideoGridView 只收 headers。已删除, 避免改它的人以为那是真理来源。
         headers = {
             'title': ('标题', 250),
             'resolution': ('分辨率', 90),
             'frame_rate': ('帧率', 75),
             'bitrate': ('码率(kbps)', 85),
-            'video_codec': ('视频编码', 80),
-            'container_format': ('封装', 75),
-            'audio_codec': ('音频编码', 80),
+            'spec': ('规格', 140),
             'audio_channels': ('声道数', 55),
             'audio_sample_rate': ('采样率(kHz)', 90),
             'duration': ('时长', 75),
