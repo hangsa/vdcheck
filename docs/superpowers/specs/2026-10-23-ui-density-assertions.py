@@ -270,6 +270,40 @@ def main() -> None:
           == truncate_text('a' * 200, 100, grid._cell_font))
     check("短文本不受影响", grid._truncate_text('a.mp4', 250) == 'a.mp4')
 
+    section("mark_done — PhotoImage 只留 display (Review Focus #2/#5)")
+    d5 = SnapshotProgressDialog(root, [make_info()], tempfile.mkdtemp())
+    # 时间点 cell 是起跑时 _update_table() 才建的 (构造时只有序号/标题列),
+    # 这里补建, 让 _cells[0][0] 存在。
+    d5._update_table(d5._time_tokens)
+    root.update_idletasks()
+    # 用 tkinter 造一张 640x360 PNG (不依赖 ffmpeg)
+    big = tk.PhotoImage(width=640, height=360)
+    big.put('red', to=(0, 0, 639, 359))
+    png = os.path.join(tempfile.mkdtemp(), 'frame.png')
+    big.write(png, format='png')
+    del big
+
+    d5._state = 'running'
+    d5.mark_done(0, 0, png)
+    check("_photo_refs 每 cell 恰好 1 项 (原来 2 项)",
+          len(d5._photo_refs) == 1, f"len={len(d5._photo_refs)}")
+    check("留下的是 320px display 不是 640px 原图",
+          d5._photo_refs[0].width() == 320, f"w={d5._photo_refs[0].width()}")
+    check("cell 已挂上图片", d5._cells[0][0].cget('image') is not '')
+    d5.top.destroy()
+
+    section("mark_failed — 无残留图片 (Review Focus #5)")
+    d6 = SnapshotProgressDialog(root, [make_info()], tempfile.mkdtemp())
+    d6._update_table(d6._time_tokens)
+    d6._state = 'running'
+    d6.mark_failed(0, 0)
+    check("失败后 _photo_refs 为空", len(d6._photo_refs) == 0,
+          f"len={len(d6._photo_refs)}")
+    check("失败 cell 无残留 image", d6._cells[0][0].cget('image') == '',
+          f"got={d6._cells[0][0].cget('image')!r}")
+    check("失败计数 +1", d6._failed_count == 1, f"got={d6._failed_count}")
+    d6.top.destroy()
+
     root.destroy()
 
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
