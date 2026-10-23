@@ -523,6 +523,8 @@ class VideoGridView:
         self._render_after_id: str | None = None
         # 字体 (cell 宽度测算用)
         self._cell_font = tkfont.Font(font=('TkDefaultFont', 9))
+        # 悬停显示截断 cell 的完整文本 (长路径的唯一查看方式)
+        self.tooltip = Tooltip(self.parent)
         # 排序状态: key=None 表示无排序; desc=False 为升序, True 为降序
         self._sort_key: str | None = None
         self._sort_desc: bool = False
@@ -687,6 +689,12 @@ class VideoGridView:
                 fg='black',
             )
             cell.grid(row=0, column=i * 2 + 1, sticky='nsew')
+            # tooltip 用: 记录完整值与是否被截断, 鼠标移动时按需弹窗。
+            # 绑定在建池时一次完成 (事件不向父 widget 冒泡, 没法在行 frame
+            # 上统一绑); _render_visible 只改这两个属性, 不重绑。
+            cell._full_text = ''
+            cell._truncated = False
+            cell.bind('<Motion>', self.tooltip.on_motion)
             # 用 _col_widths (而非 self.columns) 同步列宽真理来源
             row_frame.grid_columnconfigure(i * 2 + 1, minsize=self._col_widths[key], weight=1)
             row_cells.append((key, cell))
@@ -995,6 +1003,9 @@ class VideoGridView:
                 full_text = self._format_cell(info, key)
                 width = self._col_widths[key]
                 new_text = self._truncate_text(full_text, width)
+                # tooltip 靠这两个属性判断要不要弹 (只在真被截断时弹)
+                cell._full_text = full_text
+                cell._truncated = (new_text != full_text)
                 if cell.cget('text') != new_text:
                     cell.config(text=new_text)
                 fg = _cell_fg(info, key)
@@ -1022,6 +1033,7 @@ class VideoGridView:
 
     def clear(self):
         """清空所有数据行，滚动条复位。"""
+        self.tooltip.hide()   # 否则 tooltip 会带着旧文本留在空列表上
         self._data.clear()
         for widget in self._widget_pool:
             widget._info = None
@@ -1113,6 +1125,52 @@ class VideoGridView:
 
 
 
+class Tooltip:
+    """悬停提示：目标 widget 声明了 _truncated=True 时显示它的 _full_text。
+
+    用法: bind('<Motion>', tooltip.on_motion) 到各个 cell。
+    判定截断与取完整文本都由 cell 上的 _truncated / _full_text 负责,
+    Tooltip 不关心文本是怎么算出来的。
+
+    Tk 事件只沿 bindtags 派发, **不向父 widget 冒泡** —— 所以必须逐个 cell
+    绑定, 绑在 canvas / 行 frame 上覆盖不到停在子 cell 上的鼠标。
+    """
+
+    def __init__(self, owner: tk.Misc):
+        self._owner = owner
+        self.win: tk.Toplevel | None = None
+        self._cell = None
+
+    def on_motion(self, event) -> None:
+        cell = event.widget
+        if not getattr(cell, '_truncated', False):
+            self.hide()
+            return
+        if self.win is not None and self._cell is cell:
+            return   # 同一 cell 内的移动不重建
+        self.show(cell)
+
+    def show(self, cell) -> None:
+        self.hide()
+        win = tk.Toplevel(self._owner)
+        win.overrideredirect(True)
+        win.attributes('-topmost', True)
+        tk.Label(
+            win, text=cell._full_text, font=('TkDefaultFont', 9),
+            bg='#ffffe0', fg='black', relief='solid', bd=1,
+            justify='left', padx=4, pady=2,
+        ).pack()
+        win.geometry(f"+{win.winfo_pointerx() + 12}+{win.winfo_pointery() + 18}")
+        self.win = win
+        self._cell = cell
+
+    def hide(self) -> None:
+        if self.win is not None:
+            self.win.destroy()
+            self.win = None
+        self._cell = None
+
+
 class EnlargeDialog:
     """点击缩略图后弹出的原图查看窗口.
 
@@ -1199,6 +1257,9 @@ class SnapshotProgressDialog:
         self.top.transient(parent)
         self.top.grab_set()
         self.top.geometry("1200x700")
+        # 悬停显示被截断的标题全路径 (与主网格共用同一个 Tooltip 类)。
+        # 必须放在 self.top 建好之后 —— Tooltip 拿它当 Toplevel 的 owner。
+        self.tooltip = Tooltip(self.top)
 
         self._build_output_dir_row()
         self._build_time_points_row()
@@ -1405,6 +1466,7 @@ class SnapshotProgressDialog:
         # _full_text / _truncated 供 tooltip 用 (见 Tooltip.on_motion)
         title_lbl._full_text = full_title
         title_lbl._truncated = (shown_title != full_title)
+        title_lbl.bind('<Motion>', self.tooltip.on_motion)
         # 标题列的 grid() 不加 padx: 左右留白全部由 Label 自己的 padx=4 承担
         # (与主网格 VideoGridView 一致 —— 那边 cell.grid() 同样不带 padx)。
         # truncate_text 的 col_width-10 余量就是按「Label padx 两边 8 + bd 两边 2」

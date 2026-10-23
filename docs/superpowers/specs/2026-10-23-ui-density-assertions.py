@@ -493,6 +493,73 @@ def main() -> None:
               "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0 / _refresh_counts()")
     app_root.destroy()
 
+    section("Tooltip — 只在截断时显示")
+    from video_checker import Tooltip
+
+    class _FakeCell:
+        def __init__(self, full, truncated):
+            self._full_text = full
+            self._truncated = truncated
+
+    class _FakeEv:
+        def __init__(self, widget):
+            self.widget = widget
+
+    tip = Tooltip(root)
+    plain = _FakeCell('./a.mp4', False)
+    tip.on_motion(_FakeEv(plain))
+    root.update_idletasks()
+    check("未截断的 cell 不弹 tooltip", tip.win is None, f"got={tip.win!r}")
+
+    cut = _FakeCell('./很长的路径/子目录/文件.mp4', True)
+    tip.on_motion(_FakeEv(cut))
+    root.update_idletasks()
+    check("截断的 cell 弹 tooltip", tip.win is not None)
+    if tip.win is not None:
+        texts = [w.cget('text') for w in tip.win.winfo_children()
+                 if isinstance(w, tk.Label)]
+        check("tooltip 显示完整值", texts and texts[0] == cut._full_text,
+              f"got={texts}")
+        check("tooltip 覆写重定向 (不抢焦点)", bool(tip.win.overrideredirect()))
+
+    tip.on_motion(_FakeEv(cut))     # 同一 cell 再来一次
+    root.update_idletasks()
+    first_win = tip.win
+    tip.on_motion(_FakeEv(cut))
+    root.update_idletasks()
+    check("同一 cell 重复 hover 不重建窗口", tip.win is first_win)
+
+    tip.on_motion(_FakeEv(plain))   # 移到未截断 cell
+    root.update_idletasks()
+    check("移到未截断 cell 后关闭", tip.win is None)
+
+    section("网格 cell 带 _truncated 标记")
+    g = VideoGridView(ttk.Frame(root), {'title': ('标题', 60)})
+    info_cut = make_info(title='x' * 100 + '.mp4', rel_path='./deep/dir')
+    info_short = make_info(title='a.mp4', rel_path='./')
+    g.add_row(info_cut)      # → pool slot 0
+    g.add_row(info_short)    # → pool slot 1
+    root.update_idletasks()
+    slot0 = g._widget_pool[0]._cells[0][1]    # (key, label) 对, 取 title
+    slot1 = g._widget_pool[1]._cells[0][1]
+    check("长路径 cell 标了 _truncated", slot0._truncated is True,
+          f"text={slot0.cget('text')!r}")
+    check("短路径 cell 未标截断", slot1._truncated is False,
+          f"text={slot1.cget('text')!r}")
+    check("cell 存了 _full_text", slot0._full_text.endswith('.mp4'))
+    check("cell 绑了 <Motion>", bool(slot0.bind('<Motion>')))
+
+    section("clear 时关掉悬浮中的 tooltip")
+    tip2 = Tooltip(root)
+    g.tooltip = tip2
+    g.tooltip.show(slot0)
+    root.update_idletasks()
+    check("tooltip 已弹出", tip2.win is not None)
+    g.clear()
+    root.update_idletasks()
+    check("clear 后 tooltip 已关闭 (不残留旧文本)",
+          tip2.win is None, f"got={tip2.win!r}")
+
     root.destroy()
 
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
