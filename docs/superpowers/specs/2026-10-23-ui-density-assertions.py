@@ -136,11 +136,49 @@ def main() -> None:
     check("xscrollcommand 驱动 hsb 位置",
           hsb is not None and hsb.get()[1] > 0.99, f"hsb={hsb.get() if hsb else None}")
 
+    section("SnapshotProgressDialog — 表头/数据列对齐 (横向滚动不脱节)")
+    # 表头与数据行在 _inner 的同一个 grid 里 (表头 row 0, 数据 row 1..N), 共用同一个
+    # scrollregion, 横滚时一起动。对应关系: 表头第 k 个 label ↔ 第 0 行第 k 个 cell。
+    # winfo_rootx 是窗口级坐标, 不受 canvas 视口裁剪影响; 两者同属一个 window item,
+    # 滚动时同增同减, 所以两者的差值就是列对齐误差。误差要求 0px: 同 grid 分配是
+    # 结构性对齐, 给了容差就测不出真正的回归。
+    # 表头必须用 _header_labels 显式取, 不能靠「_inner 里 row==0 的 widget」反推 ——
+    # 表头被移出 canvas (钉在视口不动) 时, row 0 上坐的是第一行数据, 那样比等于
+    # 拿数据跟数据比, 恒等于 0, 断言会假绿。
+    hdrs = getattr(dlg, '_header_labels', None)
+    check("弹窗暴露表头 label 列表", hdrs is not None,
+          f"got={[w.cget('text') for w in hdrs] if hdrs else hdrs}")
+    hdrs = hdrs or []
+    body0 = [dlg._row_idx_labels[0], dlg._row_title_labels[0], *dlg._cells[0]]
+    check("表头列数 == 数据列数 (序号+标题+5 个时间点)",
+          len(hdrs) == len(body0) == 7, f"hdr={len(hdrs)} body={len(body0)}")
+    check("表头在 _inner 的 row 0 (与数据行同一 scrollregion)",
+          all(w.master is dlg._inner and int(w.grid_info()['row']) == 0
+              for w in hdrs),
+          f"rows={[int(w.grid_info()['row']) for w in hdrs]}")
+    check("表头第 k 列与第 0 行第 k 个 cell 同列",
+          [int(w.grid_info()['column']) for w in hdrs] == [0, 1, 2, 3, 4, 5, 6])
+    # 两个滚动位置各测一次: 验的是「始终一起对齐」, 而不是某一帧碰巧对得上。
+    for tag, moveto in (("滚动位置 0", 0.0), ("滚到最右", 1.0)):
+        dlg.canvas.xview_moveto(moveto)
+        root.update_idletasks()
+        detail = []
+        worst = -1   # 起点 -1: 表头列表为空时「无对比」不得算通过
+        for h, b in zip(hdrs, body0):
+            hx, bx = h.winfo_rootx(), b.winfo_rootx()
+            worst = max(worst, abs(hx - bx))
+            detail.append(f"{h.cget('text')}={hx}/{bx}")
+        check(f"{tag}: 表头 x 与数据 cell x 对齐 (误差 0px)", worst == 0,
+              f"Δmax={worst}  " + " ".join(detail))
+
     section("SnapshotProgressDialog — 空文件列表不崩")
     dlg2 = SnapshotProgressDialog(root, [], tempfile.mkdtemp())
     root.update_idletasks()
-    check("空 files 建表不抛异常", len(dlg2._inner.winfo_children()) == 0,
-          f"children={len(dlg2._inner.winfo_children())}")
+    # 空 files: _inner 里只剩 row 0 的表头 label, 一个数据行 (row >= 1) 都不该有。
+    rows = [w for w in dlg2._inner.winfo_children()
+            if int(w.grid_info().get('row', 0)) != 0]
+    check("空 files 不建任何数据行", rows == [],
+          f"数据行={len(rows)} _inner 总 children={len(dlg2._inner.winfo_children())}")
     dlg2.top.destroy(); dlg.top.destroy()
 
     section("VideoGridView._truncate_text — 委托且行为一致")

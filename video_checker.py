@@ -1310,42 +1310,43 @@ class SnapshotProgressDialog:
         self._hsb = ttk.Scrollbar(self._middle, orient='horizontal',
                                   command=self.canvas.xview)
         self.canvas.config(yscrollcommand=vsb.set, xscrollcommand=self._hsb.set)
-        self._header_frame = ttk.Frame(self._middle)
-        self._header_frame.pack(side='top', fill='x')
         self.canvas.pack(side='top', fill='both', expand=True)
         self._hsb.pack(side='bottom', fill='x')
         vsb.pack(side='right', fill='y')
         self._middle.pack(side='top', fill='both', expand=True)
-
-        # Mouse wheel: bind 到 canvas / _inner / _header_frame (cell 是 canvas window item 的子)
-        for w in (self.canvas, self._header_frame):
-            w.bind('<MouseWheel>', self._on_mousewheel)
-            w.bind('<Button-4>', self._on_mousewheel_linux)
-            w.bind('<Button-5>', self._on_mousewheel_linux)
 
         self._inner = ttk.Frame(self.canvas)
         self._window = self.canvas.create_window((0, 0), window=self._inner, anchor='nw')
         # inner frame 几何变化时更新 scrollregion (用 winfo_req*, 不用 bbox('all'))
         self._inner.bind('<Configure>', lambda _e: self.canvas.config(scrollregion=(
             0, 0, self._inner.winfo_reqwidth(), self._inner.winfo_reqheight())))
-        for w in (self._inner,):
-            w.bind('<MouseWheel>', self._on_mousewheel)
-            w.bind('<Button-4>', self._on_mousewheel_linux)
-            w.bind('<Button-5>', self._on_mousewheel_linux)
+        # Mouse wheel: 见 _bind_wheel —— Tk 事件只沿 bindtags 派发, 不向父冒泡,
+        # 父上绑了也不覆盖子 widget, 所以 canvas / _inner / 表头 / cell 各自都要绑。
+        self._bind_wheel(self.canvas)
+        self._bind_wheel(self._inner)
 
         # 列 0 = 序号 (固定宽), 列 1 = 标题 (250px), 无时间点 col
-        self._header_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
         self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
-        self._header_frame.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         # 表头: 与主界面 VideoGridView 一致 — tk.Label / TkDefaultFont 9 (非粗) /
         # relief='raised' + bd=1 / padx=4 pady=2
-        tk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=5, anchor='center').grid(
-            row=0, column=0, sticky='nsew', padx=4, pady=2)
-        tk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=28, anchor='w').grid(
-            row=0, column=1, sticky='nsew', padx=4, pady=2)
+        # 表头直接 grid 进 _inner 的 row 0 (数据行从 row 1 起), 不另起一个 frame:
+        #  - 表头与数据行在同一个 scrollregion 里, 横向滚动时一起动。表头若是 canvas
+        #    的兄弟 widget 就会钉在视口上, 横滚后「T1」指着 T3 的图。
+        #  - 列宽由同一个 grid 分配, 表头列必然与数据列对齐。若把表头塞进另一个
+        #    frame 再 columnspan 横跨, 它会按表头 label 自己的自然宽独立重跑一次列
+        #    分配, 与数据 cell 那次的结果差出几像素。
+        idx_hdr = tk.Label(self._inner, text="序号", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=5, anchor='center')
+        idx_hdr.grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(idx_hdr)
+        ttl_hdr = tk.Label(self._inner, text="标题", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=28, anchor='w')
+        ttl_hdr.grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(ttl_hdr)
+        # 表头 label 按列序留一份引用 (跟 _cells / _row_*_labels 同一套), 便于
+        # 「表头第 k 列 ↔ 第 0 行第 k 个 cell」的对齐检查 (断言脚本用)
+        self._header_labels: list[tk.Label] = [idx_hdr, ttl_hdr]
 
         # 行: 序号 + 文件名列 (无时间点 cell)
         self._cells: list[list[tk.Label]] = []
@@ -1357,11 +1358,24 @@ class SnapshotProgressDialog:
             self._row_title_labels.append(title_lbl)
             self._cells.append([])  # 空行 cells, 跟 n_cols=0 对应
 
+    def _bind_wheel(self, w) -> None:
+        """把纵向滚轮绑到 w 上。
+
+        Tk 事件只沿 bindtags (自身 / class / toplevel / all) 派发, **不向父 widget
+        冒泡** —— 绑在 canvas 或 _inner 上, 并不能覆盖停在它们子 widget 上的滚轮。
+        所以每个要能滚的 widget 都得各自显式绑一遍。
+        """
+        w.bind('<MouseWheel>', self._on_mousewheel)
+        w.bind('<Button-4>', self._on_mousewheel_linux)
+        w.bind('<Button-5>', self._on_mousewheel_linux)
+
     def _make_row_labels(self, r: int, info) -> tuple[tk.Label, tk.Label]:
         """建一行的「序号」+「标题」两个 label.
 
         配色对齐主界面 VideoGridView._cell_fg 的语义 — 不画整行底色,
         只用 fg 区分: 达标全绿字, 不达标标题红字。
+
+        row 从 1 起: row 0 留给表头 label, 表头与数据行共用 _inner 的 grid。
         """
         if info.is_passing:
             fg = self.FG_PASS
@@ -1370,11 +1384,13 @@ class SnapshotProgressDialog:
         idx_lbl = tk.Label(self._inner, text=str(r + 1), anchor='center',
                            width=5, font=('TkDefaultFont', 9),
                            padx=4, pady=2, fg=fg)
-        idx_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
+        idx_lbl.grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(idx_lbl)
         title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
                              width=28, font=('TkDefaultFont', 9),
                              padx=4, pady=2, fg=fg)
-        title_lbl.grid(row=r, column=1, sticky='nsew', padx=4, pady=2)
+        title_lbl.grid(row=r + 1, column=1, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(title_lbl)
         return idx_lbl, title_lbl
 
     def _update_table(self, new_tokens: list[str]) -> None:
@@ -1385,8 +1401,6 @@ class SnapshotProgressDialog:
         cell_col_w = self.THUMB_DISPLAY_W + 8
 
         # 清掉旧子 widget + 旧 photo refs (避免内存泄漏)
-        for w in self._header_frame.winfo_children():
-            w.destroy()
         for w in self._inner.winfo_children():
             w.destroy()
         self._photo_refs.clear()
@@ -1394,35 +1408,39 @@ class SnapshotProgressDialog:
         # 重置所有 columnconfigure (清掉旧列的 minsize, 避免空列占位)
         for c in range(max(20, n_cols + 2)):
             try:
-                self._header_frame.grid_columnconfigure(c, minsize=0)
                 self._inner.grid_columnconfigure(c, minsize=0)
             except tk.TclError:
                 pass
 
         # 设置列宽: col0=序号, col1=标题, col2..=时间点
-        self._header_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
         self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
-        self._header_frame.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         for c in range(n_cols):
-            self._header_frame.grid_columnconfigure(c + 2, minsize=cell_col_w)
             self._inner.grid_columnconfigure(c + 2, minsize=cell_col_w)
 
-        # 表头: 序号 + 标题 + N 个时间点
+        # 表头: 序号 + 标题 + N 个时间点 (与数据行同一个 grid 的 row 0)
         # 表头: 与主界面 VideoGridView 一致 — tk.Label / TkDefaultFont 9 (非粗) /
         # relief='raised' + bd=1 / padx=4 pady=2
-        tk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=5, anchor='center').grid(
-            row=0, column=0, sticky='nsew', padx=4, pady=2)
-        tk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=28, anchor='w').grid(
-            row=0, column=1, sticky='nsew', padx=4, pady=2)
+        self._header_labels = []
+        idx_hdr = tk.Label(self._inner, text="序号", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=5, anchor='center')
+        idx_hdr.grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(idx_hdr)
+        ttl_hdr = tk.Label(self._inner, text="标题", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=28, anchor='w')
+        ttl_hdr.grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(ttl_hdr)
+        self._header_labels += [idx_hdr, ttl_hdr]
         for c, tok in enumerate(new_tokens):
-            tk.Label(self._header_frame,
-                     text=f"T{c + 1}: {time_token_to_string(tok)}",
-                     font=('TkDefaultFont', 9),
-                     relief='raised', bd=1, width=14).grid(
-                row=0, column=c + 2, sticky='nsew', padx=4, pady=2)
+            # padx=1 (不是 4): 与数据 cell 的 padx 一致, 表头框和缩略图框在列里
+            # 左右边界完全重合 (差 3px 的话表头就指不到正对的那一列)。
+            th_hdr = tk.Label(self._inner,
+                              text=f"T{c + 1}: {time_token_to_string(tok)}",
+                              font=('TkDefaultFont', 9),
+                              relief='raised', bd=1, width=14)
+            th_hdr.grid(row=0, column=c + 2, sticky='nsew', padx=1, pady=2)
+            self._bind_wheel(th_hdr)
+            self._header_labels.append(th_hdr)
 
         # body: 序号 + 标题 + N 个时间点 cell (初始 '…')
         self._cells = []
@@ -1437,7 +1455,7 @@ class SnapshotProgressDialog:
                 # 图片 cell 无底色 (与主界面一致), 加载中用灰色「…」提示
                 cell = tk.Label(self._inner, text='…', fg='gray',
                                 padx=4, pady=2, cursor='hand2')
-                cell.grid(row=r, column=c + 2, sticky='nsew', padx=1, pady=1)
+                cell.grid(row=r + 1, column=c + 2, sticky='nsew', padx=1, pady=1)
                 cell.bind('<Button-1>', lambda _e, r=r, c=c: self._on_cell_click(r, c))
                 cell._image_path = None
                 row_cells.append(cell)
