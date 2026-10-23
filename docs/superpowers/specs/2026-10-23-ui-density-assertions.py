@@ -300,8 +300,8 @@ def main() -> None:
     check("headers 含 spec", 'spec' in header_keys)
     for sortable in sorted(_SORTABLE_COLUMNS):
         check(f"可排序列 {sortable} 仍在 headers 中", sortable in header_keys)
-    check("死代码 columns 元组已删除", not re.search(r'^\s*columns\s*=\s*\(', app_body, re.M),
-          "App._create_widgets 里还有未被读取的 columns 元组")
+    check("死代码 columns 元组已删除 (_create_widgets 里不该再有 columns = ( 元组)",
+          not re.search(r'^\s*columns\s*=\s*\(', app_body, re.M))
 
     section("VideoGridView._truncate_text — 委托且行为一致")
     grid = VideoGridView(ttk.Frame(root), {'title': ('标题', 250)})
