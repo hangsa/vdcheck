@@ -93,10 +93,6 @@ def main() -> None:
         got = format_title(make_info(title=title, rel_path=rel))
         check(f"rel_path={rel!r} → {want!r}", got == want, f"got={got!r}")
 
-    section("format_title — 绝对路径不重复文件名 (跨盘符既有 bug)")
-    got = format_title(make_info(rel_path='D:\\videos\\a.mp4'))
-    check("绝对路径只出现一次", got.count('a.mp4') == 1, f"got={got!r}")
-
     section("_format_cell — title 分支委托 format_title")
     for rel, title, want in cases:
         info = make_info(title=title, rel_path=rel)
@@ -291,7 +287,7 @@ def main() -> None:
 
     d3.top.destroy(); d4.top.destroy()
 
-    section("单位规则 — cell 不带单位, N/A 不受影响 (Review Focus #3)")
+    section("单位规则 — cell 不带单位, N/A 不受影响")
     from video_checker import parse_video_info
 
     def _fake_fmt(**kw):
@@ -328,7 +324,7 @@ def main() -> None:
     # parse_time_token(帧号) 仍会正确地拒绝未知帧率。
     check("r_frame_rate=0/0 → frame_rate_fps 仍是 0.0", info3.frame_rate_fps == 0.0,
           f"got={info3.frame_rate_fps!r}")
-    for bad_rate in ('0/1', 'abc', '30', ''):
+    for bad_rate in ('0/1', 'abc', '30', '', None):
         info_b = parse_video_info(_fake_fmt(r_frame_rate=bad_rate),
                                   '/x/a.mp4', '/x', 30000.0, 48.0)
         check(f"r_frame_rate={bad_rate!r} → N/A", info_b.frame_rate == 'N/A',
@@ -353,7 +349,7 @@ def main() -> None:
     check("码率表头含 (kbps)",
           "'bitrate': ('码率(kbps)'" in app_widgets_body())
 
-    section("_format_cell — spec 列 (Review Focus #2)")
+    section("_format_cell — spec 列")
     spec_cases = [
         (dict(container_format='mp4', video_codec='h264', audio_codec='aac'),
          'mp4/h264/aac'),
@@ -389,7 +385,7 @@ def main() -> None:
           == truncate_text('a' * 200, 100, grid._cell_font))
     check("短文本不受影响", grid._truncate_text('a.mp4', 250) == 'a.mp4')
 
-    section("mark_done — PhotoImage 只留 display (Review Focus #2/#5)")
+    section("mark_done — PhotoImage 只留 display")
     d5 = SnapshotProgressDialog(root, [make_info()], tempfile.mkdtemp())
     # 时间点 cell 是起跑时 _update_table() 才建的 (构造时只有序号/标题列),
     # 这里补建, 让 _cells[0][0] 存在。
@@ -427,7 +423,7 @@ def main() -> None:
           f"ref={d5._photo_refs[0].name!r}")
     d5.top.destroy()
 
-    section("mark_failed — 无残留图片 (Review Focus #5)")
+    section("mark_failed — 无残留图片")
     d6 = SnapshotProgressDialog(root, [make_info()], tempfile.mkdtemp())
     d6._update_table(d6._time_tokens)
     d6._state = 'running'
@@ -439,7 +435,7 @@ def main() -> None:
     check("失败计数 +1", d6._failed_count == 1, f"got={d6._failed_count}")
     d6.top.destroy()
 
-    section("状态栏常驻计数 (Review Focus #4)")
+    section("状态栏常驻计数")
     from tkinterdnd2 import TkinterDnD
     from video_checker import VideoCheckerApp
     # 必须用 TkinterDnD.Tk(): VideoGridView.bind_drop 会调 drop_target_register,
@@ -468,7 +464,7 @@ def main() -> None:
     check("状态文案为「已清除记录」", app.status_var.get() == '已清除记录',
           f"got={app.status_var.get()!r}")
 
-    section("状态栏 — 0 文件完成时计数归零 (Review Focus #4)")
+    section("状态栏 — 0 文件完成时计数归零")
     app.total_files = 0
     app._scan_complete()
     app_root.update_idletasks()

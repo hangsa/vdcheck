@@ -287,7 +287,20 @@ mp4/h264/N/A          ← 无音频流时（parse_video_info 的默认值就是 
   （池 40 × 10 列 = 400 个绑定，建池时一次完成；`_render_visible` 只改属性不重绑）
 - tooltip 用 `Toplevel(overrideredirect(True))` + `lift()`，
   避免抢焦点打断表格操作
-- 鼠标移到未截断的 cell 或离开网格时立即销毁
+- **用 `lift()` 而不是 `attributes('-topmost', True)`**。`-topmost` 是**进程无关**的：
+  浮窗会浮在**所有**应用之上。Alt+Tab 切走后鼠标不动 → `<Leave>` 不触发 →
+  tooltip 就浮在刚切过去的那个应用上面，是 tooltip 唯一会「活得比它描述的
+  东西更久」的情况。`lift()` 只在本应用内抬 sibling，失焦后自然落到后面。
+  实测（macOS/Aqua，Tk 9.0）`lift()` 能把 `overrideredirect` 的 Toplevel 提到
+  应用内最前，且不抢焦点。
+  代价：`lift()` 只抬 sibling —— 应用重新获得焦点时主窗口会被提到前面，
+  tooltip 落到它后面。所以 `<Motion>` 复用路径要**再抬一次**，
+  用户切回来后挪一下鼠标 tooltip 就回到前面。
+- **关闭是延迟的、窗口是复用的**。`<Leave>` 后不立即销毁，而是排一个
+  `after_idle` 延迟关闭：同一批事件里若紧接着移到另一个 cell，那个 cell 的
+  `<Motion>` 会取消这次关闭。直接销毁会在 cell→cell 移动时销毁重建
+  Toplevel，看起来闪烁。配合 `show()` **复用已有窗口**（只改文本 + 重定位），
+  扫过 20 行的窗口创建开销从几百毫秒降到几毫秒。
 
 **同时应用到弹窗**：弹窗在 `_make_row_labels` 里也记录 `_full_text` / `_truncated`，
 并给标题 label 绑同样的 tooltip。弹窗的 cell 是全量创建的（非虚拟滚动），

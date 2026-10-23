@@ -298,7 +298,11 @@ def parse_video_info(
     resolution = f"{width}x{height}" if width and height else "N/A"
 
     # 帧率
-    r_frame_rate = video_stream.get('r_frame_rate', '0/1')
+    # 注意: 不能用 .get(k, default) —— 键存在但值为 null 时返回 None,
+    # 'None'.split('/') 抛 AttributeError, 而下面的 except 只接 ValueError/
+    # ZeroDivisionError, 会逃出本函数打死扫描线程 (UI 卡在「检测中」)。
+    # `or` 同时把 None 和空串归一到 '0/1' → fps=0.0 → 显示 N/A。
+    r_frame_rate = video_stream.get('r_frame_rate') or '0/1'
     fps = 0.0
     try:
         num, den = r_frame_rate.split('/')
@@ -1174,7 +1178,12 @@ class Tooltip:
             self.hide()
             return
         if self.win is not None and self._cell is cell:
-            return   # 同一 cell 内的移动不重建
+            # 同一 cell 内的移动不重建 —— 但要重新抬一次: lift() 只抬应用内的
+            # sibling, 应用重新获得焦点时主窗口会被提到前面, tooltip 就落到它
+            # 后面 (不像 -topmost 那样常驻最前)。不抬的话用户切回来后即使
+            # 挪了鼠标也看不到 tooltip。
+            self.win.lift()
+            return
         self.show(cell)
 
     def show(self, cell) -> None:
@@ -1188,19 +1197,33 @@ class Tooltip:
             # 毫秒的纯窗口创建开销。改成只改文本 + 重定位。
             self._label.config(text=cell._full_text)
             self.win.geometry(f"+{x}+{y}")
+            self.win.lift()   # 见下面 win.lift() 的注释
             self._cell = cell
             return
         win = tk.Toplevel(self._owner)
         win.overrideredirect(True)
-        win.attributes('-topmost', True)
-        self._label = tk.Label(
-            win, text=cell._full_text, font=('TkDefaultFont', 9),
-            bg='#ffffe0', fg='black', relief='solid', bd=1,
-            justify='left', padx=4, pady=2,
-        )
-        self._label.pack()
-        win.geometry(f"+{x}+{y}")
+        # 先把 self.win 挂上: 下面建 Label / pack 若抛异常 (比如 teardown
+        # 期间), 要靠它回收窗口 —— 否则屏幕上留下一个没人管的孤儿 Toplevel。
+        # self._cell 留在最后 —— 失败时不该指向一个半成品。
         self.win = win
+        try:
+            self._label = tk.Label(
+                win, text=cell._full_text, font=('TkDefaultFont', 9),
+                bg='#ffffe0', fg='black', relief='solid', bd=1,
+                justify='left', padx=4, pady=2,
+            )
+            self._label.pack()
+            win.geometry(f"+{x}+{y}")
+            # 用 lift() 而不是 attributes('-topmost', True):
+            # -topmost 是**进程无关**的, 浮窗会浮在所有应用之上 —— Alt+Tab
+            # 切走后鼠标不动, <Leave> 不触发, tooltip 就浮在刚切过去的那个
+            # 应用上面。lift() 只在本应用内抬 sibling, 失焦后自然落到后面。
+            # 实测 (macOS/Aqua, Tk 9.0): lift() 能把 overrideredirect 的
+            # Toplevel 提到应用内最前, 且不抢焦点 (焦点仍在原 widget 上)。
+            win.lift()
+        except Exception:
+            self.hide()   # 建到一半失败也要回收, 不留孤儿窗口
+            raise
         self._cell = cell
 
     def hide(self) -> None:
@@ -1309,15 +1332,6 @@ class SnapshotProgressDialog:
         self.top.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---- UI 构建 ----
-
-    def _build_top_bar(self):
-        """顶部一行: 「开始截图」/「截图中」按钮"""
-        bar = ttk.Frame(self.top, padding=5)
-        bar.pack(side='top', fill='x')
-        self._action_btn = ttk.Button(
-            bar, text="开始截图", width=14, command=self._on_action_btn,
-        )
-        self._action_btn.pack(side='left')
 
     def _build_output_dir_row(self):
         """最顶一行: 截图地址 label + Entry + 「浏览」+ 「开始截图」按钮 (最右)"""
@@ -1521,6 +1535,9 @@ class SnapshotProgressDialog:
     def _update_table(self, new_tokens: list[str]) -> None:
         """起跑前调用: 按 new_tokens 重建表头 + cells.
         (清掉旧 photo refs; 销毁旧子 widget; 重建; 重设 column minsize.)"""
+        # 下面会销毁 _inner 的所有子 widget, tooltip 若还开着, 它的 _cell
+        # 就指向一个已销毁的 label —— 先关掉 (主网格 clear() 也是这么做的)。
+        self.tooltip.hide()
         self._time_tokens = list(new_tokens)
         n_cols = len(new_tokens)
         cell_col_w = self.THUMB_DISPLAY_W + 8
