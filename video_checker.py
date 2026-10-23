@@ -9,6 +9,7 @@ import sys
 import threading
 from functools import lru_cache
 import tkinter as tk
+import ntpath
 from dataclasses import dataclass
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 from tkinterdnd2 import TkinterDnD
@@ -123,6 +124,53 @@ def time_token_to_string(token: str) -> str:
     用于文件名 (Windows 保留 ':') 和进度弹窗列头显示。
     """
     return token.replace(':', '-')
+
+
+def format_title(info: VideoInfo) -> str:
+    """标题列文本: ./A/B/name.mp4 (相对路径 + 文件名)。
+
+    rel_path 在跨盘符时会被 parse_video_info 设成绝对全路径
+    (os.path.relpath 抛 ValueError 的分支, 见本文件 parse_video_info),
+    那种情况下 rel_path 本身已含文件名, 直接返回, 不再拼 title ——
+    否则会输出 "D:\\videos\\a.mp4/a.mp4" 这种路径重复。
+
+    用 ntpath 而非 os.path: 绝对路径形态只在 Windows 产生, 但测试跑在
+    macOS 上, os.path.isabs('D:\\...') 在 posix 下返回 False 会假绿。
+    ntpath.isabs 对盘符路径与 UNC 路径两平台行为一致。
+    """
+    rel = info.rel_path.rstrip('/\\')
+    if ntpath.isabs(rel):
+        return rel
+    if rel in ('', '.'):
+        return f"./{info.title}"
+    return f"{rel}/{info.title}"
+
+
+def truncate_text(text: str, col_width: int, font: tkfont.Font) -> str:
+    """按像素宽截断文本并加省略号。max_width = col_width - 10 (扣 padx + bd)。
+
+    提到模块级是因为主网格和定点截图弹窗都要用同一套截断规则。
+
+    快路径：按最宽字符估算宽度，若确定能装下就跳过 measure（绝大多数 cell 走这里）。
+    慢路径：measure 验证 + 二分查找前缀长度。
+    """
+    max_width = max(0, col_width - 10)
+    # 9pt 下 ASCII ~7px，CJK ~14px；纯 ASCII 用更小的上界可以跳过更多 measure
+    has_cjk = any(ord(c) >= 0x80 for c in text)
+    per_char = 7 if not has_cjk else 14
+    if len(text) * per_char <= max_width:
+        return text
+    if font.measure(text) <= max_width:
+        return text
+    ellipsis = '...'
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid] + ellipsis) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + ellipsis
 
 
 def _parse_drop_data(data: str) -> list[str]:
@@ -765,28 +813,8 @@ class VideoGridView:
         self._resize_state = None
 
     def _truncate_text(self, text: str, col_width: int) -> str:
-        """把 text 截断到不超过列宽（扣去 padx + bd）。
-
-        快路径：按最宽字符估算宽度，若确定能装下就跳过 measure（绝大多数 cell 走这里）。
-        慢路径：measure 验证 + 二分查找前缀长度。
-        """
-        max_width = max(0, col_width - 10)
-        # 9pt 下 ASCII ~7px，CJK ~14px；纯 ASCII 用更小的上界可以跳过更多 measure
-        has_cjk = any(ord(c) >= 0x80 for c in text)
-        per_char = 7 if not has_cjk else 14
-        if len(text) * per_char <= max_width:
-            return text
-        if self._cell_font.measure(text) <= max_width:
-            return text
-        ellipsis = '...'
-        lo, hi = 0, len(text)
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if self._cell_font.measure(text[:mid] + ellipsis) <= max_width:
-                lo = mid
-            else:
-                hi = mid - 1
-        return text[:lo] + ellipsis
+        """委托模块级 truncate_text（弹窗也用同一个实现）。"""
+        return truncate_text(text, col_width, self._cell_font)
 
     @staticmethod
     def _column_anchor(key: str) -> str:
