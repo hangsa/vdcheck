@@ -80,4 +80,4 @@ The `cancel_event: threading.Event` is checked at the top of each per-file loop;
 - `scanning` flag + `scan_btn` state prevent re-entrant scans; drag-drop is also blocked while scanning (`_on_file_drop` shows an info dialog and returns)
 - Container format: prefer the `format_name` token matching the file extension (e.g. an `.mp4` file with `format_name='mov,mp4,...'` resolves to `'mp4'`); fall back to the first token, then the extension, then `'N/A'`
 - `DEFAULT_BITRATE_KBPS = 30000`, `DEFAULT_SAMPLE_RATE_KHZ = 48` — both editable from the UI; values are parsed with `float()` and must be positive
-- Window: `1280x700`, `minsize(1000, 500)`, title `"视频检测 v2.2"`
+- Window: `1280x700`, `minsize(1000, 500)`, title `"视频检测v3.3"`

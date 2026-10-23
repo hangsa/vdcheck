@@ -1848,7 +1848,7 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
 class VideoCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("视频检测v3.0")
+        self.root.title("视频检测v3.3")
         self.root.geometry("1280x700")
         self.root.minsize(1000, 500)
 
