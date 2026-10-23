@@ -69,6 +69,13 @@ def main() -> None:
     got = format_title(make_info(rel_path='D:\\videos\\a.mp4'))
     check("绝对路径只出现一次", got.count('a.mp4') == 1, f"got={got!r}")
 
+    section("_format_cell — title 分支委托 format_title")
+    for rel, title, want in cases:
+        info = make_info(title=title, rel_path=rel)
+        got = VideoGridView._format_cell(info, 'title')
+        check(f"_format_cell rel_path={rel!r} → {want!r}", got == want,
+              f"got={got!r}")
+
     root = tk.Tk()
     root.withdraw()
     font = tkfont.Font(root=root, font=('TkDefaultFont', 9))

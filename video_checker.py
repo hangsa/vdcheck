@@ -1046,8 +1046,7 @@ class VideoGridView:
     def _format_cell(info: VideoInfo, key: str) -> str:
         """把 VideoInfo 字段映射成 cell 显示文本。"""
         if key == 'title':
-            rel = info.rel_path.rstrip('/')
-            return f"{rel}/{info.title}" if rel != '.' else f"./{info.title}"
+            return format_title(info)
         if key == 'bitrate':
             return f"{info.bitrate_kbps:.0f}"
         if key == 'result':
