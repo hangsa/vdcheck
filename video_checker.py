@@ -302,8 +302,13 @@ def parse_video_info(
     fps = 0.0
     try:
         num, den = r_frame_rate.split('/')
-        fps = float(num) / float(den) if float(den) != 0 else 0
-        frame_rate = f"{fps:.2f} fps"
+        # 分母为 0 ('0/0') 不会抛异常, 只是算不出帧率
+        fps = float(num) / float(den) if float(den) != 0 else 0.0
+        # 帧率 <= 0 (含 '0/0' / '0/1' / 负数) 一律显示 N/A: 显示 '0.00'
+        # 会让用户以为视频真的 0 帧, 而实测这类视频在定点截图弹窗里每个
+        # 时间点都抽帧失败 (parse_time_token 对 fps<=0 抛 ValueError)。
+        # frame_rate_fps 仍是 0.0, 排序和抽帧的拒绝行为都不变。
+        frame_rate = f"{fps:.2f}" if fps > 0 else "N/A"
     except (ValueError, ZeroDivisionError):
         frame_rate = "N/A"
 
@@ -330,7 +335,7 @@ def parse_video_info(
         sample_rate_raw = audio_stream.get('sample_rate')
         try:
             sample_rate_hz = float(sample_rate_raw)
-            audio_sample_rate = f"{sample_rate_hz / 1000:.1f} kHz"
+            audio_sample_rate = f"{sample_rate_hz / 1000:.1f}"
             sample_rate_passing = (sample_rate_hz / 1000.0) >= sample_rate_std
         except (TypeError, ValueError):
             audio_sample_rate = "N/A"
@@ -1793,7 +1798,7 @@ class VideoCheckerApp:
         headers = {
             'title': ('标题', 250),
             'resolution': ('分辨率', 90),
-            'frame_rate': ('帧率', 75),
+            'frame_rate': ('帧率(fps)', 75),
             'bitrate': ('码率(kbps)', 85),
             'spec': ('规格', 140),
             'audio_channels': ('声道数', 55),

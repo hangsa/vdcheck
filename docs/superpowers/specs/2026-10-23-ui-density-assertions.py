@@ -274,6 +274,68 @@ def main() -> None:
 
     d3.top.destroy(); d4.top.destroy()
 
+    section("单位规则 — cell 不带单位, N/A 不受影响 (Review Focus #3)")
+    from video_checker import parse_video_info
+
+    def _fake_fmt(**kw):
+        d = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
+                          "r_frame_rate": "30/1"}], "format": {"format_name": "mp4"}}
+        d["streams"][0].update(kw)
+        return d
+
+    info = parse_video_info(_fake_fmt(bit_rate='32000000', codec_name='h264'),
+                            '/x/a.mp4', '/x', 30000.0, 48.0)
+    check("frame_rate 不带 fps 后缀", info.frame_rate == '30.00',
+          f"got={info.frame_rate!r}")
+    check("无音频流时 audio_sample_rate = N/A", info.audio_sample_rate == 'N/A',
+          f"got={info.audio_sample_rate!r}")
+    check("排序用的 frame_rate_fps 仍是数值", info.frame_rate_fps == 30.0,
+          f"got={info.frame_rate_fps!r}")
+
+    d_audio = _fake_fmt(bit_rate='32000000', codec_name='h264')
+    d_audio["streams"].append({"codec_type": "audio", "codec_name": "aac",
+                               "channels": 2, "sample_rate": "48000"})
+    info2 = parse_video_info(d_audio, '/x/a.mp4', '/x', 30000.0, 48.0)
+    check("audio_sample_rate 不带 kHz 后缀", info2.audio_sample_rate == '48.0',
+          f"got={info2.audio_sample_rate!r}")
+    check("排序用的 sample_rate_khz 仍是数值", info2.sample_rate_khz == 48.0,
+          f"got={info2.sample_rate_khz!r}")
+
+    d_bad = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
+                          "r_frame_rate": "0/0", "codec_name": "h264"}],
+             "format": {"format_name": "mp4"}}
+    info3 = parse_video_info(d_bad, '/x/a.mp4', '/x', 30000.0, 48.0)
+    check("r_frame_rate=0/0 → N/A (不是 'nan')", info3.frame_rate == 'N/A',
+          f"got={info3.frame_rate!r}")
+    # 帧率未知时 frame_rate_fps 保持 0.0: 排序不受影响,
+    # parse_time_token(帧号) 仍会正确地拒绝未知帧率。
+    check("r_frame_rate=0/0 → frame_rate_fps 仍是 0.0", info3.frame_rate_fps == 0.0,
+          f"got={info3.frame_rate_fps!r}")
+    for bad_rate in ('0/1', 'abc', '30', ''):
+        info_b = parse_video_info(_fake_fmt(r_frame_rate=bad_rate),
+                                  '/x/a.mp4', '/x', 30000.0, 48.0)
+        check(f"r_frame_rate={bad_rate!r} → N/A", info_b.frame_rate == 'N/A',
+              f"got={info_b.frame_rate!r}")
+    # 正常帧率不受 N/A 分支影响
+    for good_rate, want_fps, want_txt in (('30/1', 30.0, '30.00'),
+                                          ('30000/1001', 30000 / 1001, '29.97')):
+        info_g = parse_video_info(_fake_fmt(r_frame_rate=good_rate),
+                                  '/x/a.mp4', '/x', 30000.0, 48.0)
+        check(f"r_frame_rate={good_rate} → {want_txt}", info_g.frame_rate == want_txt,
+              f"got={info_g.frame_rate!r}")
+        check(f"r_frame_rate={good_rate} → fps={want_fps:.4f}",
+              abs(info_g.frame_rate_fps - want_fps) < 1e-6,
+              f"got={info_g.frame_rate_fps!r}")
+
+    section("headers — 表头带单位")
+    _hdr_ok = "'frame_rate': ('帧率(fps)'" in app_widgets_body()
+    check("帧率表头含 (fps)", _hdr_ok,
+          "" if _hdr_ok else "headers 里帧率列仍是「帧率」")
+    check("采样率表头含 (kHz)",
+          "'audio_sample_rate': ('采样率(kHz)'" in app_widgets_body())
+    check("码率表头含 (kbps)",
+          "'bitrate': ('码率(kbps)'" in app_widgets_body())
+
     section("_format_cell — spec 列 (Review Focus #2)")
     spec_cases = [
         (dict(container_format='mp4', video_codec='h264', audio_codec='aac'),
