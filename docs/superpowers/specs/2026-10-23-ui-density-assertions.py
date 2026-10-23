@@ -548,6 +548,104 @@ def main() -> None:
           f"text={slot1.cget('text')!r}")
     check("cell 存了 _full_text", slot0._full_text.endswith('.mp4'))
     check("cell 绑了 <Motion>", bool(slot0.bind('<Motion>')))
+    check("cell 绑了 <Leave>", bool(slot0.bind('<Leave>')))
+
+    section("Tooltip — <Leave> 延迟关闭 + 窗口复用")
+    tip3 = Tooltip(root)
+
+    class _TruncCell:
+        """全都被截断的假 cell —— 这里只测 Tooltip 的窗口行为。"""
+        def __init__(self, text):
+            self._full_text = text
+            self._truncated = True
+
+    ca = _TruncCell('./很长的路径/甲.mp4')
+    cb = _TruncCell('./很长的路径/乙.mp4')
+
+    # (1) 截断 cell A → B: 复用窗口, 只换文本。
+    #     不复用的话每次跨边界都要销毁+新建 Toplevel (实测 ~4.4ms/次),
+    #     扫 20 行就是几百毫秒的纯窗口创建开销, 且看着闪。
+    tip3.on_motion(_FakeEv(ca))
+    root.update_idletasks()
+    check("tooltip 已弹出", tip3.win is not None)
+    win_ab = tip3.win
+    tip3.on_leave(_FakeEv(ca))
+    tip3.on_motion(_FakeEv(cb))
+    root.update_idletasks()
+    check("A→B 复用窗口 (不销毁重建)", tip3.win is win_ab,
+          f"before={win_ab!r} after={tip3.win!r}")
+    t3 = ([w.cget('text') for w in tip3.win.winfo_children()
+           if isinstance(w, tk.Label)] if tip3.win is not None else [])
+    check("A→B 后显示的是 B 的完整值", t3 and t3[0] == cb._full_text,
+          f"got={t3}")
+
+    # (2) 鼠标离开到没有绑定的 widget (表头/滚动条/状态栏): 之后不再有
+    #     <Motion>, on_motion 不跑 —— 只能靠 <Leave> 关闭, 否则浮窗带着旧文本
+    #     一直挂在鼠标附近, 看着像是属于鼠标当前位置, 会误导。
+    tip3.on_leave(_FakeEv(cb))
+    root.update_idletasks()
+    check("Leave 后 (无后续 Motion) tooltip 关闭", tip3.win is None,
+          f"got={tip3.win!r}")
+
+    # (3) 同 cell 抖动 (边界上进出): leave 后又回同一 cell。
+    #     延迟关闭独占的收益 —— 直接 hide() 会销毁重建同一个东西, 白闪。
+    tip3.on_motion(_FakeEv(ca))
+    root.update_idletasks()
+    win_c = tip3.win
+    tip3.on_leave(_FakeEv(ca))
+    tip3.on_motion(_FakeEv(ca))
+    root.update_idletasks()
+    check("同 cell 抖动不销毁重建", tip3.win is win_c,
+          f"before={win_c!r} after={tip3.win!r}")
+    tip3.hide()
+
+    section("Tooltip — 真实事件派发 (不是查绑定字符串)")
+    # 上面几条是直接调 Tooltip 方法, 只能证明方法本身对, 证明不了 cell 上
+    # 的绑定真的把事件送到了它。这里派发真实 <Motion>/<Leave>。
+    # 注意: bind() 非空 ≠ handler 是对的 —— 绑成空 lambda 照样绿 (前车之鉴),
+    # 所以必须看事件派发后的实际效果。
+    g2 = VideoGridView(ttk.Frame(root), {'title': ('标题', 60)})
+    g2.add_row(make_info(title='x' * 100 + '.mp4', rel_path='./deep/dir'))
+    g2.add_row(make_info(title='y' * 100 + '.mp4', rel_path='./other/dir'))
+    g2.add_row(make_info(title='a.mp4', rel_path='./'))
+    root.update_idletasks()
+    r_cut = g2._widget_pool[0]._cells[0][1]
+    r_cut2 = g2._widget_pool[1]._cells[0][1]
+    r_short = g2._widget_pool[2]._cells[0][1]
+    g2.tooltip.hide()
+
+    r_short.event_generate('<Motion>', x=5, y=5, when='now')
+    root.update_idletasks()
+    check("真实 <Motion> 到未截断 cell → 不弹", g2.tooltip.win is None,
+          f"got={g2.tooltip.win!r}")
+
+    r_cut.event_generate('<Motion>', x=5, y=5, when='now')
+    root.update_idletasks()
+    check("真实 <Motion> 到截断 cell → 弹出", g2.tooltip.win is not None)
+    if g2.tooltip.win is not None:
+        lt = [w.cget('text') for w in g2.tooltip.win.winfo_children()
+              if isinstance(w, tk.Label)]
+        check("真实事件弹出的内容是完整值 (不是截断值)",
+              lt and lt[0] == r_cut._full_text, f"got={lt}")
+
+    r_cut.event_generate('<Leave>', when='now')
+    root.update_idletasks()
+    check("真实 <Leave> 后关闭 (不残留陈旧浮窗)", g2.tooltip.win is None,
+          f"got={g2.tooltip.win!r}")
+
+    r_cut.event_generate('<Motion>', x=5, y=5, when='now')
+    root.update_idletasks()
+    w_live = g2.tooltip.win
+    r_cut.event_generate('<Leave>', when='now')
+    r_cut2.event_generate('<Motion>', x=5, y=5, when='now')
+    root.update_idletasks()
+    check("真实事件 cell→cell 复用窗口", g2.tooltip.win is w_live,
+          f"before={w_live!r} after={g2.tooltip.win!r}")
+    lt2 = ([w.cget('text') for w in g2.tooltip.win.winfo_children()
+            if isinstance(w, tk.Label)] if g2.tooltip.win is not None else [])
+    check("真实事件 cell→cell 后内容是第二个 cell 的完整值",
+          lt2 and lt2[0] == r_cut2._full_text, f"got={lt2}")
+    g2.tooltip.hide()
 
     section("clear 时关掉悬浮中的 tooltip")
     tip2 = Tooltip(root)

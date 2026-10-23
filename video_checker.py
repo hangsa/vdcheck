@@ -690,11 +690,13 @@ class VideoGridView:
             )
             cell.grid(row=0, column=i * 2 + 1, sticky='nsew')
             # tooltip 用: 记录完整值与是否被截断, 鼠标移动时按需弹窗。
-            # 绑定在建池时一次完成 (事件不向父 widget 冒泡, 没法在行 frame
-            # 上统一绑); _render_visible 只改这两个属性, 不重绑。
+            # <Motion> 和 <Leave> 必须成对绑 (缺一个就粘住/闪烁, 见 Tooltip
+            # docstring)。绑定在建池时一次完成 (事件不向父 widget 冒泡, 没法在
+            # 行 frame 上统一绑); _render_visible 只改这两个属性, 不重绑。
             cell._full_text = ''
             cell._truncated = False
             cell.bind('<Motion>', self.tooltip.on_motion)
+            cell.bind('<Leave>', self.tooltip.on_leave)
             # 用 _col_widths (而非 self.columns) 同步列宽真理来源
             row_frame.grid_columnconfigure(i * 2 + 1, minsize=self._col_widths[key], weight=1)
             row_cells.append((key, cell))
@@ -1128,7 +1130,15 @@ class VideoGridView:
 class Tooltip:
     """悬停提示：目标 widget 声明了 _truncated=True 时显示它的 _full_text。
 
-    用法: bind('<Motion>', tooltip.on_motion) 到各个 cell。
+    用法: 每个 cell 都要绑**两个**事件, 少一个都会出问题:
+        cell.bind('<Motion>', tooltip.on_motion)
+        cell.bind('<Leave>', tooltip.on_leave)
+    - <Motion>: 弹出 / 更新。移到没有绑定的 widget (表头 / 滚动条 / 状态栏 /
+      网格外的任何地方) 时它不再跑, 所以光有它不够。
+    - <Leave>: 唯一的关闭路径。缺了它浮窗会带着旧文本一直挂着, 而它画在鼠标
+      附近, 看着像是属于鼠标当前所在的位置 —— 陈旧信息, 会误导。
+      关闭走 after_idle 延迟 + show() 复用窗口, 所以 cell 间移动不闪。
+
     判定截断与取完整文本都由 cell 上的 _truncated / _full_text 负责,
     Tooltip 不关心文本是怎么算出来的。
 
@@ -1139,10 +1149,27 @@ class Tooltip:
     def __init__(self, owner: tk.Misc):
         self._owner = owner
         self.win: tk.Toplevel | None = None
+        self._label: tk.Label | None = None
         self._cell = None
+        self._leave_after_id = None
+
+    def on_leave(self, event) -> None:
+        """鼠标离开某个 cell。延迟关闭: 同一批事件里若紧接着移到另一个 cell,
+        那个 cell 的 <Motion> 会取消这次关闭 —— 直接 hide 会在 cell→cell
+        移动时销毁重建 Toplevel, 看起来闪烁。"""
+        if self._leave_after_id is None:
+            self._leave_after_id = self._owner.after_idle(self._hide_now)
+
+    def _hide_now(self) -> None:
+        self._leave_after_id = None
+        self.hide()
 
     def on_motion(self, event) -> None:
         cell = event.widget
+        # 移回某个 cell → 取消上一次 <Leave> 排的延迟关闭
+        if self._leave_after_id is not None:
+            self._owner.after_cancel(self._leave_after_id)
+            self._leave_after_id = None
         if not getattr(cell, '_truncated', False):
             self.hide()
             return
@@ -1151,16 +1178,28 @@ class Tooltip:
         self.show(cell)
 
     def show(self, cell) -> None:
-        self.hide()
+        # 指针坐标取自 owner, 新建/复用两条路径用同一个来源 —— 复用时新
+        # Toplevel 还不存在, 混用两个来源位置会不对。
+        x = self._owner.winfo_pointerx() + 12
+        y = self._owner.winfo_pointery() + 18
+        if self.win is not None and self._label is not None:
+            # 复用: 鼠标扫过列表时不停跨越 cell 边界, 每次销毁+新建 Toplevel
+            # 实测约 4.4ms/次 (Windows 的窗口创建通常更慢) —— 扫 20 行就是几百
+            # 毫秒的纯窗口创建开销。改成只改文本 + 重定位。
+            self._label.config(text=cell._full_text)
+            self.win.geometry(f"+{x}+{y}")
+            self._cell = cell
+            return
         win = tk.Toplevel(self._owner)
         win.overrideredirect(True)
         win.attributes('-topmost', True)
-        tk.Label(
+        self._label = tk.Label(
             win, text=cell._full_text, font=('TkDefaultFont', 9),
             bg='#ffffe0', fg='black', relief='solid', bd=1,
             justify='left', padx=4, pady=2,
-        ).pack()
-        win.geometry(f"+{win.winfo_pointerx() + 12}+{win.winfo_pointery() + 18}")
+        )
+        self._label.pack()
+        win.geometry(f"+{x}+{y}")
         self.win = win
         self._cell = cell
 
@@ -1168,6 +1207,8 @@ class Tooltip:
         if self.win is not None:
             self.win.destroy()
             self.win = None
+        # 必须一起清: 否则下次 show() 会去 config 一个已销毁的 label
+        self._label = None
         self._cell = None
 
 
@@ -1467,6 +1508,7 @@ class SnapshotProgressDialog:
         title_lbl._full_text = full_title
         title_lbl._truncated = (shown_title != full_title)
         title_lbl.bind('<Motion>', self.tooltip.on_motion)
+        title_lbl.bind('<Leave>', self.tooltip.on_leave)
         # 标题列的 grid() 不加 padx: 左右留白全部由 Label 自己的 padx=4 承担
         # (与主网格 VideoGridView 一致 —— 那边 cell.grid() 同样不带 padx)。
         # truncate_text 的 col_width-10 余量就是按「Label padx 两边 8 + bd 两边 2」
