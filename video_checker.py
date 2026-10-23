@@ -1305,10 +1305,15 @@ class SnapshotProgressDialog:
         self._middle = ttk.Frame(self.top)
         self.canvas = tk.Canvas(self._middle, highlightthickness=0)
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
-        self.canvas.config(yscrollcommand=vsb.set)
+        # 横向滚动条: master 必须直接是 _middle (它被 pack 进的容器),
+        # 不能 pack(in_=...) 跨容器 —— Windows 上那样 widget 会显示 0 尺寸。
+        self._hsb = ttk.Scrollbar(self._middle, orient='horizontal',
+                                  command=self.canvas.xview)
+        self.canvas.config(yscrollcommand=vsb.set, xscrollcommand=self._hsb.set)
         self._header_frame = ttk.Frame(self._middle)
         self._header_frame.pack(side='top', fill='x')
         self.canvas.pack(side='top', fill='both', expand=True)
+        self._hsb.pack(side='bottom', fill='x')
         vsb.pack(side='right', fill='y')
         self._middle.pack(side='top', fill='both', expand=True)
 

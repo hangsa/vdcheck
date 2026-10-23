@@ -96,6 +96,53 @@ def main() -> None:
     got = truncate_text('', 250, font)
     check("空串原样返回", got == '', f"got={got!r}")
 
+    section("SnapshotProgressDialog — 横向滚动条")
+    import tempfile
+    from video_checker import SnapshotProgressDialog
+
+    dlg = SnapshotProgressDialog(root, [make_info(title='a.mp4', rel_path='./')],
+                                tempfile.mkdtemp())
+    root.update_idletasks()
+    check("弹窗有 _hsb", hasattr(dlg, '_hsb'))
+    hsb = getattr(dlg, '_hsb', None)
+    check("_hsb 是 Scrollbar", hsb is not None and hsb.winfo_class() == 'TScrollbar',
+          f"got={hsb.winfo_class() if hsb else None!r}")
+    check("_hsb.master 是 _middle (不能是 top)",
+          hsb is not None and hsb.master is dlg._middle,
+          f"master={hsb.master if hsb else None!r}")
+    check("_hsb 已 pack 进布局", hsb is not None and hsb.winfo_manager() == 'pack',
+          f"manager={hsb.winfo_manager() if hsb else None!r}")
+    # 注意: 不能用 'xscroll' in cget('xscrollcommand') 判定 —— tkinter 把 Python
+    # 回调注册成 Tcl 命令再存回选项, cget 拿到的是 '<id>set' 这种字符串化的
+    # 回调 id (跟 cget('command') 同一个坑), 里面并没有 'xscroll' 字样。
+    # 判定改成「选项非空」+ 下面 hsb 位置随 canvas 滚动的功能断言。
+    check("canvas 绑了 xscrollcommand", bool(dlg.canvas.cget('xscrollcommand')),
+          f"got={dlg.canvas.cget('xscrollcommand')!r}")
+
+    # 功能验证: 5 个时间点 → 内容 45+250+5*328=1935 > 窗口 1200, 必须能横滚
+    # 注意不要断言 hsb.cget('command') == canvas.xview —— tkinter 返回的是
+    # 字符串化的回调 id ('4385533376xview'), 不是 bound method, 那样断言必挂。
+    dlg._update_table(['00:00:01:00'] * 5)
+    root.update_idletasks()
+    first, last = dlg.canvas.xview()
+    check("5 个时间点时内容宽出视口 (xview 可见比 < 1)", last - first < 1.0,
+          f"xview={dlg.canvas.xview()}")
+    dlg.canvas.xview_moveto(1.0)
+    root.update_idletasks()
+    check("横向滚动到底 (xview 右端 = 1.0)",
+          abs(dlg.canvas.xview()[1] - 1.0) < 1e-6, f"xview={dlg.canvas.xview()}")
+    check("横向滚动生效 (xview 左端 > 0)", dlg.canvas.xview()[0] > 0.0,
+          f"xview={dlg.canvas.xview()}")
+    check("xscrollcommand 驱动 hsb 位置",
+          hsb is not None and hsb.get()[1] > 0.99, f"hsb={hsb.get() if hsb else None}")
+
+    section("SnapshotProgressDialog — 空文件列表不崩")
+    dlg2 = SnapshotProgressDialog(root, [], tempfile.mkdtemp())
+    root.update_idletasks()
+    check("空 files 建表不抛异常", len(dlg2._inner.winfo_children()) == 0,
+          f"children={len(dlg2._inner.winfo_children())}")
+    dlg2.top.destroy(); dlg.top.destroy()
+
     section("VideoGridView._truncate_text — 委托且行为一致")
     grid = VideoGridView(ttk.Frame(root), {'title': ('标题', 250)})
     check("方法委托给模块级 truncate_text",
