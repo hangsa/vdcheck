@@ -9,6 +9,7 @@ import sys
 import threading
 from functools import lru_cache
 import tkinter as tk
+import ntpath
 from dataclasses import dataclass
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 from tkinterdnd2 import TkinterDnD
@@ -123,6 +124,53 @@ def time_token_to_string(token: str) -> str:
     用于文件名 (Windows 保留 ':') 和进度弹窗列头显示。
     """
     return token.replace(':', '-')
+
+
+def format_title(info: VideoInfo) -> str:
+    """标题列文本: ./A/B/name.mp4 (相对路径 + 文件名)。
+
+    rel_path 在跨盘符时会被 parse_video_info 设成绝对全路径
+    (os.path.relpath 抛 ValueError 的分支, 见本文件 parse_video_info),
+    那种情况下 rel_path 本身已含文件名, 直接返回, 不再拼 title ——
+    否则会输出 "D:\\videos\\a.mp4/a.mp4" 这种路径重复。
+
+    用 ntpath 而非 os.path: 绝对路径形态只在 Windows 产生, 但测试跑在
+    macOS 上, os.path.isabs('D:\\...') 在 posix 下返回 False 会假绿。
+    ntpath.isabs 对盘符路径与 UNC 路径两平台行为一致。
+    """
+    rel = info.rel_path.rstrip('/\\')
+    if ntpath.isabs(rel):
+        return rel
+    if rel in ('', '.'):
+        return f"./{info.title}"
+    return f"{rel}/{info.title}"
+
+
+def truncate_text(text: str, col_width: int, font: tkfont.Font) -> str:
+    """按像素宽截断文本并加省略号。max_width = col_width - 10 (扣 padx + bd)。
+
+    提到模块级是因为主网格和定点截图弹窗都要用同一套截断规则。
+
+    快路径：按最宽字符估算宽度，若确定能装下就跳过 measure（绝大多数 cell 走这里）。
+    慢路径：measure 验证 + 二分查找前缀长度。
+    """
+    max_width = max(0, col_width - 10)
+    # 9pt 下 ASCII ~7px，CJK ~14px；纯 ASCII 用更小的上界可以跳过更多 measure
+    has_cjk = any(ord(c) >= 0x80 for c in text)
+    per_char = 7 if not has_cjk else 14
+    if len(text) * per_char <= max_width:
+        return text
+    if font.measure(text) <= max_width:
+        return text
+    ellipsis = '...'
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid] + ellipsis) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + ellipsis
 
 
 def _parse_drop_data(data: str) -> list[str]:
@@ -250,12 +298,21 @@ def parse_video_info(
     resolution = f"{width}x{height}" if width and height else "N/A"
 
     # 帧率
-    r_frame_rate = video_stream.get('r_frame_rate', '0/1')
+    # 注意: 不能用 .get(k, default) —— 键存在但值为 null 时返回 None,
+    # 'None'.split('/') 抛 AttributeError, 而下面的 except 只接 ValueError/
+    # ZeroDivisionError, 会逃出本函数打死扫描线程 (UI 卡在「检测中」)。
+    # `or` 同时把 None 和空串归一到 '0/1' → fps=0.0 → 显示 N/A。
+    r_frame_rate = video_stream.get('r_frame_rate') or '0/1'
     fps = 0.0
     try:
         num, den = r_frame_rate.split('/')
-        fps = float(num) / float(den) if float(den) != 0 else 0
-        frame_rate = f"{fps:.2f} fps"
+        # 分母为 0 ('0/0') 不会抛异常, 只是算不出帧率
+        fps = float(num) / float(den) if float(den) != 0 else 0.0
+        # 帧率 <= 0 (含 '0/0' / '0/1' / 负数) 一律显示 N/A: 显示 '0.00'
+        # 会让用户以为视频真的 0 帧, 而实测这类视频在定点截图弹窗里每个
+        # 时间点都抽帧失败 (parse_time_token 对 fps<=0 抛 ValueError)。
+        # frame_rate_fps 仍是 0.0, 排序和抽帧的拒绝行为都不变。
+        frame_rate = f"{fps:.2f}" if fps > 0 else "N/A"
     except (ValueError, ZeroDivisionError):
         frame_rate = "N/A"
 
@@ -282,7 +339,7 @@ def parse_video_info(
         sample_rate_raw = audio_stream.get('sample_rate')
         try:
             sample_rate_hz = float(sample_rate_raw)
-            audio_sample_rate = f"{sample_rate_hz / 1000:.1f} kHz"
+            audio_sample_rate = f"{sample_rate_hz / 1000:.1f}"
             sample_rate_passing = (sample_rate_hz / 1000.0) >= sample_rate_std
         except (TypeError, ValueError):
             audio_sample_rate = "N/A"
@@ -470,6 +527,8 @@ class VideoGridView:
         self._render_after_id: str | None = None
         # 字体 (cell 宽度测算用)
         self._cell_font = tkfont.Font(font=('TkDefaultFont', 9))
+        # 悬停显示截断 cell 的完整文本 (长路径的唯一查看方式)
+        self.tooltip = Tooltip(self.parent)
         # 排序状态: key=None 表示无排序; desc=False 为升序, True 为降序
         self._sort_key: str | None = None
         self._sort_desc: bool = False
@@ -634,6 +693,14 @@ class VideoGridView:
                 fg='black',
             )
             cell.grid(row=0, column=i * 2 + 1, sticky='nsew')
+            # tooltip 用: 记录完整值与是否被截断, 鼠标移动时按需弹窗。
+            # <Motion> 和 <Leave> 必须成对绑 (缺一个就粘住/闪烁, 见 Tooltip
+            # docstring)。绑定在建池时一次完成 (事件不向父 widget 冒泡, 没法在
+            # 行 frame 上统一绑); _render_visible 只改这两个属性, 不重绑。
+            cell._full_text = ''
+            cell._truncated = False
+            cell.bind('<Motion>', self.tooltip.on_motion)
+            cell.bind('<Leave>', self.tooltip.on_leave)
             # 用 _col_widths (而非 self.columns) 同步列宽真理来源
             row_frame.grid_columnconfigure(i * 2 + 1, minsize=self._col_widths[key], weight=1)
             row_cells.append((key, cell))
@@ -765,28 +832,8 @@ class VideoGridView:
         self._resize_state = None
 
     def _truncate_text(self, text: str, col_width: int) -> str:
-        """把 text 截断到不超过列宽（扣去 padx + bd）。
-
-        快路径：按最宽字符估算宽度，若确定能装下就跳过 measure（绝大多数 cell 走这里）。
-        慢路径：measure 验证 + 二分查找前缀长度。
-        """
-        max_width = max(0, col_width - 10)
-        # 9pt 下 ASCII ~7px，CJK ~14px；纯 ASCII 用更小的上界可以跳过更多 measure
-        has_cjk = any(ord(c) >= 0x80 for c in text)
-        per_char = 7 if not has_cjk else 14
-        if len(text) * per_char <= max_width:
-            return text
-        if self._cell_font.measure(text) <= max_width:
-            return text
-        ellipsis = '...'
-        lo, hi = 0, len(text)
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if self._cell_font.measure(text[:mid] + ellipsis) <= max_width:
-                lo = mid
-            else:
-                hi = mid - 1
-        return text[:lo] + ellipsis
+        """委托模块级 truncate_text（弹窗也用同一个实现）。"""
+        return truncate_text(text, col_width, self._cell_font)
 
     @staticmethod
     def _column_anchor(key: str) -> str:
@@ -962,6 +1009,9 @@ class VideoGridView:
                 full_text = self._format_cell(info, key)
                 width = self._col_widths[key]
                 new_text = self._truncate_text(full_text, width)
+                # tooltip 靠这两个属性判断要不要弹 (只在真被截断时弹)
+                cell._full_text = full_text
+                cell._truncated = (new_text != full_text)
                 if cell.cget('text') != new_text:
                     cell.config(text=new_text)
                 fg = _cell_fg(info, key)
@@ -989,6 +1039,7 @@ class VideoGridView:
 
     def clear(self):
         """清空所有数据行，滚动条复位。"""
+        self.tooltip.hide()   # 否则 tooltip 会带着旧文本留在空列表上
         self._data.clear()
         for widget in self._widget_pool:
             widget._info = None
@@ -1018,18 +1069,16 @@ class VideoGridView:
     def _format_cell(info: VideoInfo, key: str) -> str:
         """把 VideoInfo 字段映射成 cell 显示文本。"""
         if key == 'title':
-            rel = info.rel_path.rstrip('/')
-            return f"{rel}/{info.title}" if rel != '.' else f"./{info.title}"
+            return format_title(info)
         if key == 'bitrate':
             return f"{info.bitrate_kbps:.0f}"
+        if key == 'spec':
+            return f"{info.container_format}/{info.video_codec}/{info.audio_codec}"
         if key == 'result':
             return "达标" if info.is_passing else "不达标"
         return {
             'resolution': info.resolution,
             'frame_rate': info.frame_rate,
-            'video_codec': info.video_codec,
-            'container_format': info.container_format,
-            'audio_codec': info.audio_codec,
             'audio_channels': info.audio_channels,
             'audio_sample_rate': info.audio_sample_rate,
             'duration': info.duration,
@@ -1080,6 +1129,110 @@ class VideoGridView:
         self._render_visible(force=True)
 
 
+
+
+class Tooltip:
+    """悬停提示：目标 widget 声明了 _truncated=True 时显示它的 _full_text。
+
+    用法: 每个 cell 都要绑**两个**事件, 少一个都会出问题:
+        cell.bind('<Motion>', tooltip.on_motion)
+        cell.bind('<Leave>', tooltip.on_leave)
+    - <Motion>: 弹出 / 更新。移到没有绑定的 widget (表头 / 滚动条 / 状态栏 /
+      网格外的任何地方) 时它不再跑, 所以光有它不够。
+    - <Leave>: 唯一的关闭路径。缺了它浮窗会带着旧文本一直挂着, 而它画在鼠标
+      附近, 看着像是属于鼠标当前所在的位置 —— 陈旧信息, 会误导。
+      关闭走 after_idle 延迟 + show() 复用窗口, 所以 cell 间移动不闪。
+
+    判定截断与取完整文本都由 cell 上的 _truncated / _full_text 负责,
+    Tooltip 不关心文本是怎么算出来的。
+
+    Tk 事件只沿 bindtags 派发, **不向父 widget 冒泡** —— 所以必须逐个 cell
+    绑定, 绑在 canvas / 行 frame 上覆盖不到停在子 cell 上的鼠标。
+    """
+
+    def __init__(self, owner: tk.Misc):
+        self._owner = owner
+        self.win: tk.Toplevel | None = None
+        self._label: tk.Label | None = None
+        self._cell = None
+        self._leave_after_id = None
+
+    def on_leave(self, event) -> None:
+        """鼠标离开某个 cell。延迟关闭: 同一批事件里若紧接着移到另一个 cell,
+        那个 cell 的 <Motion> 会取消这次关闭 —— 直接 hide 会在 cell→cell
+        移动时销毁重建 Toplevel, 看起来闪烁。"""
+        if self._leave_after_id is None:
+            self._leave_after_id = self._owner.after_idle(self._hide_now)
+
+    def _hide_now(self) -> None:
+        self._leave_after_id = None
+        self.hide()
+
+    def on_motion(self, event) -> None:
+        cell = event.widget
+        # 移回某个 cell → 取消上一次 <Leave> 排的延迟关闭
+        if self._leave_after_id is not None:
+            self._owner.after_cancel(self._leave_after_id)
+            self._leave_after_id = None
+        if not getattr(cell, '_truncated', False):
+            self.hide()
+            return
+        if self.win is not None and self._cell is cell:
+            # 同一 cell 内的移动不重建 —— 但要重新抬一次: lift() 只抬应用内的
+            # sibling, 应用重新获得焦点时主窗口会被提到前面, tooltip 就落到它
+            # 后面 (不像 -topmost 那样常驻最前)。不抬的话用户切回来后即使
+            # 挪了鼠标也看不到 tooltip。
+            self.win.lift()
+            return
+        self.show(cell)
+
+    def show(self, cell) -> None:
+        # 指针坐标取自 owner, 新建/复用两条路径用同一个来源 —— 复用时新
+        # Toplevel 还不存在, 混用两个来源位置会不对。
+        x = self._owner.winfo_pointerx() + 12
+        y = self._owner.winfo_pointery() + 18
+        if self.win is not None and self._label is not None:
+            # 复用: 鼠标扫过列表时不停跨越 cell 边界, 每次销毁+新建 Toplevel
+            # 实测约 4.4ms/次 (Windows 的窗口创建通常更慢) —— 扫 20 行就是几百
+            # 毫秒的纯窗口创建开销。改成只改文本 + 重定位。
+            self._label.config(text=cell._full_text)
+            self.win.geometry(f"+{x}+{y}")
+            self.win.lift()   # 见下面 win.lift() 的注释
+            self._cell = cell
+            return
+        win = tk.Toplevel(self._owner)
+        win.overrideredirect(True)
+        # 先把 self.win 挂上: 下面建 Label / pack 若抛异常 (比如 teardown
+        # 期间), 要靠它回收窗口 —— 否则屏幕上留下一个没人管的孤儿 Toplevel。
+        # self._cell 留在最后 —— 失败时不该指向一个半成品。
+        self.win = win
+        try:
+            self._label = tk.Label(
+                win, text=cell._full_text, font=('TkDefaultFont', 9),
+                bg='#ffffe0', fg='black', relief='solid', bd=1,
+                justify='left', padx=4, pady=2,
+            )
+            self._label.pack()
+            win.geometry(f"+{x}+{y}")
+            # 用 lift() 而不是 attributes('-topmost', True):
+            # -topmost 是**进程无关**的, 浮窗会浮在所有应用之上 —— Alt+Tab
+            # 切走后鼠标不动, <Leave> 不触发, tooltip 就浮在刚切过去的那个
+            # 应用上面。lift() 只在本应用内抬 sibling, 失焦后自然落到后面。
+            # 实测 (macOS/Aqua, Tk 9.0): lift() 能把 overrideredirect 的
+            # Toplevel 提到应用内最前, 且不抢焦点 (焦点仍在原 widget 上)。
+            win.lift()
+        except Exception:
+            self.hide()   # 建到一半失败也要回收, 不留孤儿窗口
+            raise
+        self._cell = cell
+
+    def hide(self) -> None:
+        if self.win is not None:
+            self.win.destroy()
+            self.win = None
+        # 必须一起清: 否则下次 show() 会去 config 一个已销毁的 label
+        self._label = None
+        self._cell = None
 
 
 class EnlargeDialog:
@@ -1156,6 +1309,8 @@ class SnapshotProgressDialog:
         self._cells_processed = 0
         self._closed = False
         self._photo_refs: list[tk.PhotoImage] = []   # 阻止 PhotoImage GC
+        # 标题列按像素截断用 (Label(width=N) 是最小字符数不是上限, 挡不住深路径撑宽)
+        self._cell_font = tkfont.Font(font=('TkDefaultFont', 9))
         self._cancel_event = threading.Event()
         self._worker_thread = None
         self._result_queue: queue.Queue | None = None
@@ -1166,6 +1321,9 @@ class SnapshotProgressDialog:
         self.top.transient(parent)
         self.top.grab_set()
         self.top.geometry("1200x700")
+        # 悬停显示被截断的标题全路径 (与主网格共用同一个 Tooltip 类)。
+        # 必须放在 self.top 建好之后 —— Tooltip 拿它当 Toplevel 的 owner。
+        self.tooltip = Tooltip(self.top)
 
         self._build_output_dir_row()
         self._build_time_points_row()
@@ -1174,15 +1332,6 @@ class SnapshotProgressDialog:
         self.top.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---- UI 构建 ----
-
-    def _build_top_bar(self):
-        """顶部一行: 「开始截图」/「截图中」按钮"""
-        bar = ttk.Frame(self.top, padding=5)
-        bar.pack(side='top', fill='x')
-        self._action_btn = ttk.Button(
-            bar, text="开始截图", width=14, command=self._on_action_btn,
-        )
-        self._action_btn.pack(side='left')
 
     def _build_output_dir_row(self):
         """最顶一行: 截图地址 label + Entry + 「浏览」+ 「开始截图」按钮 (最右)"""
@@ -1277,42 +1426,49 @@ class SnapshotProgressDialog:
         self._middle = ttk.Frame(self.top)
         self.canvas = tk.Canvas(self._middle, highlightthickness=0)
         vsb = ttk.Scrollbar(self.top, orient='vertical', command=self.canvas.yview)
-        self.canvas.config(yscrollcommand=vsb.set)
-        self._header_frame = ttk.Frame(self._middle)
-        self._header_frame.pack(side='top', fill='x')
+        # 横向滚动条: master 必须直接是 _middle (它被 pack 进的容器),
+        # 不能 pack(in_=...) 跨容器 —— Windows 上那样 widget 会显示 0 尺寸。
+        self._hsb = ttk.Scrollbar(self._middle, orient='horizontal',
+                                  command=self.canvas.xview)
+        self.canvas.config(yscrollcommand=vsb.set, xscrollcommand=self._hsb.set)
         self.canvas.pack(side='top', fill='both', expand=True)
+        self._hsb.pack(side='bottom', fill='x')
         vsb.pack(side='right', fill='y')
         self._middle.pack(side='top', fill='both', expand=True)
-
-        # Mouse wheel: bind 到 canvas / _inner / _header_frame (cell 是 canvas window item 的子)
-        for w in (self.canvas, self._header_frame):
-            w.bind('<MouseWheel>', self._on_mousewheel)
-            w.bind('<Button-4>', self._on_mousewheel_linux)
-            w.bind('<Button-5>', self._on_mousewheel_linux)
 
         self._inner = ttk.Frame(self.canvas)
         self._window = self.canvas.create_window((0, 0), window=self._inner, anchor='nw')
         # inner frame 几何变化时更新 scrollregion (用 winfo_req*, 不用 bbox('all'))
         self._inner.bind('<Configure>', lambda _e: self.canvas.config(scrollregion=(
             0, 0, self._inner.winfo_reqwidth(), self._inner.winfo_reqheight())))
-        for w in (self._inner,):
-            w.bind('<MouseWheel>', self._on_mousewheel)
-            w.bind('<Button-4>', self._on_mousewheel_linux)
-            w.bind('<Button-5>', self._on_mousewheel_linux)
+        # Mouse wheel: 见 _bind_wheel —— Tk 事件只沿 bindtags 派发, 不向父冒泡,
+        # 父上绑了也不覆盖子 widget, 所以 canvas / _inner / 表头 / cell 各自都要绑。
+        self._bind_wheel(self.canvas)
+        self._bind_wheel(self._inner)
 
         # 列 0 = 序号 (固定宽), 列 1 = 标题 (250px), 无时间点 col
-        self._header_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
         self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
-        self._header_frame.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         # 表头: 与主界面 VideoGridView 一致 — tk.Label / TkDefaultFont 9 (非粗) /
         # relief='raised' + bd=1 / padx=4 pady=2
-        tk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=5, anchor='center').grid(
-            row=0, column=0, sticky='nsew', padx=4, pady=2)
-        tk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=28, anchor='w').grid(
-            row=0, column=1, sticky='nsew', padx=4, pady=2)
+        # 表头直接 grid 进 _inner 的 row 0 (数据行从 row 1 起), 不另起一个 frame:
+        #  - 表头与数据行在同一个 scrollregion 里, 横向滚动时一起动。表头若是 canvas
+        #    的兄弟 widget 就会钉在视口上, 横滚后「T1」指着 T3 的图。
+        #  - 列宽由同一个 grid 分配, 表头列必然与数据列对齐。若把表头塞进另一个
+        #    frame 再 columnspan 横跨, 它会按表头 label 自己的自然宽独立重跑一次列
+        #    分配, 与数据 cell 那次的结果差出几像素。
+        idx_hdr = tk.Label(self._inner, text="序号", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=5, anchor='center')
+        idx_hdr.grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(idx_hdr)
+        ttl_hdr = tk.Label(self._inner, text="标题", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=28, anchor='w')
+        # 标题列的 grid() 不加 padx (与数据行同一约定, 见 _make_row_labels 的注释)
+        ttl_hdr.grid(row=0, column=1, sticky='nsew', pady=2)
+        self._bind_wheel(ttl_hdr)
+        # 表头 label 按列序留一份引用 (跟 _cells / _row_*_labels 同一套), 便于
+        # 「表头第 k 列 ↔ 第 0 行第 k 个 cell」的对齐检查 (断言脚本用)
+        self._header_labels: list[tk.Label] = [idx_hdr, ttl_hdr]
 
         # 行: 序号 + 文件名列 (无时间点 cell)
         self._cells: list[list[tk.Label]] = []
@@ -1324,11 +1480,29 @@ class SnapshotProgressDialog:
             self._row_title_labels.append(title_lbl)
             self._cells.append([])  # 空行 cells, 跟 n_cols=0 对应
 
+    def _bind_wheel(self, w) -> None:
+        """把纵向滚轮绑到 w 上。
+
+        Tk 事件只沿 bindtags (自身 / class / toplevel / all) 派发, **不向父 widget
+        冒泡** —— 绑在 canvas 或 _inner 上, 并不能覆盖停在它们子 widget 上的滚轮。
+        所以每个要能滚的 widget 都得各自显式绑一遍。
+        """
+        w.bind('<MouseWheel>', self._on_mousewheel)
+        w.bind('<Button-4>', self._on_mousewheel_linux)
+        w.bind('<Button-5>', self._on_mousewheel_linux)
+
     def _make_row_labels(self, r: int, info) -> tuple[tk.Label, tk.Label]:
         """建一行的「序号」+「标题」两个 label.
 
         配色对齐主界面 VideoGridView._cell_fg 的语义 — 不画整行底色,
         只用 fg 区分: 达标全绿字, 不达标标题红字。
+
+        标题显示完整相对路径 (与主界面 format_title 一致), 再按
+        TITLE_COL_WIDTH 像素截断 —— 不截的话一个深路径会把整列撑宽,
+        把所有时间点列推右。该列没设 weight, 列宽 = max(minsize, 所有
+        label 的 reqwidth), Label(width=28) 是最小字符数, 挡不住。
+
+        row 从 1 起: row 0 留给表头 label, 表头与数据行共用 _inner 的 grid。
         """
         if info.is_passing:
             fg = self.FG_PASS
@@ -1337,59 +1511,76 @@ class SnapshotProgressDialog:
         idx_lbl = tk.Label(self._inner, text=str(r + 1), anchor='center',
                            width=5, font=('TkDefaultFont', 9),
                            padx=4, pady=2, fg=fg)
-        idx_lbl.grid(row=r, column=0, sticky='nsew', padx=4, pady=2)
-        title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
-                             width=28, font=('TkDefaultFont', 9),
+        idx_lbl.grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(idx_lbl)
+        full_title = format_title(info)
+        shown_title = truncate_text(full_title, self.TITLE_COL_WIDTH, self._cell_font)
+        title_lbl = tk.Label(self._inner, text=shown_title, anchor='w',
+                             font=('TkDefaultFont', 9),
                              padx=4, pady=2, fg=fg)
-        title_lbl.grid(row=r, column=1, sticky='nsew', padx=4, pady=2)
+        # _full_text / _truncated 供 tooltip 用 (见 Tooltip.on_motion)
+        title_lbl._full_text = full_title
+        title_lbl._truncated = (shown_title != full_title)
+        title_lbl.bind('<Motion>', self.tooltip.on_motion)
+        title_lbl.bind('<Leave>', self.tooltip.on_leave)
+        # 标题列的 grid() 不加 padx: 左右留白全部由 Label 自己的 padx=4 承担
+        # (与主网格 VideoGridView 一致 —— 那边 cell.grid() 同样不带 padx)。
+        # truncate_text 的 col_width-10 余量就是按「Label padx 两边 8 + bd 两边 2」
+        # 算的; 这里若再叠一层 grid padx, 列宽会超出 minsize(250),
+        # 一个深路径就能把整列撑宽。表头那一列必须同步改, 否则表头与数据错开 4px。
+        title_lbl.grid(row=r + 1, column=1, sticky='nsew', pady=2)
+        self._bind_wheel(title_lbl)
         return idx_lbl, title_lbl
 
     def _update_table(self, new_tokens: list[str]) -> None:
         """起跑前调用: 按 new_tokens 重建表头 + cells.
         (清掉旧 photo refs; 销毁旧子 widget; 重建; 重设 column minsize.)"""
+        # 下面会销毁 _inner 的所有子 widget, tooltip 若还开着, 它的 _cell
+        # 就指向一个已销毁的 label —— 先关掉 (主网格 clear() 也是这么做的)。
+        self.tooltip.hide()
         self._time_tokens = list(new_tokens)
         n_cols = len(new_tokens)
         cell_col_w = self.THUMB_DISPLAY_W + 8
 
         # 清掉旧子 widget + 旧 photo refs (避免内存泄漏)
-        for w in self._header_frame.winfo_children():
-            w.destroy()
         for w in self._inner.winfo_children():
             w.destroy()
         self._photo_refs.clear()
 
         # 重置所有 columnconfigure (清掉旧列的 minsize, 避免空列占位)
         for c in range(max(20, n_cols + 2)):
-            try:
-                self._header_frame.grid_columnconfigure(c, minsize=0)
-                self._inner.grid_columnconfigure(c, minsize=0)
-            except tk.TclError:
-                pass
+            self._inner.grid_columnconfigure(c, minsize=0)
 
         # 设置列宽: col0=序号, col1=标题, col2..=时间点
-        self._header_frame.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
         self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)
-        self._header_frame.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         self._inner.grid_columnconfigure(1, minsize=self.TITLE_COL_WIDTH)
         for c in range(n_cols):
-            self._header_frame.grid_columnconfigure(c + 2, minsize=cell_col_w)
             self._inner.grid_columnconfigure(c + 2, minsize=cell_col_w)
 
-        # 表头: 序号 + 标题 + N 个时间点
+        # 表头: 序号 + 标题 + N 个时间点 (与数据行同一个 grid 的 row 0)
         # 表头: 与主界面 VideoGridView 一致 — tk.Label / TkDefaultFont 9 (非粗) /
         # relief='raised' + bd=1 / padx=4 pady=2
-        tk.Label(self._header_frame, text="序号", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=5, anchor='center').grid(
-            row=0, column=0, sticky='nsew', padx=4, pady=2)
-        tk.Label(self._header_frame, text="标题", font=('TkDefaultFont', 9),
-                 relief='raised', bd=1, width=28, anchor='w').grid(
-            row=0, column=1, sticky='nsew', padx=4, pady=2)
+        self._header_labels = []
+        idx_hdr = tk.Label(self._inner, text="序号", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=5, anchor='center')
+        idx_hdr.grid(row=0, column=0, sticky='nsew', padx=4, pady=2)
+        self._bind_wheel(idx_hdr)
+        ttl_hdr = tk.Label(self._inner, text="标题", font=('TkDefaultFont', 9),
+                           relief='raised', bd=1, width=28, anchor='w')
+        # 标题列的 grid() 不加 padx (与数据行同一约定, 见 _make_row_labels 的注释)
+        ttl_hdr.grid(row=0, column=1, sticky='nsew', pady=2)
+        self._bind_wheel(ttl_hdr)
+        self._header_labels += [idx_hdr, ttl_hdr]
         for c, tok in enumerate(new_tokens):
-            tk.Label(self._header_frame,
-                     text=f"T{c + 1}: {time_token_to_string(tok)}",
-                     font=('TkDefaultFont', 9),
-                     relief='raised', bd=1, width=14).grid(
-                row=0, column=c + 2, sticky='nsew', padx=4, pady=2)
+            # padx=1 (不是 4): 与数据 cell 的 padx 一致, 表头框和缩略图框在列里
+            # 左右边界完全重合 (差 3px 的话表头就指不到正对的那一列)。
+            th_hdr = tk.Label(self._inner,
+                              text=f"T{c + 1}: {time_token_to_string(tok)}",
+                              font=('TkDefaultFont', 9),
+                              relief='raised', bd=1, width=14)
+            th_hdr.grid(row=0, column=c + 2, sticky='nsew', padx=1, pady=2)
+            self._bind_wheel(th_hdr)
+            self._header_labels.append(th_hdr)
 
         # body: 序号 + 标题 + N 个时间点 cell (初始 '…')
         self._cells = []
@@ -1404,8 +1595,11 @@ class SnapshotProgressDialog:
                 # 图片 cell 无底色 (与主界面一致), 加载中用灰色「…」提示
                 cell = tk.Label(self._inner, text='…', fg='gray',
                                 padx=4, pady=2, cursor='hand2')
-                cell.grid(row=r, column=c + 2, sticky='nsew', padx=1, pady=1)
+                cell.grid(row=r + 1, column=c + 2, sticky='nsew', padx=1, pady=1)
                 cell.bind('<Button-1>', lambda _e, r=r, c=c: self._on_cell_click(r, c))
+                # cell 占了弹窗绝大部分面积, 不绑滚轮的话鼠标停在图上滚轮不触发
+                # (事件不向父 widget 冒泡, canvas/_inner 上的绑定覆盖不到 cell)
+                self._bind_wheel(cell)
                 cell._image_path = None
                 row_cells.append(cell)
             self._cells.append(row_cells)
@@ -1574,8 +1768,11 @@ class SnapshotProgressDialog:
         cell._image_path = image_path
         try:
             full = tk.PhotoImage(file=image_path)
-            self._photo_refs.append(full)
             display = full.subsample(self.THUMB_SUBSAMPLE, self.THUMB_SUBSAMPLE)
+            # 只留 display: full 仅用于这一次 subsample, EnlargeDialog 是从磁盘
+            # 路径重新加载的。subsample 返回独立副本, full 出作用域即可回收 ——
+            # 16:9 源每 cell 省约 0.9MB, 400 cell 场景约 360MB (抽帧宽度固定
+            # 640px, 高度随源比例变; 4:3/竖版等其它比例的省量按原图尺寸增减)。
             self._photo_refs.append(display)
             # compound='center' 必填 (tk.Label 只认 none/center/left/right/top/bottom)
             cell.config(image=display, text='', compound='center', fg='black')
@@ -1662,6 +1859,8 @@ class VideoCheckerApp:
         self.result_queue: queue.Queue = queue.Queue()
         # 浏览「选文件」时记下具体文件列表 (None = 扫整个目录; list = 只扫这些)
         self._selected_files: list[str] | None = None
+        # 达标数增量维护 (避免每次插入都全量 sum, O(N²) in N=1000 时无谓)
+        self._passed_count: int = 0
 
         self._create_widgets()
 
@@ -1717,19 +1916,14 @@ class VideoCheckerApp:
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill='both', expand=True, padx=5, pady=5)
 
-        columns = (
-            'title', 'resolution', 'frame_rate', 'bitrate',
-            'video_codec', 'container_format', 'audio_codec', 'audio_channels',
-            'audio_sample_rate', 'duration', 'file_size', 'result',
-        )
+        # 注意: 原来这里还有一个 columns 元组, 赋值后从未被读取 (死代码) —
+        # VideoGridView 只收 headers。已删除, 避免改它的人以为那是真理来源。
         headers = {
             'title': ('标题', 250),
             'resolution': ('分辨率', 90),
-            'frame_rate': ('帧率', 75),
+            'frame_rate': ('帧率(fps)', 75),
             'bitrate': ('码率(kbps)', 85),
-            'video_codec': ('视频编码', 80),
-            'container_format': ('封装', 75),
-            'audio_codec': ('音频编码', 80),
+            'spec': ('规格', 140),
             'audio_channels': ('声道数', 55),
             'audio_sample_rate': ('采样率(kHz)', 90),
             'duration': ('时长', 75),
@@ -1743,10 +1937,14 @@ class VideoCheckerApp:
         # 全局快捷键
         self.root.bind('<Control-o>', lambda _e: self._browse_path())
 
-        # === 状态栏 ===
+        # === 状态栏: 左侧操作状态 + 右侧常驻计数 ===
         self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief='sunken', anchor='w', padding=3)
-        status_bar.pack(fill='x', padx=5)
+        self.count_var = tk.StringVar(value="共 0 · 达标 0 · 不达标 0")
+        status_frame = ttk.Frame(self.root, relief='sunken', padding=3)
+        status_frame.pack(fill='x', padx=5)
+        ttk.Label(status_frame, textvariable=self.count_var, anchor='e').pack(side='right')
+        ttk.Label(status_frame, textvariable=self.status_var, anchor='w').pack(
+            side='left', fill='x', expand=True)
 
         # === Bottom: 迁移地址 + 移动/截图按钮 ===
         bottom_frame = ttk.Frame(self.root, padding=5)
@@ -1871,6 +2069,10 @@ class VideoCheckerApp:
         self.video_results.clear()
         # 清空表格
         self.grid.clear()
+        # 新一轮扫描: 计数从头来 (漏了这一步 _passed_count 会带着上一轮的
+        # 达标数累加, 状态栏出现「达标 188 · 不达标 -178」这种数)
+        self._passed_count = 0
+        self._refresh_counts()
 
         self.result_queue = queue.Queue()
 
@@ -1936,7 +2138,16 @@ class VideoCheckerApp:
     def _add_result(self, info: VideoInfo):
         """添加一条结果到表格"""
         self.video_results.append(info)
+        if info.is_passing:
+            self._passed_count += 1
         self.grid.add_row(info)
+        self._refresh_counts()
+
+    def _refresh_counts(self) -> None:
+        """状态栏右侧常驻计数: 共 N · 达标 A · 不达标 B。"""
+        total = len(self.video_results)
+        passed = self._passed_count
+        self.count_var.set(f"共 {total} · 达标 {passed} · 不达标 {total - passed}")
 
     def _scan_complete(self):
         """扫描完成处理"""
@@ -1950,18 +2161,17 @@ class VideoCheckerApp:
 
         completed = len(self.video_results)
         passed = sum(1 for v in self.video_results if v.is_passing)
-        failed = completed - passed
+        self._passed_count = passed
+        self._refresh_counts()
         if cancelled:
             queued = self.total_files
             pending = max(queued - completed, 0)
             self.status_var.set(
                 f"已停止检测：共 {queued} 个视频文件，"
-                f"已完成 {completed} 个文件，"
-                f"{passed} 个达标，{failed} 个不达标，"
-                f"{pending} 个未检测"
+                f"已完成 {completed} 个文件，{pending} 个未检测"
             )
         else:
-            self.status_var.set(f"检测完成：共 {completed} 个视频文件，{passed} 个达标，{failed} 个不达标")
+            self.status_var.set("检测完成")
 
     def _clear_records(self):
         """清空检测记录与目标路径（不影响阈值输入）。"""
@@ -1970,6 +2180,8 @@ class VideoCheckerApp:
             return
         self.video_results.clear()
         self.grid.clear()
+        self._passed_count = 0
+        self._refresh_counts()
         self.dest_var.set('')
         self._selected_files = None
         self.status_var.set("已清除记录")
@@ -2135,6 +2347,9 @@ class VideoCheckerApp:
         self.scan_btn.config(text='检测中')
         self.video_results.clear()
         self.grid.clear()
+        # 同 _start_scan: 新一轮扫描计数归零
+        self._passed_count = 0
+        self._refresh_counts()
 
         self.result_queue = queue.Queue()
 

@@ -313,12 +313,27 @@ EOF
     check("_hsb 是 Scrollbar", hsb is not None and hsb.winfo_class() == 'TScrollbar',
           f"got={hsb.winfo_class() if hsb else None!r}")
     check("_hsb.master 是 _middle (不能是 top)",
-          hsb.master is dlg._middle, f"master={hsb.master!r}")
-    check("_hsb 已 pack 进布局", hsb.winfo_manager() != '',
-          f"manager={hsb.winfo_manager()!r}")
+          hsb is not None and hsb.master is dlg._middle,
+          f"master={hsb.master if hsb else None!r}")
+    check("_hsb 已 pack 进布局", hsb is not None and hsb.winfo_manager() == 'pack',
+          f"manager={hsb.winfo_manager() if hsb else None!r}")
     check("canvas 绑了 xscrollcommand", 'xscroll' in dlg.canvas.cget('xscrollcommand'))
-    check("_hsb 的 command 指向 canvas.xview",
-          hsb.cget('command') == dlg.canvas.xview)
+
+    # 功能验证: 5 个时间点 → 内容 45+250+5*328=1935 > 窗口 1200, 必须能横滚
+    # 注意不要断言 hsb.cget('command') == canvas.xview —— tkinter 返回的是
+    # 字符串化的回调 id ('4385533376xview'), 不是 bound method, 那样断言必挂。
+    dlg._update_table(['00:00:01:00'] * 5)
+    root.update_idletasks()
+    first, last = dlg.canvas.xview()
+    check("5 个时间点时内容宽出视口 (xview 可见比 < 1)", last - first < 1.0,
+          f"xview={dlg.canvas.xview()}")
+    dlg.canvas.xview_moveto(1.0)
+    root.update_idletasks()
+    check("横向滚动到底 (xview 右端 = 1.0)",
+          abs(dlg.canvas.xview()[1] - 1.0) < 1e-6, f"xview={dlg.canvas.xview()}")
+    check("横向滚动生效 (xview 左端 > 0)", dlg.canvas.xview()[0] > 0.0,
+          f"xview={dlg.canvas.xview()}")
+    check("xscrollcommand 驱动 hsb 位置", hsb.get()[1] > 0.99, f"hsb={hsb.get()}")
 
     section("SnapshotProgressDialog — 空文件列表不崩")
     dlg2 = SnapshotProgressDialog(root, [], tempfile.mkdtemp())
@@ -473,12 +488,11 @@ EOF
           f"got={tl[0].cget('text')!r}")
     check("第 2 行标题是 ./C/a.mp4", tl[1].cget('text') == './C/a.mp4',
           f"got={tl[1].cget('text')!r}")
-    check("标题列宽未超过 TITLE_COL_WIDTH",
-          d3._inner.grid_bbox(1, 0, 1, 1)[2] <= d3.TITLE_COL_WIDTH,
-          f"w={d3._inner.grid_bbox(1, 0, 1, 1)[2]} cap={d3.TITLE_COL_WIDTH}")
+    width_short = d3._inner.winfo_reqwidth()
 
     d4 = SnapshotProgressDialog(
-        root, [make_info(title='b' * 200 + '.mp4', rel_path='./X')], tempfile.mkdtemp())
+        root, [make_info(title='很长的批次/子目录/成片_final_v2_1080p.mp4',
+                         rel_path='./2026/10/23')], tempfile.mkdtemp())
     root.update_idletasks()
     lbl4 = d4._row_title_labels[0]
     check("超长路径被截断", lbl4.cget('text') != lbl4._full_text,
@@ -486,9 +500,14 @@ EOF
     check("截断后以 ... 结尾", lbl4.cget('text').endswith('...'))
     check("_full_text 存的是完整值", lbl4._full_text.endswith('.mp4'))
     check("_truncated 标记为 True", lbl4._truncated is True)
-    check("超长路径不撑宽标题列",
-          d4._inner.grid_bbox(1, 0, 1, 1)[2] <= d4.TITLE_COL_WIDTH,
-          f"w={d4._inner.grid_bbox(1, 0, 1, 1)[2]} cap={d4.TITLE_COL_WIDTH}")
+    # 列宽: A/B 对比 —— 超长路径不应把整表撑宽。
+    # 不用 grid_bbox (它报的是分配区宽度, 不随文本变化, 测不出任何东西)。
+    # truncate_text 留 10px 余量扣 padx+bd, 实测标题 label 的 reqwidth 会是
+    # 250~251, 所以断言总宽差 <= 2px 而不是精确相等。
+    width_long = d4._inner.winfo_reqwidth()
+    check("超长路径不撑宽标题列 (总宽差 <= 2px)",
+          abs(width_long - width_short) <= 2,
+          f"short={width_short} long={width_long}")
 
     section("SnapshotProgressDialog — 短路径不标 _truncated")
     check("未截断时 _truncated=False", tl[0]._truncated is False,

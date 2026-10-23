@@ -119,7 +119,7 @@ if __name__ == "__main__":
     check("正常: is_passing=True", info.is_passing is True)
     check("正常: bitrate=30000", info.bitrate_kbps == 30000.0)
     check("正常: resolution=1920x1080", info.resolution == "1920x1080")
-    check("正常: frame_rate", info.frame_rate == "30.00 fps")
+    check("正常: frame_rate", info.frame_rate == "30.00")
     check("正常: sample_rate_passing", info.sample_rate_passing is True)
 
     # 2. 无视频流 → 返回 None
