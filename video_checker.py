@@ -1457,6 +1457,9 @@ class SnapshotProgressDialog:
                                 padx=4, pady=2, cursor='hand2')
                 cell.grid(row=r + 1, column=c + 2, sticky='nsew', padx=1, pady=1)
                 cell.bind('<Button-1>', lambda _e, r=r, c=c: self._on_cell_click(r, c))
+                # cell 占了弹窗绝大部分面积, 不绑滚轮的话鼠标停在图上滚轮不触发
+                # (事件不向父 widget 冒泡, canvas/_inner 上的绑定覆盖不到 cell)
+                self._bind_wheel(cell)
                 cell._image_path = None
                 row_cells.append(cell)
             self._cells.append(row_cells)

@@ -171,6 +171,29 @@ def main() -> None:
         check(f"{tag}: 表头 x 与数据 cell x 对齐 (误差 0px)", worst == 0,
               f"Δmax={worst}  " + " ".join(detail))
 
+    section("SnapshotProgressDialog — 滚轮绑定 (事件不向父 widget 冒泡)")
+    # Tk 事件只沿 bindtags (自身/class/toplevel/all) 派发, 不向父 widget 冒泡, 所以
+    # 绑在 canvas/_inner 上并不能覆盖停在子 widget 上的滚轮 —— 每个要能滚的 widget
+    # 都得各自显式绑。cell 占了弹窗绝大部分面积, 漏绑等于滚轮在内容区基本是死的。
+    def wheel_targets(d):
+        """所有应该接滚轮的 widget: canvas / _inner / 表头 / 第 0 行数据。"""
+        return [('canvas', d.canvas), ('_inner', d._inner),
+                *[(f'表头 {w.cget("text")}', w) for w in d._header_labels],
+                *[(f'第0行 cell[{c}]', w) for c, w in enumerate(d._cells[0])],
+                ('第0行 序号', d._row_idx_labels[0]),
+                ('第0行 标题', d._row_title_labels[0])]
+
+    targets = wheel_targets(dlg)
+    check("受检滚轮目标数 (canvas+_inner+7 表头+5 cell+序号+标题=16)",
+          len(targets) == 16, f"got={len(targets)}")
+    missing = [tag for tag, w in targets if not w.bind('<MouseWheel>')]
+    check("canvas/_inner/表头/数据 cell 都挂了 <MouseWheel>",
+          not missing, f"未绑={missing}")
+    missing45 = [tag for tag, w in targets
+                 if not w.bind('<Button-4>') or not w.bind('<Button-5>')]
+    check("canvas/_inner/表头/数据 cell 都挂了 <Button-4>/<Button-5> (X11 滚轮)",
+          not missing45, f"未绑={missing45}")
+
     section("SnapshotProgressDialog — 空文件列表不崩")
     dlg2 = SnapshotProgressDialog(root, [], tempfile.mkdtemp())
     root.update_idletasks()
