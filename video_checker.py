@@ -1738,6 +1738,8 @@ class VideoCheckerApp:
         self.result_queue: queue.Queue = queue.Queue()
         # 浏览「选文件」时记下具体文件列表 (None = 扫整个目录; list = 只扫这些)
         self._selected_files: list[str] | None = None
+        # 达标数增量维护 (避免每次插入都全量 sum, O(N²) in N=1000 时无谓)
+        self._passed_count: int = 0
 
         self._create_widgets()
 
@@ -1814,10 +1816,14 @@ class VideoCheckerApp:
         # 全局快捷键
         self.root.bind('<Control-o>', lambda _e: self._browse_path())
 
-        # === 状态栏 ===
+        # === 状态栏: 左侧操作状态 + 右侧常驻计数 ===
         self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief='sunken', anchor='w', padding=3)
-        status_bar.pack(fill='x', padx=5)
+        self.count_var = tk.StringVar(value="共 0 · 达标 0 · 不达标 0")
+        status_frame = ttk.Frame(self.root, relief='sunken', padding=3)
+        status_frame.pack(fill='x', padx=5)
+        ttk.Label(status_frame, textvariable=self.count_var, anchor='e').pack(side='right')
+        ttk.Label(status_frame, textvariable=self.status_var, anchor='w').pack(
+            side='left', fill='x', expand=True)
 
         # === Bottom: 迁移地址 + 移动/截图按钮 ===
         bottom_frame = ttk.Frame(self.root, padding=5)
@@ -1942,6 +1948,10 @@ class VideoCheckerApp:
         self.video_results.clear()
         # 清空表格
         self.grid.clear()
+        # 新一轮扫描: 计数从头来 (漏了这一步 _passed_count 会带着上一轮的
+        # 达标数累加, 状态栏出现「达标 188 · 不达标 -178」这种数)
+        self._passed_count = 0
+        self._refresh_counts()
 
         self.result_queue = queue.Queue()
 
@@ -2007,7 +2017,16 @@ class VideoCheckerApp:
     def _add_result(self, info: VideoInfo):
         """添加一条结果到表格"""
         self.video_results.append(info)
+        if info.is_passing:
+            self._passed_count += 1
         self.grid.add_row(info)
+        self._refresh_counts()
+
+    def _refresh_counts(self) -> None:
+        """状态栏右侧常驻计数: 共 N · 达标 A · 不达标 B。"""
+        total = len(self.video_results)
+        passed = self._passed_count
+        self.count_var.set(f"共 {total} · 达标 {passed} · 不达标 {total - passed}")
 
     def _scan_complete(self):
         """扫描完成处理"""
@@ -2021,18 +2040,17 @@ class VideoCheckerApp:
 
         completed = len(self.video_results)
         passed = sum(1 for v in self.video_results if v.is_passing)
-        failed = completed - passed
+        self._passed_count = passed
+        self._refresh_counts()
         if cancelled:
             queued = self.total_files
             pending = max(queued - completed, 0)
             self.status_var.set(
                 f"已停止检测：共 {queued} 个视频文件，"
-                f"已完成 {completed} 个文件，"
-                f"{passed} 个达标，{failed} 个不达标，"
-                f"{pending} 个未检测"
+                f"已完成 {completed} 个文件，{pending} 个未检测"
             )
         else:
-            self.status_var.set(f"检测完成：共 {completed} 个视频文件，{passed} 个达标，{failed} 个不达标")
+            self.status_var.set("检测完成")
 
     def _clear_records(self):
         """清空检测记录与目标路径（不影响阈值输入）。"""
@@ -2041,6 +2059,8 @@ class VideoCheckerApp:
             return
         self.video_results.clear()
         self.grid.clear()
+        self._passed_count = 0
+        self._refresh_counts()
         self.dest_var.set('')
         self._selected_files = None
         self.status_var.set("已清除记录")
@@ -2206,6 +2226,9 @@ class VideoCheckerApp:
         self.scan_btn.config(text='检测中')
         self.video_results.clear()
         self.grid.clear()
+        # 同 _start_scan: 新一轮扫描计数归零
+        self._passed_count = 0
+        self._refresh_counts()
 
         self.result_queue = queue.Queue()
 

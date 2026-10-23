@@ -61,6 +61,23 @@ def app_widgets_body() -> str:
                src.index("    # ---- 事件处理 ----")]
 
 
+def source_text() -> str:
+    """读整个 video_checker.py 源码 (原样, 不做行尾转换)。"""
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), 'video_checker.py')
+    # newline='' 必须, 理由同 app_widgets_body: 源码是 CRLF
+    return open(path, encoding='utf-8', newline='').read()
+
+
+def method_body(method: str) -> str:
+    """截出某个方法的源码 (从 'def <method>(self' 到下一个同缩进的 def)。"""
+    src = source_text()
+    start = src.index(f"    def {method}(self")
+    rest = src[start + 1:]
+    end = rest.index("\n    def ")
+    return src[start:start + 1 + end]
+
+
 def main() -> None:
     section("format_title — rel_path 各种形态")
     cases = [
@@ -421,6 +438,60 @@ def main() -> None:
           f"got={d6._cells[0][0].cget('image')!r}")
     check("失败计数 +1", d6._failed_count == 1, f"got={d6._failed_count}")
     d6.top.destroy()
+
+    section("状态栏常驻计数 (Review Focus #4)")
+    from tkinterdnd2 import TkinterDnD
+    from video_checker import VideoCheckerApp
+    # 必须用 TkinterDnD.Tk(): VideoGridView.bind_drop 会调 drop_target_register,
+    # 普通 tk.Tk() 上会 AttributeError。
+    app_root = TkinterDnD.Tk()
+    app_root.withdraw()
+    app = VideoCheckerApp(app_root)
+    app_root.update_idletasks()
+    check("初始计数全 0",
+          app.count_var.get() == '共 0 · 达标 0 · 不达标 0',
+          f"got={app.count_var.get()!r}")
+
+    app._add_result(make_info(title='p.mp4', is_passing=True))
+    app._add_result(make_info(title='f.mp4', is_passing=False))
+    app._add_result(make_info(title='p2.mp4', is_passing=True))
+    app_root.update_idletasks()
+    check("插入 3 条后计数正确",
+          app.count_var.get() == '共 3 · 达标 2 · 不达标 1',
+          f"got={app.count_var.get()!r}")
+
+    app._clear_records()
+    app_root.update_idletasks()
+    check("清除记录后归零",
+          app.count_var.get() == '共 0 · 达标 0 · 不达标 0',
+          f"got={app.count_var.get()!r}")
+    check("状态文案为「已清除记录」", app.status_var.get() == '已清除记录',
+          f"got={app.status_var.get()!r}")
+
+    section("状态栏 — 0 文件完成时计数归零 (Review Focus #4)")
+    app.total_files = 0
+    app._scan_complete()
+    app_root.update_idletasks()
+    check("0 文件后计数不残留",
+          app.count_var.get() == '共 0 · 达标 0 · 不达标 0',
+          f"got={app.count_var.get()!r}")
+    check("完成文案简化成「检测完成」",
+          app.status_var.get() == '检测完成', f"got={app.status_var.get()!r}")
+
+    # brief 漏掉的路径: _start_scan / _on_file_drop 也 clear 了 video_results,
+    # 但 brief 没让它们重置 _passed_count —— 扫第二轮会累加上一轮的达标数,
+    # 状态栏出现「达标 188 · 不达标 -178」。真跑这两个方法要起线程调 ffprobe,
+    # 太重; 退一步锚源码: clear() 之后必须紧跟计数归零。
+    for meth in ('_start_scan', '_on_file_drop'):
+        body = method_body(meth)
+        at = body.index('self.video_results.clear()')
+        window = body[at:at + 320]
+        ok = ('self._passed_count = 0' in window
+              and 'self._refresh_counts()' in window)
+        # check() 无条件打印 detail, 通过时别塞一句像报错的文案
+        check(f"{meth} 清空结果时同步重置计数", ok,
+              "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0 / _refresh_counts()")
+    app_root.destroy()
 
     root.destroy()
 
