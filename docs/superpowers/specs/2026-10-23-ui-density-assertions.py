@@ -284,12 +284,28 @@ def main() -> None:
     del big
 
     d5._state = 'running'
+    # Tk 的 image table 才是真正的持有者: 只看 _photo_refs 长度的话, 把 640px
+    # 原图藏进别的属性/模块缓存/闭包都能照样全绿。所以直接对比 image table。
+    before = set(root.tk.call('image', 'names'))
     d5.mark_done(0, 0, png)
+    after = set(root.tk.call('image', 'names'))
+    new = after - before
+    sizes = {n: (root.tk.call('image', 'width', n),
+                 root.tk.call('image', 'height', n)) for n in new}
+    check("640x360 原图已从 Tk image table 释放",
+          all(s != (640, 360) for s in sizes.values()),
+          f"残留 640x360: {[n for n, s in sizes.items() if s == (640, 360)]}")
+    check("image table 里留下的是 320x180 缩略图",
+          sizes.get(d5._photo_refs[0].name) == (320, 180),
+          f"name={d5._photo_refs[0].name} sizes={sizes}")
     check("_photo_refs 每 cell 恰好 1 项 (原来 2 项)",
           len(d5._photo_refs) == 1, f"len={len(d5._photo_refs)}")
     check("留下的是 320px display 不是 640px 原图",
           d5._photo_refs[0].width() == 320, f"w={d5._photo_refs[0].width()}")
-    check("cell 已挂上图片", d5._cells[0][0].cget('image') is not '')
+    check("cell 挂的正是 _photo_refs[0] 这张图",
+          d5._cells[0][0].cget('image') == d5._photo_refs[0].name,
+          f"cell={d5._cells[0][0].cget('image')!r} "
+          f"ref={d5._photo_refs[0].name!r}")
     d5.top.destroy()
 
     section("mark_failed — 无残留图片 (Review Focus #5)")

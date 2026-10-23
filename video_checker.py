@@ -1646,7 +1646,8 @@ class SnapshotProgressDialog:
             display = full.subsample(self.THUMB_SUBSAMPLE, self.THUMB_SUBSAMPLE)
             # 只留 display: full 仅用于这一次 subsample, EnlargeDialog 是从磁盘
             # 路径重新加载的。subsample 返回独立副本, full 出作用域即可回收 ——
-            # 每 cell 省约 0.9MB, 400 cell 场景约 360MB。
+            # 16:9 源每 cell 省约 0.9MB, 400 cell 场景约 360MB (抽帧宽度固定
+            # 640px, 高度随源比例变; 4:3/竖版等其它比例的省量按原图尺寸增减)。
             self._photo_refs.append(display)
             # compound='center' 必填 (tk.Label 只认 none/center/left/right/top/bottom)
             cell.config(image=display, text='', compound='center', fg='black')
