@@ -1407,10 +1407,7 @@ class SnapshotProgressDialog:
 
         # 重置所有 columnconfigure (清掉旧列的 minsize, 避免空列占位)
         for c in range(max(20, n_cols + 2)):
-            try:
-                self._inner.grid_columnconfigure(c, minsize=0)
-            except tk.TclError:
-                pass
+            self._inner.grid_columnconfigure(c, minsize=0)
 
         # 设置列宽: col0=序号, col1=标题, col2..=时间点
         self._inner.grid_columnconfigure(0, minsize=self.IDX_COL_WIDTH)

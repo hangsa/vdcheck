@@ -138,10 +138,9 @@ def main() -> None:
 
     section("SnapshotProgressDialog — 表头/数据列对齐 (横向滚动不脱节)")
     # 表头与数据行在 _inner 的同一个 grid 里 (表头 row 0, 数据 row 1..N), 共用同一个
-    # scrollregion, 横滚时一起动。对应关系: 表头第 k 个 label ↔ 第 0 行第 k 个 cell。
-    # winfo_rootx 是窗口级坐标, 不受 canvas 视口裁剪影响; 两者同属一个 window item,
-    # 滚动时同增同减, 所以两者的差值就是列对齐误差。误差要求 0px: 同 grid 分配是
-    # 结构性对齐, 给了容差就测不出真正的回归。
+    # scrollregion。对应关系: 表头第 k 个 label ↔ 第 0 行第 k 个 cell。
+    # winfo_rootx 是窗口级坐标, 不受 canvas 视口裁剪影响, 两者差值即列对齐误差。
+    # 误差要求 0px: 同 grid 分配是结构性对齐, 给了容差就测不出真正的回归。
     # 表头必须用 _header_labels 显式取, 不能靠「_inner 里 row==0 的 widget」反推 ——
     # 表头被移出 canvas (钉在视口不动) 时, row 0 上坐的是第一行数据, 那样比等于
     # 拿数据跟数据比, 恒等于 0, 断言会假绿。
@@ -156,9 +155,24 @@ def main() -> None:
           all(w.master is dlg._inner and int(w.grid_info()['row']) == 0
               for w in hdrs),
           f"rows={[int(w.grid_info()['row']) for w in hdrs]}")
+    # 纵向取舍 —— 已知且被接受的行为, 写在这里是为了防止以后被当成 bug 顺手"修掉"。
+    # 表头是 _inner 的孩子 ⇒ 纵向滚动时随内容一起滚出视口, 不钉在顶部。
+    # 不钉住是刻意的: 钉住需要「表头改回 canvas 的兄弟 + 按 canvasx 手工 place
+    # 同步 x 偏移」这套机制, 本机 macOS 上无法验证而部署目标是 Windows, 风险高于收益。
+    # 横向/纵向不可同日而语 —— 横向错位是「错误信息」(表头可见却指着错的列), 纵向滚走
+    # 只是「缺失信息」(滚回去就有, 不产生错误结论)。横向对齐是正确性问题, 必须做到
+    # Δ=0; 纵向不是。
+    check("纵向取舍: 表头不钉住 (master 是 _inner ⇒ 随内容滚出视口)",
+          bool(hdrs) and all(w.master is dlg._inner for w in hdrs),
+          f"master 集合={sorted({w.master.__class__.__name__ for w in hdrs}) if hdrs else '无表头'}")
     check("表头第 k 列与第 0 行第 k 个 cell 同列",
           [int(w.grid_info()['column']) for w in hdrs] == [0, 1, 2, 3, 4, 5, 6])
-    # 两个滚动位置各测一次: 验的是「始终一起对齐」, 而不是某一帧碰巧对得上。
+    # 两个滚动位置各跑一次, 但**它验不到滚动耦合**: 本脚本 root.withdraw(), 弹窗
+    # 从未 map, canvas 不会因 xview 变化去重排 window item 里的 widget —— 实测两个
+    # 位置读到的 winfo_rootx 一字不差, 两次喂进去的是同一份输入。所以这里验的只是
+    # 「两者在同一个 grid 里的相对对齐恒为 0」。滚动耦合由上面那条 master 结构断言
+    # 保证 (_inner 同一个 grid ⇒ 共用一个 scrollregion ⇒ 一起滚)。
+    # 保留两个位置是为了: 将来若改成不 withdraw, 这里会自动开始真的验滚动耦合。
     for tag, moveto in (("滚动位置 0", 0.0), ("滚到最右", 1.0)):
         dlg.canvas.xview_moveto(moveto)
         root.update_idletasks()
