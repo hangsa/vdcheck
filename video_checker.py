@@ -1975,42 +1975,45 @@ class VideoCheckerApp:
     # ---- 事件处理 ----
 
     def _browse_path(self):
-        """浏览源: 系统自动判断选的是文件还是文件夹.
+        """浏览源: 只选文件夹。
 
-        tkinter 没有「选文件夹或文件」的统一对话框, 用 fallback 模式:
-          1. 弹 askopenfilenames (文件选择器)
-          2. 用户选了文件 → 按文件加载
-          3. 用户取消 → 弹 askdirectory (文件夹选择器)
-          4. 用户选了文件夹 → 按文件夹扫整个
-          5. 用户又取消 → 啥也不动
-
-        用户体感: 点一下「浏览」, 系统根据行为自动分流, 不需要
-        提前选「我要选文件夹还是文件」。
+        原来先弹文件选择器、取消后再弹文件夹选择器 (fallback 两段弹)。
+        已取消 —— 只保留文件夹, 一次一个对话框。选单个/多个视频文件的场景
+        走拖拽 (bind_drop → _on_file_drop), 不再从「浏览」进。
         """
-        files = filedialog.askopenfilenames(
-            title="选择视频文件 (可多选, 取消可改为选整个文件夹)",
-            filetypes=[
-                ("视频文件",
-                 "*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.ts *.m2ts "
-                 "*.mpg *.mpeg *.webm *.3gp *.m4v *.vob *.ogv "
-                 "*.rm *.rmvb *.asf *.divx *.f4v *.mxf *.mts"),
-                ("所有文件", "*.*"),
-            ],
-        )
-        if files:
-            self._selected_files = list(files)
-            folder = os.path.dirname(files[0])
-            self.path_var.set(folder)
-            self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
-            self.snapshot_dest_var.set(os.path.join(folder, 'snapshot').replace('/', '\\'))
-            return
-        # 文件选择器取消 → 弹文件夹选择器 (用户大概想扫整个目录)
         folder = filedialog.askdirectory(title="选择视频文件夹")
         if folder:
             self._selected_files = None
             self.path_var.set(folder)
-            self.dest_var.set(os.path.join(folder, "Checked").replace('/', '\\'))
-            self.snapshot_dest_var.set(os.path.join(folder, 'snapshot').replace('/', '\\'))
+            self._sync_derived_paths(folder)
+
+    def _sync_derived_paths(self, directory: str) -> None:
+        """迁移地址 + 截图地址跟随源目录, 无条件覆盖。
+
+        这两个字段是**从「文件路径」派生**的, 不是用户自己配的 —— 源目录
+        一变就该重算。旧的写法是 `if not dest_var.get().strip()` 才填,
+        那个 guard 区分不了「从没填过」和「上次为别的目录填过」: 第一次
+        扫 A 填成 A\\Checked, 之后把文件路径改成 B 再开始检测, 字段非空 →
+        不重算 → 迁移和截图仍然指向 A。
+
+        调用点三处, 都要走这里, 别再各自拼一遍:
+          - `_browse_path`  选了文件夹, 立刻给反馈 (还没点开始检测)
+          - `_start_scan`   手动改过「文件路径」后开始检测
+          - `_on_file_drop` 拖进来的文件所在目录
+        """
+        # 迁移地址: 无条件转反斜杠 (Windows 观感统一, 与既有行为一致)
+        self.dest_var.set(
+            os.path.join(directory, "Checked").replace('/', '\\'))
+        # 截图地址: 只在 win32 转反斜杠 —— macOS 上反斜杠路径 os.path.isdir
+        # 不认, 建出来的目录会等于没建
+        snap_default = os.path.join(directory, 'snapshot')
+        if sys.platform == 'win32':
+            snap_default = snap_default.replace('/', '\\')
+        try:
+            os.makedirs(snap_default, exist_ok=True)
+        except OSError:
+            snap_default = ''  # 建不出来就清空
+        self.snapshot_dest_var.set(snap_default)
 
     def _browse_dest(self):
         folder = filedialog.askdirectory(title="选择迁移地址")
@@ -2047,20 +2050,9 @@ class VideoCheckerApp:
             messagebox.showerror("错误", "采样率标准必须为正数。")
             return
 
-        # 设置默认迁移地址 + 截图地址
-        if not self.dest_var.get().strip():
-            self.dest_var.set(os.path.join(directory, "Checked").replace('/', '\\'))
-        # 截图地址: 默认 <文件路径>\snapshot; 自动建子目录 (Win 反斜杠,
-        # macOS 留正斜杠——后者 os.path.isdir 不识别反斜杠路径)
-        snap_default = os.path.join(directory, 'snapshot')
-        if sys.platform == 'win32':
-            snap_default = snap_default.replace('/', '\\')
-        try:
-            os.makedirs(snap_default, exist_ok=True)
-        except OSError:
-            snap_default = ''  # 建不出来就清空
-        if not self.snapshot_dest_var.get().strip():
-            self.snapshot_dest_var.set(snap_default)
+        # 迁移地址 + 截图地址跟随本次扫描的源目录 (无条件覆盖, 见
+        # _sync_derived_paths 的注释 —— 旧的「空才填」会留在上一个目录上)
+        self._sync_derived_paths(directory)
 
         self.cancel_event.clear()
         self.scanning = True
@@ -2183,6 +2175,9 @@ class VideoCheckerApp:
         self._passed_count = 0
         self._refresh_counts()
         self.dest_var.set('')
+        # 截图地址一起清: 两个字段同源, 只清一个会让「清除记录」后截图地址
+        # 还指着一个已经跟当前列表无关的目录
+        self.snapshot_dest_var.set('')
         self._selected_files = None
         self.status_var.set("已清除记录")
 
@@ -2333,13 +2328,11 @@ class VideoCheckerApp:
             return
 
         # 在文件路径输入框显示第一个被拖入的文件所在目录（不含文件名）,
-        # 目标路径默认在该目录下追加 Checked 子目录。Windows 系统下统一
-        # 使用反斜杠, 避免路径中斜杠与反斜杠交替出现。
+        # 迁移地址 + 截图地址跟随该目录 (原来这里只填了迁移地址, 截图地址
+        # 留在上一次扫描的目录上)。
         self.path_var.set(os.path.dirname(video_files[0]).replace('/', '\\'))
-        self.dest_var.set(
-            os.path.join(os.path.dirname(video_files[0]), "Checked").replace('/', '\\')
-        )
-        # 记下拖入的具体文件, 跟浏览「选文件」走同一条路径
+        self._sync_derived_paths(os.path.dirname(video_files[0]))
+        # 记下拖入的具体文件 —— 「浏览」已只保留文件夹, 拖拽是唯一的选文件入口
         self._selected_files = video_files
 
         self.cancel_event.clear()
