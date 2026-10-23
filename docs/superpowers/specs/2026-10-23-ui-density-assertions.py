@@ -225,6 +225,44 @@ def main() -> None:
           f"数据行={len(rows)} _inner 总 children={len(dlg2._inner.winfo_children())}")
     dlg2.top.destroy(); dlg.top.destroy()
 
+    section("SnapshotProgressDialog — 标题显示 rel_path 且按像素限宽")
+    d3 = SnapshotProgressDialog(root, [make_info(title='a.mp4', rel_path='./A/B'),
+                                      make_info(title='a.mp4', rel_path='./C')],
+                                tempfile.mkdtemp())
+    root.update_idletasks()
+    tl = d3._row_title_labels
+    check("第 1 行标题含子文件夹路径", tl[0].cget('text') == './A/B/a.mp4',
+          f"got={tl[0].cget('text')!r}")
+    check("第 2 行标题是 ./C/a.mp4", tl[1].cget('text') == './C/a.mp4',
+          f"got={tl[1].cget('text')!r}")
+    width_short = d3._inner.winfo_reqwidth()
+
+    d4 = SnapshotProgressDialog(
+        root, [make_info(title='很长的批次/子目录/成片_final_v2_1080p.mp4',
+                         rel_path='./2026/10/23')], tempfile.mkdtemp())
+    root.update_idletasks()
+    lbl4 = d4._row_title_labels[0]
+    check("超长路径被截断", lbl4.cget('text') != lbl4._full_text,
+          f"shown_len={len(lbl4.cget('text'))}")
+    check("截断后以 ... 结尾", lbl4.cget('text').endswith('...'))
+    check("_full_text 存的是完整值", lbl4._full_text.endswith('.mp4'))
+    check("_truncated 标记为 True", lbl4._truncated is True)
+    # 列宽: A/B 对比 —— 超长路径不应把整表撑宽。
+    # 不用 grid_bbox (它报的是分配区宽度, 不随文本变化, 测不出任何东西)。
+    # truncate_text 留 10px 余量扣 padx+bd, 实测标题 label 的 reqwidth 会是
+    # 250~251, 所以断言总宽差 <= 2px 而不是精确相等。
+    width_long = d4._inner.winfo_reqwidth()
+    check("超长路径不撑宽标题列 (总宽差 <= 2px)",
+          abs(width_long - width_short) <= 2,
+          f"short={width_short} long={width_long}")
+
+    section("SnapshotProgressDialog — 短路径不标 _truncated")
+    check("未截断时 _truncated=False", tl[0]._truncated is False,
+          f"got={tl[0]._truncated!r}")
+    check("未截断时 shown == full", tl[0].cget('text') == tl[0]._full_text)
+
+    d3.top.destroy(); d4.top.destroy()
+
     section("VideoGridView._truncate_text — 委托且行为一致")
     grid = VideoGridView(ttk.Frame(root), {'title': ('标题', 250)})
     check("方法委托给模块级 truncate_text",

@@ -1183,6 +1183,8 @@ class SnapshotProgressDialog:
         self._cells_processed = 0
         self._closed = False
         self._photo_refs: list[tk.PhotoImage] = []   # 阻止 PhotoImage GC
+        # 标题列按像素截断用 (Label(width=N) 是最小字符数不是上限, 挡不住深路径撑宽)
+        self._cell_font = tkfont.Font(font=('TkDefaultFont', 9))
         self._cancel_event = threading.Event()
         self._worker_thread = None
         self._result_queue: queue.Queue | None = None
@@ -1341,7 +1343,8 @@ class SnapshotProgressDialog:
         self._bind_wheel(idx_hdr)
         ttl_hdr = tk.Label(self._inner, text="标题", font=('TkDefaultFont', 9),
                            relief='raised', bd=1, width=28, anchor='w')
-        ttl_hdr.grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
+        # 标题列的 grid() 不加 padx (与数据行同一约定, 见 _make_row_labels 的注释)
+        ttl_hdr.grid(row=0, column=1, sticky='nsew', pady=2)
         self._bind_wheel(ttl_hdr)
         # 表头 label 按列序留一份引用 (跟 _cells / _row_*_labels 同一套), 便于
         # 「表头第 k 列 ↔ 第 0 行第 k 个 cell」的对齐检查 (断言脚本用)
@@ -1374,6 +1377,11 @@ class SnapshotProgressDialog:
         配色对齐主界面 VideoGridView._cell_fg 的语义 — 不画整行底色,
         只用 fg 区分: 达标全绿字, 不达标标题红字。
 
+        标题显示完整相对路径 (与主界面 format_title 一致), 再按
+        TITLE_COL_WIDTH 像素截断 —— 不截的话一个深路径会把整列撑宽,
+        把所有时间点列推右。该列没设 weight, 列宽 = max(minsize, 所有
+        label 的 reqwidth), Label(width=28) 是最小字符数, 挡不住。
+
         row 从 1 起: row 0 留给表头 label, 表头与数据行共用 _inner 的 grid。
         """
         if info.is_passing:
@@ -1385,10 +1393,20 @@ class SnapshotProgressDialog:
                            padx=4, pady=2, fg=fg)
         idx_lbl.grid(row=r + 1, column=0, sticky='nsew', padx=4, pady=2)
         self._bind_wheel(idx_lbl)
-        title_lbl = tk.Label(self._inner, text=info.title, anchor='w',
-                             width=28, font=('TkDefaultFont', 9),
+        full_title = format_title(info)
+        shown_title = truncate_text(full_title, self.TITLE_COL_WIDTH, self._cell_font)
+        title_lbl = tk.Label(self._inner, text=shown_title, anchor='w',
+                             font=('TkDefaultFont', 9),
                              padx=4, pady=2, fg=fg)
-        title_lbl.grid(row=r + 1, column=1, sticky='nsew', padx=4, pady=2)
+        # _full_text / _truncated 供 tooltip 用 (见 Tooltip.on_motion)
+        title_lbl._full_text = full_title
+        title_lbl._truncated = (shown_title != full_title)
+        # 标题列的 grid() 不加 padx: 左右留白全部由 Label 自己的 padx=4 承担
+        # (与主网格 VideoGridView 一致 —— 那边 cell.grid() 同样不带 padx)。
+        # truncate_text 的 col_width-10 余量就是按「Label padx 两边 8 + bd 两边 2」
+        # 算的; 这里若再叠一层 grid padx, 列宽会超出 minsize(250),
+        # 一个深路径就能把整列撑宽。表头那一列必须同步改, 否则表头与数据错开 4px。
+        title_lbl.grid(row=r + 1, column=1, sticky='nsew', pady=2)
         self._bind_wheel(title_lbl)
         return idx_lbl, title_lbl
 
@@ -1424,7 +1442,8 @@ class SnapshotProgressDialog:
         self._bind_wheel(idx_hdr)
         ttl_hdr = tk.Label(self._inner, text="标题", font=('TkDefaultFont', 9),
                            relief='raised', bd=1, width=28, anchor='w')
-        ttl_hdr.grid(row=0, column=1, sticky='nsew', padx=4, pady=2)
+        # 标题列的 grid() 不加 padx (与数据行同一约定, 见 _make_row_labels 的注释)
+        ttl_hdr.grid(row=0, column=1, sticky='nsew', pady=2)
         self._bind_wheel(ttl_hdr)
         self._header_labels += [idx_hdr, ttl_hdr]
         for c, tok in enumerate(new_tokens):
