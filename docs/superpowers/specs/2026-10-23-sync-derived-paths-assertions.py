@@ -200,8 +200,11 @@ def main() -> int:
     check("_on_file_drop 里调用了 _sync_derived_paths",
           '_sync_derived_paths' in drop_src,
           "拖进来的文件若不同步截图地址, 会沿用上一次的截图目录")
+    # 拖拽填路径框走 _set_path (包了一层, 免得触发「用户改过路径」的副作用),
+    # 所以这里两个写法都认。
     check("_on_file_drop 仍保留 path_var 赋值",
-          'self.path_var.set(' in drop_src)
+          ('self.path_var.set(' in drop_src
+           or 'self._set_path(' in drop_src))
 
     # ---- 清除记录要一起清截图地址 ----
     section("_clear_records 同时清截图地址")

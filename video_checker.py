@@ -1968,6 +1968,10 @@ class VideoCheckerApp:
 
         ttk.Label(top_frame, text="文件路径:").pack(side='left')
         self.path_var = tk.StringVar()
+        # 用户手动改路径框 → 丢弃「拖拽留下的选文件列表」模式。
+        # 以前必须先点「清除记录」才生效, 现在手改路径就直接生效。
+        self._suppress_path_trace = False
+        self.path_var.trace_add('write', self._on_path_edited)
         self.path_entry = ttk.Entry(top_frame, textvariable=self.path_var, width=50)
         self.path_entry.pack(side='left', padx=(5, 2), fill='x', expand=True)
 
@@ -2082,8 +2086,29 @@ class VideoCheckerApp:
         folder = filedialog.askdirectory(title="选择视频文件夹")
         if folder:
             self._selected_files = None
-            self.path_var.set(folder)
+            self._set_path(folder)
             self._sync_derived_paths(folder)
+
+    def _set_path(self, path: str) -> None:
+        """程序自己写「文件路径」框 (浏览 / 拖拽), 不触发「用户改过路径」的副作用。"""
+        self._suppress_path_trace = True
+        try:
+            self.path_var.set(path)
+        finally:
+            self._suppress_path_trace = False
+
+    def _on_path_edited(self, *_args) -> None:
+        """用户手动改了「文件路径」→ 丢掉拖拽留下的选文件列表。
+
+        拖拽会把文件记进 _selected_files, 之后 _start_scan 扫的是那批文件
+        而不是路径框里的目录 (见 _scan_target)。以前要等用户点「清除记录」
+        才切得回去 —— 现在手改路径框就立即生效, 不用先清除记录。
+
+        浏览选文件夹本来就是这个行为 (它也把 _selected_files 清了), 一致。
+        """
+        if self._suppress_path_trace:
+            return
+        self._selected_files = None
 
     def _sync_derived_paths(self, directory: str) -> None:
         """迁移地址 + 截图地址跟随源目录, 无条件覆盖。
@@ -2172,21 +2197,33 @@ class VideoCheckerApp:
 
         self.result_queue = queue.Queue()
 
-        # 浏览「选文件」时只扫选中的; 否则扫整个目录
-        if self._selected_files:
+        # 扫拖入的那批文件, 还是扫路径框里的整个目录
+        kind, payload = self._scan_target(directory)
+        if kind == 'files':
             t = threading.Thread(
                 target=self._scan_files_worker,
-                args=(self._selected_files, bitrate_std, sample_rate_std),
+                args=(payload, bitrate_std, sample_rate_std),
                 daemon=True,
             )
         else:
             t = threading.Thread(
                 target=self._scan_worker,
-                args=(directory, self.recursive_var.get(), bitrate_std, sample_rate_std),
+                args=(payload, self.recursive_var.get(), bitrate_std, sample_rate_std),
                 daemon=True,
             )
         t.start()
         self._check_queue()
+
+    def _scan_target(self, directory: str) -> tuple[str, object]:
+        """本次扫描的目标: ('files', 文件列表) 或 ('dir', 目录)。
+
+        拖拽加载的文件优先 —— 但只在用户没手动改过「文件路径」时。
+        用户手改了路径框, _on_path_edited 就把 _selected_files 丢了,
+        于是这里回落到「扫路径框里的整个目录」。不需要先点「清除记录」。
+        """
+        if self._selected_files:
+            return ('files', self._selected_files)
+        return ('dir', directory)
 
     def _scan_worker(self, directory: str, recursive: bool, bitrate_std: float, sample_rate_std: float):
         """扫描工作线程"""
@@ -2439,7 +2476,9 @@ class VideoCheckerApp:
         # 在文件路径输入框显示第一个被拖入的文件所在目录（不含文件名）,
         # 迁移地址 + 截图地址跟随该目录 (原来这里只填了迁移地址, 截图地址
         # 留在上一次扫描的目录上)。
-        self.path_var.set(os.path.dirname(video_files[0]).replace('/', '\\'))
+        # 用 _set_path: 拖拽是程序自己填路径框, 不能触发「用户改过路径 →
+        # 丢弃文件列表」那条 (见 _on_path_edited)。
+        self._set_path(os.path.dirname(video_files[0]).replace('/', '\\'))
         self._sync_derived_paths(os.path.dirname(video_files[0]))
         # 记下拖入的具体文件 —— 「浏览」已只保留文件夹, 拖拽是唯一的选文件入口
         self._selected_files = video_files

@@ -63,6 +63,8 @@ Single-file app (`video_checker.py`, ~1018 lines). Four layers plus two cross-cu
 - `<Control-o>` opens the browse-folder dialog
 - Drag-and-drop: `TkinterDnD.Tk()` root; `_on_file_drop` uses `_parse_drop_data` to handle both Windows `{file1} {file2}` braced format and macOS/Linux space-separated format, then runs `_scan_files_worker`
 
+**Scan target precedence** — dragging files records them in `_selected_files`, and `开始检测` then scans that list instead of the path box. Editing the 文件路径 entry (by typing) clears `_selected_files` via a `StringVar` trace, so the next scan follows the path box without needing 清除记录 first; 浏览 and drag use `_set_path` to write the entry without triggering that. `_scan_target(directory)` returns `('files', list)` or `('dir', directory)`.
+
 **Threading** — scanning runs on a daemon worker thread that pushes `(status | result | done)` tuples onto `result_queue`; the main thread drains the queue every 100ms via `root.after` until a `done` arrives. There are two worker methods because their `base_path` semantics differ:
 - `_scan_worker(directory, recursive, bitrate_std, sample_rate_std)` — directory scan; `base_path = directory` (relative paths anchored to the picked folder)
 - `_scan_files_worker(files, bitrate_std, sample_rate_std)` — drag-dropped files; `base_path = os.path.dirname(files[0])` so the first file shows `./<title>` in the title column
