@@ -1351,7 +1351,11 @@ class SnapshotProgressDialog:
         self._action_btn.pack(side='right')
 
     def _browse_output_dir(self) -> None:
-        """「浏览」按钮: 选截图输出文件夹, 写进 截图地址 Entry"""
+        """「浏览」按钮: 选截图存放的**父目录**, 下面套一层 snapshot。
+
+        Entry 始终显示最终输出目录 (= 所选文件夹\\snapshot), 与默认值
+        <文件路径>\\snapshot 是同一套约定。目录本身等点「开始截图」才建。
+        """
         from tkinter import filedialog
         folder = filedialog.askdirectory(
             title="选择截图存放文件夹", parent=self.top,
@@ -1359,7 +1363,7 @@ class SnapshotProgressDialog:
         if folder:
             if sys.platform == 'win32':
                 folder = folder.replace('/', '\\')
-            self._output_dir_var.set(folder)
+            self._output_dir_var.set(os.path.join(folder, 'snapshot'))
 
     def _build_time_points_row(self):
         """一行: 时间点 label + N 个 Entry + 「+」按钮 (最后)"""
@@ -1993,32 +1997,39 @@ class VideoCheckerApp:
         这两个字段是**从「文件路径」派生**的, 不是用户自己配的 —— 源目录
         一变就该重算。旧的写法是 `if not dest_var.get().strip()` 才填,
         那个 guard 区分不了「从没填过」和「上次为别的目录填过」: 第一次
-        扫 A 填成 A\\Checked, 之后把文件路径改成 B 再开始检测, 字段非空 →
+        扫 A 填成 A\\checked, 之后把文件路径改成 B 再开始检测, 字段非空 →
         不重算 → 迁移和截图仍然指向 A。
 
         调用点三处, 都要走这里, 别再各自拼一遍:
           - `_browse_path`  选了文件夹, 立刻给反馈 (还没点开始检测)
           - `_start_scan`   手动改过「文件路径」后开始检测
           - `_on_file_drop` 拖进来的文件所在目录
+
+        **只填字段, 不建目录** —— 目录等真要用的时候再建:
+          - snapshot → 弹窗点「开始截图」时 (SnapshotProgressDialog._start_snap)
+          - checked  → 点「移动达标/全部文件」时 (_move_passing_files)
+        扫描时就在源目录里建 snapshot, 会给不需要它的人留一个空文件夹。
         """
         # 迁移地址: 无条件转反斜杠 (Windows 观感统一, 与既有行为一致)
         self.dest_var.set(
-            os.path.join(directory, "Checked").replace('/', '\\'))
+            os.path.join(directory, "checked").replace('/', '\\'))
         # 截图地址: 只在 win32 转反斜杠 —— macOS 上反斜杠路径 os.path.isdir
         # 不认, 建出来的目录会等于没建
         snap_default = os.path.join(directory, 'snapshot')
         if sys.platform == 'win32':
             snap_default = snap_default.replace('/', '\\')
-        try:
-            os.makedirs(snap_default, exist_ok=True)
-        except OSError:
-            snap_default = ''  # 建不出来就清空
         self.snapshot_dest_var.set(snap_default)
 
     def _browse_dest(self):
+        """选迁移地址: 所选文件夹当**父目录**, 下面套一层 checked。
+
+        Entry 始终显示最终目标目录 (= 所选文件夹\\checked), 与默认值
+        <文件路径>\\checked 是同一套约定。目录本身等点移动时才建。
+        """
         folder = filedialog.askdirectory(title="选择迁移地址")
         if folder:
-            self.dest_var.set(folder.replace('/', '\\'))
+            self.dest_var.set(
+                os.path.join(folder, "checked").replace('/', '\\'))
 
     def _on_scan_btn_click(self):
         """扫描按钮点击: 空闲时启动检测, 检测中触发停止。"""

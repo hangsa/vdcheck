@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller 输出 (build.bat 生成, 不入库)
+build/
+dist/
+
+# 打包用的 ffprobe 目录是下载物, 不在 .gitignore —— 见 CLAUDE.md

@@ -2,7 +2,7 @@
 
 背景 bug:
     `_start_scan` 里的填默认值逻辑是 `if not dest_var.get().strip()`,
-    只在字段为空时生效。第一次扫 A 填成 A\\Checked, 之后把「文件路径」改成
+    只在字段为空时生效。第一次扫 A 填成 A\\checked, 之后把「文件路径」改成
     B 再开始检测, 字段非空 → 两个 if 都不进 → 迁移地址和截图地址留在 A。
 
 本脚本验证:
@@ -46,11 +46,11 @@ def expected_dest(directory: str) -> str:
     """迁移地址的期望值。
 
     `_sync_derived_paths` 对迁移地址无条件 `.replace('/', '\\\\')` —— Windows
-    上是对的, macOS 上会把 `/tmp/x/Checked` 变成 `\\tmp\\x\\Checked`。
+    上是对的, macOS 上会把 `/tmp/x/checked` 变成 `\\tmp\\x\\checked`。
     这是改动前就有的行为 (旧代码 :2004 / :2012 / :2052 / :2339 都这么做),
     本脚本按现状断言, 不顺手改斜杠约定。
     """
-    return os.path.join(directory, "Checked").replace('/', '\\')
+    return os.path.join(directory, "checked").replace('/', '\\')
 
 
 def expected_snapshot(directory: str) -> str:
@@ -121,8 +121,10 @@ def main() -> int:
           app.snapshot_dest_var.get() == expected_snapshot(tmp_b),
           f"got={app.snapshot_dest_var.get()!r} "
           f"want={expected_snapshot(tmp_b)!r}")
-    check("B 的截图目录被建出来",
-          os.path.isdir(os.path.join(tmp_b, 'snapshot')),
+    # 目录本身按需创建 (2026-10-26 起): 填字段但不建目录, 等点「开始截图」
+    # 才建。见 2026-10-26-lazy-dir-creation-assertions.py。
+    check("B 的截图目录此时还没建",
+          not os.path.isdir(os.path.join(tmp_b, 'snapshot')),
           f"path={os.path.join(tmp_b, 'snapshot')!r}")
 
     # 反向: 再换回 A, 确认不是单向

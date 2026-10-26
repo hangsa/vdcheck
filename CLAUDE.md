@@ -71,6 +71,12 @@ The `cancel_event: threading.Event` is checked at the top of each per-file loop;
 
 **File mover** — both `_move_passing_files` and `_move_all_files` follow the same shape: confirm via `askyesno` dialog, `os.makedirs(dest_dir, exist_ok=True)`, then `shutil.move` each file, with `_get_unique_dest` appending `_1`, `_2`, ... on name collisions. `_move_passing_files` filters `video_results` by `is_passing`; `_move_all_files` moves everything regardless of pass/fail. Both are **moves**, not copies. Path inputs are normalized to backslashes (`_browse_path`, `_browse_dest`, `_on_file_drop`) so Windows users don't see mixed slashes.
 
+**Output directories are created on demand** — scanning/browsing never creates a directory. `snapshot` (screenshots) appears when you click 开始截图 in the dialog; `checked` (moved files) appears when you click 移动达标文件 / 移动全部文件. Two fields carry the paths, both derived from the source folder and overwritten on every scan (`_sync_derived_paths`):
+- 迁移地址 → `<source>\checked`
+- 截图地址 → `<source>\snapshot` (only a default — the dialog's own 截图地址 field is the one that counts)
+
+The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\snapshot`, `F\checked`); typing a path into the field uses it verbatim.
+
 ## Key design notes
 
 - `get_ffprobe_path()` is wrapped in `@lru_cache(maxsize=1)` — ffprobe lookup happens once per process
