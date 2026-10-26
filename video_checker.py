@@ -550,15 +550,24 @@ class VideoGridView:
         # 主容器
         self.outer = ttk.Frame(self.parent)
 
-        # 表头
-        self._build_header()
-
         # 滚动区
         body = ttk.Frame(self.outer)
         body.pack(side='top', fill='both', expand=True)
+        self.body = body
 
+        # pack 顺序要紧:
+        #   1) vsb 先占掉右侧那 15px, 之后表头 canvas 与正文 canvas 拿到
+        #      **同样宽**的剩余空间 —— 宽度一样, 两边 grid 分配到的额外
+        #      空间才相同, 列宽不会逐列漂移 (之前表头比正文宽 15px, 最右
+        #      列差 14px)。代价: 竖直滚动条现在也覆盖表头那一行。
+        #   2) 表头 canvas 必须先于正文 canvas pack —— side='top' 要先占
+        #      顶部那条, 否则会被 side='left' 的正文 canvas 抢光。
         self.vsb = ttk.Scrollbar(body, orient='vertical')
         self.vsb.pack(side='right', fill='y')
+
+        # 表头: 独立一个 canvas (见 _build_header)
+        self._build_header()
+
         self.hsb = ttk.Scrollbar(body, orient='horizontal')
         self.hsb.pack(side='bottom', fill='x')
 
@@ -566,11 +575,15 @@ class VideoGridView:
         self.canvas.pack(side='left', fill='both', expand=True)
         # 备份原生 set, 在 command lambda 里同时更新 scrollbar 与排程 render。
         self._vsb_set = self.vsb.set
+        self._hsb_set = self.hsb.set
         self.vsb.config(command=lambda *a: (
             self.canvas.yview(*a), self._schedule_render()))
         self.hsb.config(command=lambda *a: (
             self.canvas.xview(*a), self._schedule_render()))
-        self.canvas.config(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+        # xscrollcommand 走自己的包装: 正文横滚时表头要跟着动, 否则表头
+        # 标注的列名跟正文对不上 (实测正文滚 225px 而表头纹丝不动)
+        self.canvas.config(yscrollcommand=self.vsb.set,
+                           xscrollcommand=self._on_body_xscroll)
 
         self.data_frame = ttk.Frame(self.canvas)
         self._canvas_window = self.canvas.create_window(
@@ -600,10 +613,28 @@ class VideoGridView:
         # 触发一次 idle 等 widget mapped 后测量实际行高
         self.canvas.update_idletasks()
         self._measure_row_height()
+        # canvas 不会自动贴合 window item 的高度, 表头得显式给高度
+        self._header_h = self.header_frame.winfo_reqheight()
+        self.header_canvas.configure(height=self._header_h)
 
     def _build_header(self):
-        self.header_frame = ttk.Frame(self.outer)
-        self.header_frame.pack(side='top', fill='x')
+        """表头: 独立一个 canvas, 内容是 header_frame (作为 window item)。
+
+        为什么不让表头直接当正文 canvas 的兄弟 widget:
+          1) 横向滚动时表头纹丝不动 → 表头标注的列名与正文对不上 (实测把
+             一列拖宽到超出窗口, 正文滚了 225px, 表头没动)。
+          2) 表头比正文 canvas 宽 15px (竖直滚动条占的), 两边 grid 分配
+             到的额外空间不同 → 列宽逐列漂移, 最右列差 14px (窗口越宽
+             差得越多)。
+        放进独立 canvas 后: 宽度与正文 canvas 相同 (靠 _build 的 pack 顺序
+        保证), 两边 grid 分配一致 → Δ=0; 横向滚动同步 xview → 始终指对列。
+        """
+        self.header_canvas = tk.Canvas(self.body, highlightthickness=0)
+        self.header_canvas.pack(side='top', fill='x')
+        self.header_frame = ttk.Frame(self.header_canvas)
+        self._header_window = self.header_canvas.create_window(
+            (0, 0), window=self.header_frame, anchor='nw')
+        self._header_h = 0
 
         # grid 列布局: col0 = 序号 (固定), 然后数据列沿用「偶数=标签, 奇数=grab」
         # 但整体右移 1 位 → 数据列 i 的标签在 col 2*i+1, grab 在 col 2*i+2。
@@ -664,6 +695,39 @@ class VideoGridView:
                     w.bind('<Button-1>', on_press)
                     w.bind('<B1-Motion>', on_drag)
                     w.bind('<ButtonRelease-1>', on_release)
+
+    # ---- 表头与正文的同步 ----
+
+    def _on_body_xscroll(self, first, last=None):
+        """正文横向滚动 → 表头跟着动 (否则表头指错列)。"""
+        self._hsb_set(first, last)
+        self._sync_header_x(first)
+
+    def _sync_header_x(self, first=None) -> None:
+        """表头 canvas 的横向位置对齐到正文。
+
+        两个 canvas 的 scrollregion 宽度与视口宽度都相同, 所以同一个
+        fraction 对应同一个像素偏移。
+        """
+        try:
+            if first is None:
+                first = self.canvas.xview()[0]
+            self.header_canvas.xview_moveto(first)
+        except tk.TclError:
+            pass
+
+    def _sync_header_geometry(self, width: int) -> None:
+        """表头与正文同宽 + 同样的 scrollregion 宽度。
+
+        宽度一致 → 两边 grid 分配到的列宽完全相同 (Δ=0)。
+        """
+        try:
+            self.header_canvas.itemconfigure(self._header_window, width=width)
+            self.header_canvas.configure(scrollregion=(
+                0, 0, width, self._header_h))
+        except tk.TclError:
+            pass
+        self._sync_header_x()
 
     def _create_pool_widget(self) -> ttk.Frame:
         """创建一个池 widget: 1 ttk.Frame 内含 12 tk.Label 单元格, 不绑定数据。
@@ -792,10 +856,12 @@ class VideoGridView:
         for widget in self._widget_pool:
             widget.grid_columnconfigure(data_idx * 2 + 1, minsize=new_width)  # +1 序号列偏移
         # scrollregion 横向范围也随之变化
+        total_w = max(self.canvas.winfo_width(), self._compute_total_width())
         self.canvas.configure(scrollregion=(
-            0, 0, max(self.canvas.winfo_width(), self._compute_total_width()),
-            self._scroll_height(),
+            0, 0, total_w, self._scroll_height(),
         ))
+        # 表头跟着变: 同宽 + 同样的 scrollregion 宽度
+        self._sync_header_geometry(total_w)
 
         # === 节流 (33ms): cell 文本重截断合并到 after() ===
         self._pending_resize = (key, data_idx, new_width)
@@ -852,9 +918,10 @@ class VideoGridView:
         # 虚拟滚动下 data_frame 实际宽 = 池 widget 高度累计, 故用 _compute_total_width
         # 与 canvas 等宽取大。
         natural = self._compute_total_width()
-        self.canvas.itemconfigure(
-            self._canvas_window, width=max(event.width, natural)
-        )
+        width = max(event.width, natural)
+        self.canvas.itemconfigure(self._canvas_window, width=width)
+        # 表头同宽 + 同样的 scrollregion 宽度 → 两边 grid 分配一致 (Δ=0)
+        self._sync_header_geometry(width)
         # 窗口高度变化 → 一页能放几行变了 → 重新判断有无隐藏内容
         self._sync_scroll_enabled()
         # 窗口 resize 后 visible_count 可能变化, 重新计算可见区间
@@ -948,6 +1015,7 @@ class VideoGridView:
             self.canvas.configure(scrollregion=(
                 0, 0, self.canvas.winfo_width(), 0,
             ))
+            self._sync_header_geometry(self.canvas.winfo_width())
             self._first_idx, self._last_idx = 0, 0
             self._sync_scroll_enabled()  # 无数据 → 滚动条禁用
             # 空表格不该还留着映射着的行 (见 _unmap_pool 的注释)
@@ -1042,6 +1110,8 @@ class VideoGridView:
         total_h = self._scroll_height()
         total_w = max(self.canvas.winfo_width(), self._compute_total_width())
         self.canvas.configure(scrollregion=(0, 0, total_w, total_h))
+        # 表头跟着: 同宽 + 同样的 scrollregion 宽度 (Δ=0 的关键)
+        self._sync_header_geometry(total_w)
         self._sync_scroll_enabled()  # 无隐藏内容 → 滚动条置灰
 
     def _unmap_pool(self) -> None:
@@ -1076,6 +1146,7 @@ class VideoGridView:
         self.canvas.configure(scrollregion=(
             0, 0, self.canvas.winfo_width(), 0,
         ))
+        self._sync_header_geometry(self.canvas.winfo_width())
         self._first_idx = self._last_idx = 0
         self._sync_scroll_enabled()  # 无数据 → 滚动条禁用
         # 不需要 _render_visible (上面已经手工清空且 n=0 时 _render 也是 noop)
