@@ -1941,12 +1941,13 @@ class VideoCheckerApp:
         # 全局快捷键
         self.root.bind('<Control-o>', lambda _e: self._browse_path())
 
-        # === 状态栏: 左侧操作状态 + 右侧常驻计数 ===
+        # === 状态栏: 一行文字 ===
+        # 终态时后面拼上统计 (见 _set_status)。
+        # 之前是两个 Label —— 左边「检测完成」右边「共 N · 达标 M · 不达标 X」,
+        # 读起来像两件不相干的事, 合并成一行更好读。
         self.status_var = tk.StringVar(value="就绪")
-        self.count_var = tk.StringVar(value="共 0 · 达标 0 · 不达标 0")
         status_frame = ttk.Frame(self.root, relief='sunken', padding=3)
         status_frame.pack(fill='x', padx=5)
-        ttk.Label(status_frame, textvariable=self.count_var, anchor='e').pack(side='right')
         ttk.Label(status_frame, textvariable=self.status_var, anchor='w').pack(
             side='left', fill='x', expand=True)
 
@@ -2075,7 +2076,6 @@ class VideoCheckerApp:
         # 新一轮扫描: 计数从头来 (漏了这一步 _passed_count 会带着上一轮的
         # 达标数累加, 状态栏出现「达标 188 · 不达标 -178」这种数)
         self._passed_count = 0
-        self._refresh_counts()
 
         self.result_queue = queue.Queue()
 
@@ -2128,7 +2128,7 @@ class VideoCheckerApp:
                 if msg_type == 'result':
                     self._add_result(payload)
                 elif msg_type == 'status':
-                    self.status_var.set(payload)
+                    self._set_status(payload)
                 elif msg_type == 'done':
                     self._scan_complete()
                     return
@@ -2144,13 +2144,21 @@ class VideoCheckerApp:
         if info.is_passing:
             self._passed_count += 1
         self.grid.add_row(info)
-        self._refresh_counts()
 
-    def _refresh_counts(self) -> None:
-        """状态栏右侧常驻计数: 共 N · 达标 A · 不达标 B。"""
-        total = len(self.video_results)
-        passed = self._passed_count
-        self.count_var.set(f"共 {total} · 达标 {passed} · 不达标 {total - passed}")
+    def _set_status(self, text: str, with_counts: bool = False) -> None:
+        """状态栏那一行字。
+
+        终态 (完成/停止/清除) 带上统计, 中间状态 (就绪/扫描中) 只有进度文字
+        —— 扫描中那条本来就带 (3/10) 的进度, 再挂一串统计反而看不清。
+
+        统计里的「共 N」指**已出结果**的文件数; 停止时的 N/M 里的 M 是找到的
+        文件总数, 两个数来源不同。
+        """
+        if with_counts:
+            total = len(self.video_results)
+            passed = self._passed_count
+            text = f"{text}：共 {total} · 达标 {passed} · 不达标 {total - passed}"
+        self.status_var.set(text)
 
     def _scan_complete(self):
         """扫描完成处理"""
@@ -2165,16 +2173,14 @@ class VideoCheckerApp:
         completed = len(self.video_results)
         passed = sum(1 for v in self.video_results if v.is_passing)
         self._passed_count = passed
-        self._refresh_counts()
         if cancelled:
             queued = self.total_files
-            pending = max(queued - completed, 0)
-            self.status_var.set(
-                f"已停止检测：共 {queued} 个视频文件，"
-                f"已完成 {completed} 个文件，{pending} 个未检测"
-            )
+            # 只留一个冒号: 原来这条自带计数 ("共 100 个视频文件, 已完成 80 个
+            # 文件, 20 个未检测"), 再拼统计就成两个冒号 + 两次「共」
+            self._set_status(
+                f"已停止检测（已完成 {completed}/{queued}）", with_counts=True)
         else:
-            self.status_var.set("检测完成")
+            self._set_status("检测完成", with_counts=True)
 
     def _clear_records(self):
         """清空检测记录与目标路径（不影响阈值输入）。"""
@@ -2184,13 +2190,12 @@ class VideoCheckerApp:
         self.video_results.clear()
         self.grid.clear()
         self._passed_count = 0
-        self._refresh_counts()
         self.dest_var.set('')
         # 截图地址一起清: 两个字段同源, 只清一个会让「清除记录」后截图地址
         # 还指着一个已经跟当前列表无关的目录
         self.snapshot_dest_var.set('')
         self._selected_files = None
-        self.status_var.set("已清除记录")
+        self._set_status("已清除记录", with_counts=True)
 
     def _on_snapshot_btn_click(self):
         """「定点截图」按钮: 直接开 SnapshotProgressDialog (单窗口, 内嵌时间点输入)"""
@@ -2353,7 +2358,6 @@ class VideoCheckerApp:
         self.grid.clear()
         # 同 _start_scan: 新一轮扫描计数归零
         self._passed_count = 0
-        self._refresh_counts()
 
         self.result_queue = queue.Queue()
 

@@ -67,7 +67,9 @@ Single-file app (`video_checker.py`, ~1018 lines). Four layers plus two cross-cu
 - `_scan_worker(directory, recursive, bitrate_std, sample_rate_std)` — directory scan; `base_path = directory` (relative paths anchored to the picked folder)
 - `_scan_files_worker(files, bitrate_std, sample_rate_std)` — drag-dropped files; `base_path = os.path.dirname(files[0])` so the first file shows `./<title>` in the title column
 
-The `cancel_event: threading.Event` is checked at the top of each per-file loop; the status bar reports "已停止检测" with pending/unscanned counts when triggered.
+The `cancel_event: threading.Event` is checked at the top of each per-file loop; the status bar then reports "已停止检测（已完成 N/M）" with the counts appended.
+
+**Status bar** — a single line, one `status_var`. Terminal states append the tally via `_set_status(text, with_counts=True)` → `检测完成：共 10 · 达标 8 · 不达标 2`; intermediate states (就绪 / 正在检测… (3/10) a.mp4) show only the progress text. The "共 N" in the tally counts **results produced**; the M in "已完成 N/M" is the **total files found** — different sources, not a contradiction.
 
 **File mover** — both `_move_passing_files` and `_move_all_files` follow the same shape: confirm via `askyesno` dialog, `os.makedirs(dest_dir, exist_ok=True)`, then `shutil.move` each file, with `_get_unique_dest` appending `_1`, `_2`, ... on name collisions. `_move_passing_files` filters `video_results` by `is_passing`; `_move_all_files` moves everything regardless of pass/fail. Both are **moves**, not copies. Path inputs are normalized to backslashes (`_browse_path`, `_browse_dest`, `_on_file_drop`) so Windows users don't see mixed slashes.
 

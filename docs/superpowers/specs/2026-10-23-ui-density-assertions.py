@@ -435,7 +435,7 @@ def main() -> None:
     check("失败计数 +1", d6._failed_count == 1, f"got={d6._failed_count}")
     d6.top.destroy()
 
-    section("状态栏常驻计数")
+    section("状态栏合并成一行 (状态 + 统计)")
     from tkinterdnd2 import TkinterDnD
     from video_checker import VideoCheckerApp
     # 必须用 TkinterDnD.Tk(): VideoGridView.bind_drop 会调 drop_target_register,
@@ -444,24 +444,30 @@ def main() -> None:
     app_root.withdraw()
     app = VideoCheckerApp(app_root)
     app_root.update_idletasks()
-    check("初始计数全 0",
-          app.count_var.get() == '共 0 · 达标 0 · 不达标 0',
-          f"got={app.count_var.get()!r}")
+    check("初始文案是「就绪」",
+          app.status_var.get() == '就绪', f"got={app.status_var.get()!r}")
+    check("不再有独立的 count_var (两处合一行)",
+          not hasattr(app, 'count_var'),
+          f"got={getattr(app, 'count_var', None)!r}")
 
     app._add_result(make_info(title='p.mp4', is_passing=True))
     app._add_result(make_info(title='f.mp4', is_passing=False))
     app._add_result(make_info(title='p2.mp4', is_passing=True))
     app_root.update_idletasks()
-    check("插入 3 条后计数正确",
-          app.count_var.get() == '共 3 · 达标 2 · 不达标 1',
-          f"got={app.count_var.get()!r}")
+    check("中间态不拼统计 (扫描中只显示进度文字)",
+          app.status_var.get() == '就绪', f"got={app.status_var.get()!r}")
+
+    app.total_files = 3
+    app._scan_complete()
+    app_root.update_idletasks()
+    check("完成文案合并了统计",
+          app.status_var.get() == '检测完成：共 3 · 达标 2 · 不达标 1',
+          f"got={app.status_var.get()!r}")
 
     app._clear_records()
     app_root.update_idletasks()
     check("清除记录后归零",
-          app.count_var.get() == '共 0 · 达标 0 · 不达标 0',
-          f"got={app.count_var.get()!r}")
-    check("状态文案为「已清除记录」", app.status_var.get() == '已清除记录',
+          app.status_var.get() == '已清除记录：共 0 · 达标 0 · 不达标 0',
           f"got={app.status_var.get()!r}")
 
     section("状态栏 — 0 文件完成时计数归零")
@@ -469,10 +475,19 @@ def main() -> None:
     app._scan_complete()
     app_root.update_idletasks()
     check("0 文件后计数不残留",
-          app.count_var.get() == '共 0 · 达标 0 · 不达标 0',
-          f"got={app.count_var.get()!r}")
-    check("完成文案简化成「检测完成」",
-          app.status_var.get() == '检测完成', f"got={app.status_var.get()!r}")
+          app.status_var.get() == '检测完成：共 0 · 达标 0 · 不达标 0',
+          f"got={app.status_var.get()!r}")
+
+    section("状态栏 — 中途停止")
+    app._add_result(make_info(title='a.mp4', is_passing=True))
+    app.total_files = 10
+    app.cancel_event.set()
+    app._scan_complete()
+    app_root.update_idletasks()
+    check("停止文案带统计且只有一个冒号",
+          app.status_var.get() == '已停止检测（已完成 1/10）：共 1 · 达标 1 · 不达标 0',
+          f"got={app.status_var.get()!r}")
+    app.cancel_event.clear()
 
     # brief 漏掉的路径: _start_scan / _on_file_drop 也 clear 了 video_results,
     # 但 brief 没让它们重置 _passed_count —— 扫第二轮会累加上一轮的达标数,
@@ -482,11 +497,10 @@ def main() -> None:
         body = method_body(meth)
         at = body.index('self.video_results.clear()')
         window = body[at:at + 320]
-        ok = ('self._passed_count = 0' in window
-              and 'self._refresh_counts()' in window)
+        ok = ('self._passed_count = 0' in window)
         # check() 无条件打印 detail, 通过时别塞一句像报错的文案
         check(f"{meth} 清空结果时同步重置计数", ok,
-              "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0 / _refresh_counts()")
+              "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0")
     app_root.destroy()
 
     section("Tooltip — 只在截断时显示")
