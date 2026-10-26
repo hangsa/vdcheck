@@ -589,7 +589,12 @@ class VideoGridView:
         # Tk Frame 的 height 需要 pack_propagate(False) 才能强制, 但这里因为
         # frame 内无 child, height 配置直接生效。
         for _ in range(self.POOL_SIZE):
-            self._create_pool_widget()
+            w = self._create_pool_widget()
+            # 预先建好但**不映射**: 用到哪行才 pack 谁 (见 _render_visible)。
+            # 否则从没扫描过的 app 也有 40 行 × 11 = 440 个映射着的子窗口,
+            # 最小化恢复时 Windows 要逐个重绘它们 → 表格区先露底。
+            # winfo_reqheight 对未映射的 widget 照样返回真实行高, 不影响测量。
+            w.pack_forget()
         self._bottom_spacer = tk.Frame(self.data_frame, height=0)
         self._bottom_spacer.pack(fill='x')
         # 触发一次 idle 等 widget mapped 后测量实际行高
@@ -945,6 +950,8 @@ class VideoGridView:
             ))
             self._first_idx, self._last_idx = 0, 0
             self._sync_scroll_enabled()  # 无数据 → 滚动条禁用
+            # 空表格不该还留着映射着的行 (见 _unmap_pool 的注释)
+            self._unmap_pool()
             return
 
         # 行高兜底: 若首次 render 未拿到 (mapped 前), 用 26 px
@@ -1037,16 +1044,31 @@ class VideoGridView:
         self.canvas.configure(scrollregion=(0, 0, total_w, total_h))
         self._sync_scroll_enabled()  # 无隐藏内容 → 滚动条置灰
 
+    def _unmap_pool(self) -> None:
+        """把池里所有行移出布局 (unmap), 并清掉它们的绑定关系。
+
+        没在用的行如果还映射着, 它们仍然是真实的子窗口 —— 窗口最小化再
+        恢复时, Windows 要逐个重新绘制它们, 表格区在画完之前是露底的
+        (用户报的现象)。表格空的时候一行都不该留着。
+        """
+        for widget in self._widget_pool:
+            if widget.winfo_manager():
+                widget.pack_forget()
+            widget._bound_data_idx = None
+            widget._info = None
+
     def clear(self):
         """清空所有数据行，滚动条复位。"""
         self.tooltip.hide()   # 否则 tooltip 会带着旧文本留在空列表上
         self._data.clear()
         for widget in self._widget_pool:
-            widget._info = None
-            widget._bound_data_idx = None
             widget._idx_cell.config(text='', fg='black')  # 序号列也要清
             for _key, cell in widget._cells:
                 cell.config(text='', fg='black')
+        # 池 widget 全部移出布局 (见 _unmap_pool 的注释): 只清文本不
+        # unmap 的话, 扫过 60 个文件再清除记录, canvas 里仍映射着
+        # 27 行 × 11 = 297 个子窗口, 恢复时照样要逐个重绘。
+        self._unmap_pool()
         self.canvas.yview_moveto(0)
         # 同步 spacing / scrollregion
         self._top_spacer.configure(height=0)
