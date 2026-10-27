@@ -1056,7 +1056,27 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 - [ ] **Step 2: 跑断言，确认失败** → 预期 ImportError / FAIL
 
-- [ ] **Step 3: 写 `MainWindow`**
+- [ ] **Step 3: 写 `MainWindow`（含列宽的两个方向接线）**
+
+> **Task 4 审查带过来的硬要求**：列宽的接线有两个方向，**都要有断言**。
+> Task 4 之前的脚本是**自己手动**同时调 `model.set_column_width()` 和
+> `view.setColumnWidth()` → 断言的是它自己的接线，真实路径一条没覆盖。
+>
+> - **model → view**：启动时把 `model._widths` 推给视图。忘了 → 单元格按错的
+>   宽度截断、表格错位
+> - **view → model**：Qt 里**用户拖表头**直接改表头 section 大小，必须把
+>   `sectionResized` 接到 `model.set_column_width`，否则模型 `_widths` 变陈旧、
+>   单元格继续按旧宽度截断。**Tk 原脚本测的正是这条路径**
+>
+> 断言形态（写在 `2026-10-27-qt-main-assertions.py` 里）：
+> 1. 视图的 section 宽度 == `model._widths[i]`（model → view 生效）
+> 2. 改视图的列宽后，`model._widths[i]` 跟着变（view → model 生效）
+>
+> 另外：Task 4 的 `header-alignment` 脚本里那个「表头 x == 视图 x」是 Qt 的
+> **API 恒等式**（`QTableView::columnViewportPosition()` 就是
+> `horizontalHeader()->sectionViewportPosition()`），**永远相等**。真正的对齐
+> 不变式是**表头 x == 模型 x**（模型自己的几何），那条才抓得住断线。
+
 
 按产品文档 §4.1 的布局逐控件建。文案**逐字照搬**（见产品文档 §4.3）。
 
