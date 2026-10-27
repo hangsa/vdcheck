@@ -474,8 +474,11 @@ def main() -> None:
     app.total_files = 0
     app._scan_complete()
     app_root.update_idletasks()
+    # 2026-10-27 起空目录改显示「未找到视频文件」(不带全是 0 的统计) ——
+    # 旧文案「检测完成：共 0 · 达标 0 · 不达标 0」是废话, 而且把 worker
+    # 早就发过的那条「未找到视频文件」盖掉了。
     check("0 文件后计数不残留",
-          app.status_var.get() == '检测完成：共 0 · 达标 0 · 不达标 0',
+          app.status_var.get() == '未找到视频文件',
           f"got={app.status_var.get()!r}")
 
     section("状态栏 — 中途停止")

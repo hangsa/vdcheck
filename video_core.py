@@ -5,6 +5,7 @@ Tkinter 版和 PySide6/QTableView 版共用同一份: 凡是不看界面的计�
 """
 
 import json
+import math
 import ntpath
 import os
 import shutil
@@ -179,13 +180,40 @@ def truncate_text(text: str, col_width: int, measure: Callable[[str], int]) -> s
     return text[:lo] + ellipsis
 
 
+def parse_threshold(text: str) -> float | None:
+    """解析单个阈值。非法返回 None。
+
+    原来是内联在 _start_scan 与 _on_file_drop 里各写一遍, 且只判 `> 0`
+    —— float() 接受 inf / nan, 而 inf > 0 成立 → 所有行永远不达标。
+    """
+    try:
+        value = float(text.strip())
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
 def run_ffprobe(file_path: str) -> dict | None:
     """调用 ffprobe 获取视频文件信息"""
     try:
         ffprobe_path = get_ffprobe_path()
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0  # SW_HIDE
+        kwargs = {
+            'stdin': subprocess.DEVNULL,
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.PIPE,
+            'timeout': 30,
+        }
+        # 隐藏控制台只在 Windows 上有意义; 原来无条件构造 STARTUPINFO,
+        # macOS/Linux 上 AttributeError 逃出下面的 except 列表 → worker
+        # 线程静默死亡 → UI 永久卡在「检测中」。与 extract_frame 保持一致。
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+            kwargs['startupinfo'] = startupinfo
+            kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
 
         result = subprocess.run(
             [
@@ -194,17 +222,12 @@ def run_ffprobe(file_path: str) -> dict | None:
                 '-show_format', '-show_streams',
                 file_path,
             ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            startupinfo=startupinfo,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            **kwargs,
         )
         if result.returncode != 0:
             return None
         return json.loads(result.stdout.decode('utf-8', errors='replace'))
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, AttributeError):
         return None
 
 

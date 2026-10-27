@@ -7,24 +7,26 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
+from typing import Callable
 from tkinterdnd2 import TkinterDnD
 
 # 纯逻辑已抽到 video_core.py。这里重新导出, 让既有的断言脚本
 # (`from video_checker import X`) 不用改。
+import video_core
 from video_core import (  # noqa: F401
     EXTRACT_THUMB_W, FG_FAIL, FG_PASS, VIDEO_EXTENSIONS, VideoInfo,
     _SORTABLE_COLUMNS, _cell_fg, _extract_sort_key, _header_text_with_arrow,
     _next_sort_state, extract_frame, format_duration, format_file_size,
-    format_title, get_ffmpeg_path, get_ffprobe_path, parse_time_token,
-    parse_video_info, run_ffprobe, scan_video_files, time_token_to_string,
-    truncate_text,
+    format_title, get_ffmpeg_path, get_ffprobe_path, parse_threshold,
+    parse_time_token, parse_video_info, run_ffprobe, scan_video_files,
+    time_token_to_string, truncate_text,
 )
 
 DEFAULT_BITRATE_KBPS = 30000
 DEFAULT_SAMPLE_RATE_KHZ = 48
 
 
-def _font_measure(font):
+def _font_measure(font: tkfont.Font) -> Callable[[str], int]:
     """把 tkfont.Font 适配成 truncate_text 要的 measure 可调用对象。
 
     .measure 的取值推迟到真正调用时 —— 现状 truncate_text 收到的是字体对象
@@ -61,8 +63,11 @@ def _parse_drop_data(data: str) -> list[str]:
 class VideoGridView:
     """自绘的可滚动表格，每个 cell 独立控制 fg。虚拟滚动版。"""
 
-    FG_PASS = '#228B22'
-    FG_FAIL = '#DC143C'
+    # 颜色只有一份来源 (video_core.FG_PASS / FG_FAIL) —— 原来这里另抄了
+    # 一份字面量, 将来改一处会静默不一致。类属性必须保留: 既有断言脚本
+    # (`FG_PASS = VideoGridView.FG_PASS`) 依赖它。
+    FG_PASS = video_core.FG_PASS
+    FG_FAIL = video_core.FG_FAIL
     GRAB_WIDTH = 10
     # 池初始大小: 视区一行约占 24-26 px, 默认窗口 700 - 表头 ≈ 660, 默认可视
     # 行约 25 行; +2×BUFFER 上下预留 = 池 37. 取整 40, 留 ~30% 余量给超长文件名
@@ -957,10 +962,11 @@ class SnapshotProgressDialog:
     THUMB_SUBSAMPLE = 2                     # 640 / 320 = 2
     ROW_BG_PASS = '#E8F5E9'   # 浅绿 (保留常量, 供未来可选开启)
     ROW_BG_FAIL = '#FFEBEE'   # 浅红
-    # 文字色: 与主界面 VideoGridView.FG_PASS / FG_FAIL 保持一致。
-    # 主界面不画整行底色, 只用 fg 区分达标/不达标; 这里对齐该做法。
-    FG_PASS = '#228B22'       # 绿字 (达标)
-    FG_FAIL = '#DC143C'       # 红字 (不达标)
+    # 文字色: 与主界面 VideoGridView.FG_PASS / FG_FAIL 同源 (都取自
+    # video_core, 不再各抄一份字面量)。主界面不画整行底色, 只用 fg
+    # 区分达标/不达标; 这里对齐该做法。
+    FG_PASS = video_core.FG_PASS   # 绿字 (达标)
+    FG_FAIL = video_core.FG_FAIL   # 红字 (不达标)
     TITLE_COL_WIDTH = 250     # 与主表格 title 列宽一致
     IDX_COL_WIDTH = 45       # 序号列宽 (固定, 不随时间点数量变化)
 
@@ -1723,19 +1729,13 @@ class VideoCheckerApp:
             messagebox.showerror("错误", "请输入有效的文件夹路径。")
             return
 
-        try:
-            bitrate_std = float(self.bitrate_var.get().strip())
-            if bitrate_std <= 0:
-                raise ValueError
-        except ValueError:
+        bitrate_std = parse_threshold(self.bitrate_var.get())
+        if bitrate_std is None:
             messagebox.showerror("错误", "码率标准必须为正数。")
             return
 
-        try:
-            sample_rate_std = float(self.sample_rate_var.get().strip())
-            if sample_rate_std <= 0:
-                raise ValueError
-        except ValueError:
+        sample_rate_std = parse_threshold(self.sample_rate_var.get())
+        if sample_rate_std is None:
             messagebox.showerror("错误", "采样率标准必须为正数。")
             return
 
@@ -1869,7 +1869,14 @@ class VideoCheckerApp:
             self._set_status(
                 f"已停止检测（已完成 {completed}/{queued}）", with_counts=True)
         else:
-            self._set_status("检测完成", with_counts=True)
+            # 目录里一个视频都没有时, 说「检测完成：共 0 · 达标 0 · 不达标 0」
+            # 是废话 —— 统计全是 0, 用户要知道的其实是「没找到文件」。
+            # (原来 worker 发过一条「未找到视频文件」, 但紧接着的 done 把它覆盖了,
+            #  用户永远看不到。)
+            if self.total_files == 0:
+                self._set_status("未找到视频文件")
+            else:
+                self._set_status("检测完成", with_counts=True)
 
     def _clear_records(self):
         """清空检测记录与目标路径（不影响阈值输入）。"""
@@ -2006,19 +2013,13 @@ class VideoCheckerApp:
         if self.scanning:
             messagebox.showinfo("提示", "正在检测中，请等待完成后再添加文件。")
             return
-        try:
-            bitrate_std = float(self.bitrate_var.get().strip())
-            if bitrate_std <= 0:
-                raise ValueError
-        except ValueError:
+        bitrate_std = parse_threshold(self.bitrate_var.get())
+        if bitrate_std is None:
             messagebox.showerror("错误", "码率标准必须为正数。")
             return
 
-        try:
-            sample_rate_std = float(self.sample_rate_var.get().strip())
-            if sample_rate_std <= 0:
-                raise ValueError
-        except ValueError:
+        sample_rate_std = parse_threshold(self.sample_rate_var.get())
+        if sample_rate_std is None:
             messagebox.showerror("错误", "采样率标准必须为正数。")
             return
 
