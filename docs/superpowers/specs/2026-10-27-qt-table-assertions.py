@@ -10,8 +10,8 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 
-from PySide6.QtCore import Qt, QModelIndex
-from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QApplication
 
 # QApplication 必须先于 video_qt 建好: video_qt 的 UI_FONT = QFont() 会拷贝
@@ -52,7 +52,7 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
 
     from video_qt import VIDEO_COLUMNS, VideoTableModel
-    from video_core import VideoInfo, _cell_fg
+    from video_core import VideoInfo
 
     def mk(title='a.mp4', passing=True, low_br=False, low_sr=False, bitrate=None):
         if bitrate is None:
@@ -92,11 +92,21 @@ def main():
     check("数据列含 spec", 'spec' in keys, f"got={keys}")
 
     section("表头文字带单位")
+    # 不写死「显示出来的那串字符」—— 列宽不够时表头会被截断, 换平台/字体
+    # 截断点就变了 (硬写 '帧率(fps)' 会跨平台假红)。改成两条:
+    #   ① 列规格里的表头带单位 (稳定, 不受截断影响)
+    #   ② 显示出来的表头是那段文字本身, 或者是它的截断前缀
     mh = VideoTableModel(VIDEO_COLUMNS)
     for want, section_no in (('帧率(fps)', 3), ('码率(kbps)', 4),
                              ('采样率(kHz)', 7)):
+        spec_text = VIDEO_COLUMNS[section_no].header
+        check(f"第 {section_no} 列的列规格带单位 {want!r}", spec_text == want,
+              f"got={spec_text!r}")
         got = mh.headerData(section_no, Qt.Horizontal, Qt.DisplayRole)
-        check(f"表头是 {want!r}", got == want, f"got={got!r}")
+        shown_ok = (got == want) or (
+            got.endswith('...') and want.startswith(got[:-3]))
+        check(f"第 {section_no} 列显示的表头就是带单位的那段文字 (或它的截断)",
+              shown_ok, f"got={got!r}")
 
     section("单元格不带单位 (N/A 不受影响)")
     from video_core import parse_video_info

@@ -119,7 +119,7 @@ def main() -> int:
     section("虚拟滚动 — 视图的子窗口数不随行数增长")
     view = make_view(m)
     n_before = child_widget_count(view)
-    check("视图的子 widget 数很小 (Tk 版空表就有 484 个映射 widget)",
+    check("视图的子 widget 数很小 (只有表头/视口/滚动条/角按钮)",
           n_before <= 32, f"got={n_before}")
     for i in range(2000):
         m.append_result(make_info(1000 + i))
@@ -127,6 +127,9 @@ def main() -> int:
     n_after = child_widget_count(view)
     check("加 2000 行后视图的子 widget 数**不变**",
           n_after == n_before, f"before={n_before} after={n_after}")
+    # Tk 版的表格区每一行都是**原生子窗口** (frame + 一堆 label), 映射数
+    # 随行数线性增长; Qt 版视图里一个行 widget 都没有 —— 这就是「恢复时
+    # 不用逐个重绘几百个 HWND」的量化形式 (替代被删的 restore-black 脚本)。
     check("模型行数确实涨了 (不是没加上)",
           m.rowCount() == 2100, f"got={m.rowCount()}")
     check("行数超出视口 → 纵向滚动条可滚",

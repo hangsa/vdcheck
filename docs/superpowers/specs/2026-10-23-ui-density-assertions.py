@@ -4,8 +4,7 @@
 - format_title 全部 rel_path 形态 (含跨盘符绝对路径 / UNC);
 - truncate_text 像素级截断 (ASCII / CJK / 边界);
 - 定点截图弹窗的横向滚动 / 列对齐 / 缩略图释放;
-- 状态栏文案 (一行合并 + 计数归零 + 中途停止);
-- Tooltip 的显示条件与窗口复用。
+- 状态栏文案 (一行合并 + 计数归零 + 中途停止)。
 
 **表格相关的小节已迁走** (2026-10-27, Tk → Qt 重构):
 `_format_cell` (title/spec)、表头带单位、10 列集合、`_truncate_text` 委托、
@@ -397,94 +396,19 @@ def main() -> None:
               "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0")
     app_root.destroy()
 
-    section("Tooltip — 只在截断时显示")
-    from video_checker import Tooltip
-
-    class _FakeCell:
-        def __init__(self, full, truncated):
-            self._full_text = full
-            self._truncated = truncated
-
-    class _FakeEv:
-        def __init__(self, widget):
-            self.widget = widget
-
-    tip = Tooltip(root)
-    plain = _FakeCell('./a.mp4', False)
-    tip.on_motion(_FakeEv(plain))
-    root.update_idletasks()
-    check("未截断的 cell 不弹 tooltip", tip.win is None, f"got={tip.win!r}")
-
-    cut = _FakeCell('./很长的路径/子目录/文件.mp4', True)
-    tip.on_motion(_FakeEv(cut))
-    root.update_idletasks()
-    check("截断的 cell 弹 tooltip", tip.win is not None)
-    if tip.win is not None:
-        texts = [w.cget('text') for w in tip.win.winfo_children()
-                 if isinstance(w, tk.Label)]
-        check("tooltip 显示完整值", texts and texts[0] == cut._full_text,
-              f"got={texts}")
-        check("tooltip 覆写重定向 (不抢焦点)", bool(tip.win.overrideredirect()))
-
-    tip.on_motion(_FakeEv(cut))     # 同一 cell 再来一次
-    root.update_idletasks()
-    first_win = tip.win
-    tip.on_motion(_FakeEv(cut))
-    root.update_idletasks()
-    check("同一 cell 重复 hover 不重建窗口", tip.win is first_win)
-
-    tip.on_motion(_FakeEv(plain))   # 移到未截断 cell
-    root.update_idletasks()
-    check("移到未截断 cell 后关闭", tip.win is None)
-
-    section("Tooltip — <Leave> 延迟关闭 + 窗口复用")
-    tip3 = Tooltip(root)
-
-    class _TruncCell:
-        """全都被截断的假 cell —— 这里只测 Tooltip 的窗口行为。"""
-        def __init__(self, text):
-            self._full_text = text
-            self._truncated = True
-
-    ca = _TruncCell('./很长的路径/甲.mp4')
-    cb = _TruncCell('./很长的路径/乙.mp4')
-
-    # (1) 截断 cell A → B: 复用窗口, 只换文本。
-    #     不复用的话每次跨边界都要销毁+新建 Toplevel (实测 ~4.4ms/次),
-    #     扫 20 行就是几百毫秒的纯窗口创建开销, 且看着闪。
-    tip3.on_motion(_FakeEv(ca))
-    root.update_idletasks()
-    check("tooltip 已弹出", tip3.win is not None)
-    win_ab = tip3.win
-    tip3.on_leave(_FakeEv(ca))
-    tip3.on_motion(_FakeEv(cb))
-    root.update_idletasks()
-    check("A→B 复用窗口 (不销毁重建)", tip3.win is win_ab,
-          f"before={win_ab!r} after={tip3.win!r}")
-    t3 = ([w.cget('text') for w in tip3.win.winfo_children()
-           if isinstance(w, tk.Label)] if tip3.win is not None else [])
-    check("A→B 后显示的是 B 的完整值", t3 and t3[0] == cb._full_text,
-          f"got={t3}")
-
-    # (2) 鼠标离开到没有绑定的 widget (表头/滚动条/状态栏): 之后不再有
-    #     <Motion>, on_motion 不跑 —— 只能靠 <Leave> 关闭, 否则浮窗带着旧文本
-    #     一直挂在鼠标附近, 看着像是属于鼠标当前位置, 会误导。
-    tip3.on_leave(_FakeEv(cb))
-    root.update_idletasks()
-    check("Leave 后 (无后续 Motion) tooltip 关闭", tip3.win is None,
-          f"got={tip3.win!r}")
-
-    # (3) 同 cell 抖动 (边界上进出): leave 后又回同一 cell。
-    #     延迟关闭独占的收益 —— 直接 hide() 会销毁重建同一个东西, 白闪。
-    tip3.on_motion(_FakeEv(ca))
-    root.update_idletasks()
-    win_c = tip3.win
-    tip3.on_leave(_FakeEv(ca))
-    tip3.on_motion(_FakeEv(ca))
-    root.update_idletasks()
-    check("同 cell 抖动不销毁重建", tip3.win is win_c,
-          f"before={win_c!r} after={tip3.win!r}")
-    tip3.hide()
+    # 原先这里还有两节 Tooltip 断言 (「只在截断时显示」/「<Leave> 延迟关闭 +
+    # 窗口复用」) —— 它们测的是 Tk 版自绘的 Tooltip 类 (延迟关闭 / 窗口复用 /
+    # lift() 而非 -topmost)。Qt 版**整个删掉**这个类, 改用 Qt 内置 tooltip
+    # (设计文档 §5.6), Task 7 会把 Tooltip 从 video_checker.py 里删掉 ——
+    # 留着这两节的话, 那个脚本到时 import 失败。
+    #
+    # 搬走后的落点 (语义等价, 见
+    # docs/superpowers/specs/2026-10-27-qt-table-assertions.py):
+    #   「tooltip: 只在被截断时给完整值」        —— 截断才给完整值, 否则 None
+    #   「tooltip — 视图真的向模型要完整值」      —— 真实事件派发, 视图确实问模型
+    #   「表头点击的边界」                        —— clear() 之后 tooltip 也不留陈旧值
+    # 没有等价物的部分 (Tk Tooltip 的窗口复用 / 延迟关闭 / 不抢焦点):
+    #   Qt 的 tooltip 窗口由 Qt 自己管, 没有「复用」这个概念 —— 报告 §4.1 已列明。
 
     root.destroy()
 

@@ -9,15 +9,19 @@ Tk 版测的是两个既有 bug (2026-10-26 修):
 2. 横向滚动时表头不动: 拖宽任一列让内容超出窗口后, 正文滚走了 225px,
    表头还在原地 → 表头标注的列名完全指错对象。
 
-Qt 版里表头与正文在**同一个 QTableView** 里 —— 表头是 view 的
-horizontalHeader(), 列宽只有一份 (模型的 `_widths`), 表头 section 与
-正文列由同一组 section size 布局。所以对齐是结构性的, 但照样要断言:
+Qt 版里表头与正文在**同一个 QTableView** 里, 对齐是结构性的 —— 但**照样要断言**,
+而且断言必须**能失败**。
 
-- 表头与正文视口同宽 (表头没有被另一个 canvas 挤掉 15px)
-- 逐列 Δ=0: 表头 section 的 x == 正文列的 x
-- 横向滚动时表头跟着正文动同样的距离, 滚完仍 Δ=0
-- 改列宽后表头列宽与正文同步, 表头文字按新宽度重新截断
-- 排序后列位置不变; 表头点击排序仍可用
+⚠️ 一个必须避开的坑: `QTableView::columnViewportPosition()` **就是**
+`horizontalHeader()->sectionViewportPosition()` —— 表头本身就是 QTableView 的
+列布局, 拿它们互相比**恒等于 0** (改之前那版 16 条断言永远不会失败, 是永假的)。
+Tk 版的 Δ 是**两个独立 widget** 之间的比较; Qt 版要拿到同样的防线, 比较对象
+必须是**模型自己算出来的几何**: 模型的列 x = `sum(model._widths[:i])`。
+本脚本拿「表头 section 的位置」跟「模型的列 x」比 —— 两个独立来源, 断了线就红。
+
+横向滚动同理: QTableView 默认 `ScrollPerItem`, 滚动条的值是**列数不是像素**,
+不能拿 `horizontalScrollBar().value()` 当像素偏移用。改用**相对第 0 列的偏移**
+(整体平移, 相对量不变), 滚动前后都能比。
 
 运行: python docs/superpowers/specs/2026-10-26-header-alignment-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
@@ -66,29 +70,71 @@ def make_info(title='a.mp4', is_passing=True, bitrate=32000.0) -> VideoInfo:
 
 
 def build(columns):
-    """建模型 + 视图, 并按模型的列宽设好视图的 section size (app 层就这么接线)。"""
+    """建模型 + 视图, 并接上 app 层将来要接的两条线 (见下面的 wire 函数)。"""
     from video_qt import VideoTableModel
     model = VideoTableModel(columns)
     view = QTableView()
     view.setModel(model)
-    for i in range(model.columnCount()):
-        view.setColumnWidth(i, model._widths[i])
     view.resize(1280, 700)
     view.show()
     app.processEvents()
-    return model, view
+
+    hdr = view.horizontalHeader()
+
+    # ── app 层将来要做的两条接线 (Task 5 的 MainWindow 里就这么连, 设计文档 §5.5) ──
+    #   model → view: 模型列宽变了 → 视图的 section 大小跟着变
+    #   view → model: 用户拖表头 (sectionResized) → 模型的列宽跟着变
+    # 用一个 _updating 标志区分「程序设的」与「用户拖的」, 避免回环。
+    # **Task 5 必须把这两条真的接上** —— 漏了任何一条, 本脚本的
+    # 「表头列 x == 模型列 x」就会变红 (见报告 §10 的 Task 5 具名断言)。
+    state = {'updating': False}
+
+    def push_model_widths_to_view(orientation, first, last):
+        if state['updating']:
+            return
+        state['updating'] = True
+        try:
+            for s in range(first, last + 1):
+                view.setColumnWidth(s, model._widths[s])
+        finally:
+            state['updating'] = False
+
+    def on_section_resized(section_index, old_size, new_size):
+        if state['updating']:
+            return
+        model.set_column_width(section_index, new_size)
+
+    model.headerDataChanged.connect(push_model_widths_to_view)
+    hdr.sectionResized.connect(on_section_resized)
+
+    # 初始接线: 把模型的列宽灌进视图 (走 model→view 那条线)
+    for i in range(model.columnCount()):
+        view.setColumnWidth(i, model._widths[i])
+    app.processEvents()
+    return model, view, hdr, state
 
 
 def main() -> int:
     from video_qt import VIDEO_COLUMNS, UI_FONT
 
-    model, view = build(VIDEO_COLUMNS)
+    model, view, hdr, state = build(VIDEO_COLUMNS)
     for i in range(60):
         model.append_result(make_info(f'v{i}.mp4', is_passing=(i % 3 == 0),
                                       bitrate=60000.0 - i * 500))
     app.processEvents()
-    hdr = view.horizontalHeader()
     ncols = model.columnCount()
+
+    def model_x(i: int) -> int:
+        """第 i 列在**模型几何**里的 x —— 按模型自己的 _widths 累加。
+
+        这是跟表头**独立**的第二个来源: 表头的位置由视图的 section size 布局
+        出来, 这里的 x 由模型的列宽累加出来。两者对不上 = 线断了。
+        """
+        return sum(model._widths[s] for s in range(i))
+
+    def header_x(i: int) -> int:
+        """第 i 列在表头里的 x —— 相对第 0 列 (横向滚动时整体平移, 相对量不变)。"""
+        return hdr.sectionViewportPosition(i) - hdr.sectionViewportPosition(0)
 
     section("表头与正文同宽 (同一个 QTableView)")
     check("表头就是 view 的 horizontalHeader (不是另一个 canvas)",
@@ -107,60 +153,74 @@ def main() -> int:
               fm.horizontalAdvance(txt) <= hdr.sectionSize(i),
               f"text_w={fm.horizontalAdvance(txt)} section={hdr.sectionSize(i)}")
 
-    section("表头与正文逐列对齐 (Δ=0)")
+    section("表头列 x == 模型列 x (逐列 Δ=0)")
     deltas = []
     for i in range(ncols):
-        d = hdr.sectionViewportPosition(i) - view.columnViewportPosition(i)
+        d = header_x(i) - model_x(i)
         deltas.append(d)
-        check(f"第 {i} 列「{VIDEO_COLUMNS[i].header}」Δ=0", d == 0, f"Δ={d}")
+        check(f"第 {i} 列「{VIDEO_COLUMNS[i].header}」表头 x == 模型列 x (Δ=0)",
+              d == 0, f"表头={header_x(i)} 模型={model_x(i)} Δ={d}")
     check("最大错位 = 0px (Tk 版改之前是 14px)",
           max(abs(d) for d in deltas) == 0,
           f"got={max(abs(d) for d in deltas)}")
-    check("表头 section 宽度 == 模型的列宽 (列宽只有一个来源)",
+    check("表头 section 宽度 == 模型的列宽 (列宽只有一个来源, 逐列)",
           all(hdr.sectionSize(i) == model._widths[i] for i in range(ncols)),
           f"got={[(hdr.sectionSize(i), model._widths[i]) for i in range(ncols)]}")
 
+    section("结构性恒等式 — 表头就是 QTableView 的列布局 (不是对齐断言)")
+    # 这一条是**恒真**的 (两个调用返回同一个数), 所以它只能说明
+    # 「表头与正文共用同一套列布局」这个事实, **不能**当成「对齐了」的证据 ——
+    # 真正能失败的对齐断言在上一节 (拿表头跟模型的独立几何比)。
+    check("QTableView::columnViewportPosition() 就是 horizontalHeader()->sectionViewportPosition()",
+          all(hdr.sectionViewportPosition(i) == view.columnViewportPosition(i)
+              for i in range(ncols)),
+          "两个调用返回的是同一个数 —— 这是结构事实, 不是对齐证据")
+
     section("横向滚动时表头跟着动")
-    # 拖宽标题列, 让内容宽出视口 → 才有横向滚动可言
-    model.set_column_width(1, 600)
+    # 走 view→model 那条线 (模拟用户拖表头)
     view.setColumnWidth(1, 600)
     app.processEvents()
+    check("拖宽后视图的列宽跟着模型走 (view→model 接线生效)",
+          model._widths[1] == 600, f"got={model._widths[1]}")
     check("拖宽后有横向可滚范围",
           view.horizontalScrollBar().maximum() > 0,
           f"max={view.horizontalScrollBar().maximum()}")
-    h0 = hdr.sectionViewportPosition(1)
-    b0 = view.columnViewportPosition(1)
+    before = [hdr.sectionViewportPosition(i) for i in range(ncols)]
     view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum())
     app.processEvents()
-    h1 = hdr.sectionViewportPosition(1)
-    b1 = view.columnViewportPosition(1)
-    check("正文确实横向滚动了", b1 != b0, f"{b0}→{b1}")
-    check("表头也跟着滚了同样的距离", (h1 - h0) == (b1 - b0),
-          f"表头动 {h1 - h0}px, 正文动 {b1 - b0}px")
-    check("横滚后表头与正文仍 Δ=0", (b1 - h1) == 0, f"Δ={b1 - h1}")
-    deltas2 = [hdr.sectionViewportPosition(i) - view.columnViewportPosition(i)
-               for i in range(ncols)]
-    check("横滚后逐列仍全部 Δ=0", all(d == 0 for d in deltas2),
-          f"deltas={deltas2}")
+    after = [hdr.sectionViewportPosition(i) for i in range(ncols)]
+    check("表头确实跟着横向滚动了", after != before, f"{before}→{after}")
+    shifts = {after[i] - before[i] for i in range(ncols)}
+    check("表头整体平移 (所有列移动了同样的距离)",
+          len(shifts) == 1, f"got={sorted(shifts)}")
+    deltas2 = [header_x(i) - model_x(i) for i in range(ncols)]
+    check("横滚后表头列 x 仍 == 模型列 x (逐列 Δ=0)",
+          all(d == 0 for d in deltas2), f"deltas={deltas2}")
+    check("横滚后表头 section 宽度仍 == 模型列宽",
+          all(hdr.sectionSize(i) == model._widths[i] for i in range(ncols)),
+          f"got={[(hdr.sectionSize(i), model._widths[i]) for i in range(ncols)]}")
 
-    section("拖宽列后表头列宽同步")
+    section("列宽变化 — model → view 接线 (模型改了, 视图跟着改)")
+    hdr_events = []
+    model.headerDataChanged.connect(lambda *a: hdr_events.append(a))
     model.set_column_width(4, 300)          # 码率列: 表头文字最长的一列
-    view.setColumnWidth(4, 300)
     app.processEvents()
-    check("表头 section 宽度跟上了",
+    check("模型列宽改了 → 视图的 section 宽度跟着改 (model→view 接线)",
           hdr.sectionSize(4) == 300, f"got={hdr.sectionSize(4)}")
-    check("表头列宽 == 模型的列宽",
-          hdr.sectionSize(4) == model._widths[4],
-          f"section={hdr.sectionSize(4)} model={model._widths[4]}")
+    check("模型列宽 == 视图列宽 (逐列)",
+          all(hdr.sectionSize(i) == model._widths[i] for i in range(ncols)),
+          f"got={[(hdr.sectionSize(i), model._widths[i]) for i in range(ncols)]}")
     wide_text = model.headerData(4, Qt.Horizontal, Qt.DisplayRole)
     check("拉宽后表头文字是完整文字 (没被截断)",
           wide_text == '码率(kbps)', f"got={wide_text!r}")
     check("拉宽后表头文字装得进新列宽",
           fm.horizontalAdvance(wide_text) <= hdr.sectionSize(4),
           f"w={fm.horizontalAdvance(wide_text)} section={hdr.sectionSize(4)}")
+    deltas3 = [header_x(i) - model_x(i) for i in range(ncols)]
+    check("改列宽后表头列 x 仍 == 模型列 x (逐列 Δ=0)",
+          all(d == 0 for d in deltas3), f"deltas={deltas3}")
     # 收窄 → 表头文字按新宽度重新截断 (与现状 _refresh_headers 同序)
     model.set_column_width(4, 40)
-    view.setColumnWidth(4, 40)
     app.processEvents()
     narrow_text = model.headerData(4, Qt.Horizontal, Qt.DisplayRole)
     check("收窄后表头文字被重新截断",
@@ -169,17 +229,27 @@ def main() -> int:
     check("收窄后表头文字装得进新列宽",
           fm.horizontalAdvance(narrow_text) <= hdr.sectionSize(4),
           f"w={fm.horizontalAdvance(narrow_text)} section={hdr.sectionSize(4)}")
-    deltas3 = [hdr.sectionViewportPosition(i) - view.columnViewportPosition(i)
-               for i in range(ncols)]
-    check("改列宽后仍然逐列 Δ=0", all(d == 0 for d in deltas3),
-          f"deltas={deltas3}")
+    check("收窄后视图的 section 宽度也跟上了 (model→view 接线)",
+          hdr.sectionSize(4) == 40, f"got={hdr.sectionSize(4)}")
+
+    section("列宽变化 — view → model 接线 (用户拖表头, 模型跟着改)")
+    view.setColumnWidth(7, 111)            # 采样率列
+    app.processEvents()
+    check("视图列宽改了 → 模型的列宽跟着改 (view→model 接线)",
+          model._widths[7] == 111, f"got={model._widths[7]}")
+    check("改完模型的列宽与视图的列宽仍然一致",
+          hdr.sectionSize(7) == model._widths[7] == 111,
+          f"section={hdr.sectionSize(7)} model={model._widths[7]}")
+    deltas4 = [header_x(i) - model_x(i) for i in range(ncols)]
+    check("改列宽后表头列 x 仍 == 模型列 x (逐列 Δ=0)",
+          all(d == 0 for d in deltas4), f"deltas={deltas4}")
 
     section("排序后列位置不变")
-    before_pos = [hdr.sectionViewportPosition(i) for i in range(ncols)]
+    before_pos = [header_x(i) for i in range(ncols)]
     before_sizes = [hdr.sectionSize(i) for i in range(ncols)]
     model.on_header_clicked(4)          # 码率列
     app.processEvents()
-    after_pos = [hdr.sectionViewportPosition(i) for i in range(ncols)]
+    after_pos = [header_x(i) for i in range(ncols)]
     after_sizes = [hdr.sectionSize(i) for i in range(ncols)]
     check("排序后列的 x 位置没变", before_pos == after_pos,
           f"before={before_pos} after={after_pos}")
@@ -197,12 +267,12 @@ def main() -> int:
           == ['./v59.mp4', './v58.mp4', './v57.mp4'],
           f"got={[model.data(model.index(r, 1), Qt.DisplayRole) for r in range(3)]}")
     # 走真实的「点表头」链路: view 的 sectionClicked → 模型
-    model2, view2 = build(VIDEO_COLUMNS)
+    model2, view2, hdr2, _state2 = build(VIDEO_COLUMNS)
     for i in range(5):
         model2.append_result(make_info(f'w{i}.mp4', bitrate=1000.0 * (5 - i)))
     app.processEvents()
-    view2.horizontalHeader().sectionClicked.connect(model2.on_header_clicked)
-    view2.horizontalHeader().sectionClicked.emit(4)
+    hdr2.sectionClicked.connect(model2.on_header_clicked)
+    hdr2.sectionClicked.emit(4)
     app.processEvents()
     check("表头 sectionClicked → 模型进入排序态",
           model2.sort_key == 'bitrate', f"got={model2.sort_key!r}")
