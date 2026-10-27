@@ -1092,6 +1092,23 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 | 派生路径 | 复刻 `_sync_derived_paths`：迁移地址**无条件**转 `\`、截图地址**仅 win32** 转、**无条件覆盖**用户值、**只填字段不建目录** |
 | 目录按需创建 | 「开始截图」/「移动」时才 `os.makedirs` |
 | 拖拽 | `setAcceptDrops(True)` + `dragEnterEvent`（接受含文件的 URL）+ `dropEvent`（`mimeData().urls()` → 本地路径） |
+
+#### Qt 特有的行为对齐清单（Task 3 审查查出来的，漏了就会静默退化）
+
+| # | 事项 | 不做会怎样 |
+|---|---|---|
+| 1 | **`UI_FONT` 必须在 `QApplication` 存在之后求值** | `QFont()` 会拷贝当前 app 的默认字体；app 还不存在时字体族是空的 → `QFontMetrics(UI_FONT)` **直接 abort 进程**（`QFontDatabase: Must construct a QGuiApplication before accessing QFontDatabase`），字宽也整套偏掉（`码率(kbps)` 48px→67px） |
+| 2 | `app.setFont(UI_FONT)` | 模型用 `QFontMetrics(UI_FONT)` 量宽度，视图用 app 字体渲染。两者不一致 → 预截断的文字**溢出列宽**（因为 elide 是关的） |
+| 3 | 表头 `setElideMode(Qt.ElideNone)` | 模型已把表头文字截断好，Qt 再 elide 一次 → 双重截断 |
+| 4 | 视图 `setShowGrid(False)` | Qt 默认画 1px 网格线；Tk 的 `tk.Label` 是无边框的 → 表格多出一圈网格线 |
+| 5 | 序号列 `QHeaderView.Fixed` + 45px；其余 `Interactive` | 序号列可被拖宽 → 与「固定 45px」矛盾 |
+| 6 | `setSortingEnabled(False)` | Qt 自带的排序指示箭头会与「表头文字后缀 `▲`」同时出现 |
+| 7 | **表头按 section 对齐** —— `QHeaderView` 没有按 section 设对齐的 API | Tk 版：title 列表头**左对齐**、其余居中。Qt 默认全居中 → 表头「标题」跑到 250px 格的中间，而正文 title 列是**左**的 → 两者对不上，很显眼。方案：写个 `QHeaderView` 子类覆写 `paintSection`，title 列左对齐、其余保持居中 |
+| 8 | 排序后如果视图有 current/selection，考虑补 `layoutAboutToBeChanged` | 模型只发 `layoutChanged`，视图的 current/selection 索引不跟随数据项重映射。Tk 版无选中态 → **非回归**，但接线时要知道 |
+
+> 第 7 条需要你拍板：**接受表头全居中**（省 15 行自定义绘制，但表头与正文对不齐），
+> 还是**写 `QHeaderView` 子类**保真。计划里按保真写（子类），实现时若觉得不值可以改，
+> 但要在 changelog 里写明差异。
 | 拖入即扫 | drop 处理完**直接开始扫描**，不等用户点「开始检测」 |
 | 手改路径即生效 | 路径输入框的 `textChanged` → 清掉「拖拽留下的文件列表」模式（复刻现状 `_on_path_edited`） |
 | 移动文件 | 遍历**插入序**的那份列表（不是排序后的显示序）；确认框文案逐字照搬；`_1` 去重；失败清单最多 20 条 |
