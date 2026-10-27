@@ -152,6 +152,9 @@ from video_core import (  # noqa: F401
     parse_time_token, parse_video_info, run_ffprobe, scan_video_files,
     time_token_to_string, truncate_text,
 )
+# 注意: **不重导出** `_parse_drop_data` —— 它解析的是 tkinterdnd2 的私有格式
+# `{f1} {f2}`, Qt 侧走 `mimeData().urls()`, 该函数与它的断言脚本在 Task 5
+# 一并删除。
 ```
 
 **再把 `video_checker.py` 里所有 `truncate_text(...)` 的调用改成传 `measure`：**
@@ -923,6 +926,9 @@ grep -n "from video_checker import" -A 12 docs/superpowers/specs/*-assertions.py
 | 脚本 | 依赖的 GUI 类 | 何时能改 |
 |---|---|---|
 | `2026-09-16-bug-audit` | `VideoGridView`（`_truncate_text` 小节）、`VideoCheckerApp`（`_get_unique_dest` 小节） | **Task 5**（`_get_unique_dest` 是 app 层方法） |
+| `2026-10-26-path-override` | `VideoCheckerApp` | **Task 5** |
+| `2026-10-27-bugfix` | `VideoCheckerApp` | **Task 5** |
+| `2026-10-29-dnd-parsing` | `_parse_drop_data`（tkinterdnd2 私有格式 `{f1} {f2}`） | **Task 5**：Qt 侧走 `mimeData().urls()`，该格式不存在 → **函数与脚本一并删**；覆盖换成 Qt 侧「含空格路径不被切错」的断言 |
 | `2026-10-23-sync-derived-paths` | `VideoCheckerApp` | **Task 5** |
 | `2026-10-26-lazy-dir-creation` | `VideoCheckerApp` | **Task 5** |
 | `2026-10-14-virtual-scroll` | `VideoGridView` | **本任务** |
