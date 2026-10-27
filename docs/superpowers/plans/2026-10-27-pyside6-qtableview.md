@@ -176,9 +176,11 @@ for f in docs/superpowers/specs/*-assertions.py; do python "$f" >/dev/null || ec
 
 预期：**无 FAIL**。
 
-> `2026-10-23-ui-density-assertions.py` 里调 `truncate_text(t, w, font)` 的地方**会失败** —— 因为签名变了。这一条断言脚本属于「必须改写」的那 4 个（spec §10.1）。
+> `2026-10-23-ui-density-assertions.py` 里调 `truncate_text(t, w, font)` 的地方**会失败** —— 签名变了。
 > **本任务允许改它，但只许改调用方式**：`truncate_text(t, w, font)` → `truncate_text(t, w, font.measure)`，**断言本身不动**。
 > 同样 `2026-09-16-bug-audit-assertions.py` 里 `gv._truncate_text(short, 200)` 是走 `VideoGridView` 的方法，方法内部已改 → 不用动 ✅。
+>
+> **准确的表述**：**11 个脚本一行不改** + ui-density 的 `truncate_text` **调用点**换写法（断言本身不动）。
 
 - [ ] **Step 5: 验 CRLF + 提交**
 
@@ -260,22 +262,24 @@ def section(title):
 
 
 def main():
-    section("阈值必须是有限的正数")
-    import math
-    for bad in ('inf', '-inf', 'nan', '0', '-1', 'abc'):
-        try:
-            v = float(bad)
-            ok = v > 0 and math.isfinite(v)
-        except ValueError:
-            ok = False
-        check(f"{bad!r} 被拒绝", not ok, f"got={ok}")
+    section("阈值必须是有限的正数 (真调 app 的校验函数)")
+    from video_core import parse_threshold
+    for bad in ('inf', '-inf', 'nan', '0', '-1', 'abc', ''):
+        check(f"{bad!r} 被拒绝", parse_threshold(bad) is None,
+              f"got={parse_threshold(bad)!r}")
+    check("正常值被接受", parse_threshold('30000') == 30000.0,
+          f"got={parse_threshold('30000')!r}")
+    check("带空白的正常值被接受", parse_threshold(' 48 ') == 48.0,
+          f"got={parse_threshold(' 48 ')!r}")
 
-    section("run_ffprobe 在非 Windows 上不崩")
-    import subprocess
+    section("run_ffprobe 在非 Windows 上不崩 (真调)")
     import video_core
-    src = __import__('inspect').getsource(video_core.run_ffprobe)
-    check("平台守卫存在", "sys.platform == 'win32'" in src,
-          "run_ffprobe 里没有 win32 守卫 → macOS/Linux 上 AttributeError")
+    try:
+        r = video_core.run_ffprobe('/nonexistent/definitely-not-a-video.mp4')
+        check("返回 None 而不是抛异常", r is None, f"got={r!r}")
+    except Exception as e:
+        check("返回 None 而不是抛异常", False,
+              f"抛了 {type(e).__name__}: {e}")
 
     section("目录里没有视频文件时状态栏文案")
     from video_checker import VideoCheckerApp
@@ -353,33 +357,46 @@ def run_ffprobe(file_path: str) -> dict | None:
 
 > `except` 里加 `AttributeError` 是双保险（万一还有别处漏了平台判断）。
 
-- [ ] **Step 4: 修阈值校验**
+- [ ] **Step 4: 修阈值校验（抽成可测的纯函数）**
 
-**两处**都要改（`_start_scan` 与 `_on_file_drop` 各一份）：
+在 `video_core.py` 里加一个纯函数（这样断言不用建 GUI 就能测）：
 
 ```python
-        try:
-            bitrate_std = float(self.bitrate_var.get().strip())
-            if not math.isfinite(bitrate_std) or bitrate_std <= 0:
-                raise ValueError
-        except ValueError:
+def parse_threshold(text: str) -> float | None:
+    """解析单个阈值。非法返回 None。
+
+    现状是内联在 _start_scan 与 _on_file_drop 里各写一遍, 且只判 `> 0`
+    —— float() 接受 inf / nan, 而 inf > 0 成立 → 所有行永远不达标。
+    """
+    try:
+        value = float(text.strip())
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+```
+
+`video_core.py` 顶部加 `import math`。
+
+**两处调用点**都改成用它（`_start_scan` 与 `_on_file_drop` 各一份）：
+
+```python
+        bitrate_std = parse_threshold(self.bitrate_var.get())
+        if bitrate_std is None:
             messagebox.showerror("错误", "码率标准必须为正数。")
             return
 ```
 
 ```python
-        try:
-            sample_rate_std = float(self.sample_rate_var.get().strip())
-            if not math.isfinite(sample_rate_std) or sample_rate_std <= 0:
-                raise ValueError
-        except ValueError:
+        sample_rate_std = parse_threshold(self.sample_rate_var.get())
+        if sample_rate_std is None:
             messagebox.showerror("错误", "采样率标准必须为正数。")
             return
 ```
 
-`video_checker.py` 顶部加 `import math`。
-
-> 文案**不变**（「码率标准必须为正数。」）—— `inf` / `nan` 也归到这条文案里，不新增文案。
+> 文案**不变**（「码率标准必须为正数。」/「采样率标准必须为正数。」）——
+> `inf` / `nan` 也归到这两条文案里，不新增文案。
 
 - [ ] **Step 5: 修「未找到视频文件」被覆盖**
 
