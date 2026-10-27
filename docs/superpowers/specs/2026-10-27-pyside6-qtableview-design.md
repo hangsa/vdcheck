@@ -246,17 +246,27 @@ def data(self, index, role):
 | Windows | `('TkDefaultFont', 9)` = Segoe UI 9 | `QFont('Segoe UI', 9)` |
 | macOS | `('TkDefaultFont', 9)` = Helvetica 9 | `QFont('.AppleSystemUIFont', 9)` 或取系统 UI 字体再 setPointSize(9) |
 
-`truncate_text` 的端口（`video_core.py` 里改这一处）：
+`truncate_text` 的端口（`video_core.py` 里改这一处）——**把字体度量抽象成一个可调用对象**，两边共用同一份逻辑：
+
+```python
+def truncate_text(text: str, col_width: int, measure: Callable[[str], int]) -> str:
+    """按像素宽截断文本并加省略号。max_width = col_width - 10 (扣 padx + bd)。
+
+    measure: 文本像素宽度的测量函数。Tk 侧传 tkfont.Font.measure,
+    Qt 侧传 QFontMetrics.horizontalAdvance —— 截断口径因此**完全一致**,
+    且这个函数**不需要建 GUI 就能测** (传个 lambda 即可)。
+    """
+```
 
 | | Tk 版 | Qt 版 |
 |---|---|---|
-| 测量 | `tkfont.Font.measure(text)` | `QFontMetrics.horizontalAdvance(text)` |
+| 测量 | `self._cell_font.measure` | `QFontMetrics(font).horizontalAdvance` |
 | 快路径估算 | ASCII 7px/字符、CJK 14px/字符 | **保留**（同一口径） |
 | 余量 | `col_width - 10` | **保留**（口径不变；实测有偏差再调） |
 | 省略号 | `'...'`（三个 ASCII 点） | **保留** |
 
 > **一致性要求**：同一平台、同一字体下，截断结果必须与现状**逐字符一致**。跨框架（不同字体的实际宽度不同）允许差异，但**口径**（余量、省略号、快路径估算）必须一致。
-> 现有断言 `2026-10-23-ui-density-assertions.py` 里有截断用例 —— 该脚本属于「必须改写」的那 4 个（§10.1），改写后仍要验这个口径。
+> 现有断言 `2026-10-23-ui-density-assertions.py` 里有截断用例 —— 该脚本属于「必须改写」的那 4 个（§10.1）。改写时**只换调用方式**（`truncate_text(t, w, font)` → `truncate_text(t, w, font.measure)`），**断言本身不动**。
 
 ### 5.4 排序
 
