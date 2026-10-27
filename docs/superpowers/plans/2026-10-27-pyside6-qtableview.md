@@ -893,90 +893,144 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ---
 
-### Task 4: Tk GUI 移出 + 改写表格相关断言
+### Task 4: 表格断言改测 Qt 模型
 
 **Files:**
-- Create: `video_checker_tk.py`（从 `video_checker.py` 整体移出 Tk GUI 部分，**纯移动**）
-- Modify: `docs/superpowers/specs/2026-10-14-virtual-scroll-assertions.py`
-- Modify: `docs/superpowers/specs/2026-10-23-ui-density-assertions.py`
-- Modify: `docs/superpowers/specs/2026-10-26-header-alignment-assertions.py`
+- Modify: `docs/superpowers/specs/2026-10-14-virtual-scroll-assertions.py`（**整体改写**）
+- Modify: `docs/superpowers/specs/2026-10-26-header-alignment-assertions.py`（**整体改写**）
+- Modify: `docs/superpowers/specs/2026-10-23-ui-density-assertions.py`（**删掉 Tk 表格相关小节**，其余保留）
+- Modify: `docs/superpowers/specs/2026-10-27-qt-table-assertions.py`（补齐被移走的语义）
 - Delete: `docs/superpowers/specs/2026-10-26-restore-black-assertions.py`
-- Test: 全部断言脚本
 
 **Interfaces:**
-- Consumes: Task 1 的 `video_core`、Task 3 的 `video_qt`
-- Produces: `video_checker_tk.py` 提供 `VideoGridView` / `Tooltip` / `EnlargeDialog` / `SnapshotProgressDialog` / `VideoCheckerApp`（Tk 版对照物）
+- Consumes: Task 3 的 `video_qt.VideoTableModel` / `VIDEO_COLUMNS` / `UI_FONT`
+- Produces: 三个脚本的**表格相关**断言改测 Qt 模型；Tk 版表格不再有断言覆盖
 
-- [ ] **Step 1: 把 Tk GUI 移到 `video_checker_tk.py`**
+> **本任务不改 `video_checker.py` / `video_qt.py`，Tk GUI 也不移走。**
+> 原因：三个「app 层」的脚本还依赖 Tk 的 GUI 类，而它们的 Qt 对应物要等 Task 5
+> 的主窗口才有。详见下面的「依赖盘点」。
 
-`video_checker.py` 里保留：imports、常量、`from video_core import ...` 的重新导出、`main()`。
-其余（`VideoGridView` / `Tooltip` / `EnlargeDialog` / `SnapshotProgressDialog` / `VideoCheckerApp`）**整块搬到 `video_checker_tk.py`**，并在 `video_checker_tk.py` 顶部加：
+- [ ] **Step 1: 先把依赖盘点清楚（照做，别猜）**
 
-```python
-"""**临时的** Tkinter 版界面, 供重构期间对照与回归使用。
+Tk GUI 移走会打断哪些脚本的 import，**逐个查**：
 
-新实现见 video_qt.py。Tk 版在重构全程保持可跑, P9 会删掉这个文件。
-"""
+```bash
+grep -n "from video_checker import" -A 12 docs/superpowers/specs/*-assertions.py
 ```
 
-`video_checker.py` 的 `main()` 暂时仍调 Tk 版（此时 Qt 版还没做完）：
+已知的依赖（**动手前自己再核一遍**）：
 
-```python
-def main():
-    from video_checker_tk import VideoCheckerApp
-    root = TkinterDnD.Tk()
-    VideoCheckerApp(root)
-    root.mainloop()
-```
+| 脚本 | 依赖的 GUI 类 | 何时能改 |
+|---|---|---|
+| `2026-09-16-bug-audit` | `VideoGridView`（`_truncate_text` 小节）、`VideoCheckerApp`（`_get_unique_dest` 小节） | **Task 5**（`_get_unique_dest` 是 app 层方法） |
+| `2026-10-23-sync-derived-paths` | `VideoCheckerApp` | **Task 5** |
+| `2026-10-26-lazy-dir-creation` | `VideoCheckerApp` | **Task 5** |
+| `2026-10-14-virtual-scroll` | `VideoGridView` | **本任务** |
+| `2026-10-23-ui-density` | `VideoGridView`、`SnapshotProgressDialog`、`VideoCheckerApp` | 表格部分**本任务**；弹窗部分 **Task 6**；app 部分 **Task 5** |
+| `2026-10-26-header-alignment` | `VideoGridView` | **本任务** |
 
-- [ ] **Step 2: 改写 3 个触及 Tk 内部结构的断言脚本**
+- [ ] **Step 2: 整体改写 `2026-10-14-virtual-scroll-assertions.py`**
 
-| 脚本 | 改写要点 |
+它测的是 **Tk 特有的虚拟滚动**（40 个池 widget、spacer、window item 的 y 坐标偏移）。
+Qt 的 `QTableView` **原生就是虚拟滚动**（只画可见单元格），所以这个脚本在 Qt 版
+的对应物是「能滚、能显示全部行、排序后不乱」。整体改写为测 `VideoTableModel`：
+
+| 原小节 | 改测 |
 |---|---|
-| `2026-10-14-virtual-scroll-assertions.py` | 测的是**虚拟滚动**（Tk 特有）→ Qt 原生自带，**改为测 Qt 模型**：`rowCount` 随追加增长、`clear()` 归零、排序后顺序正确。**删掉**对 `_widget_pool` / `winfo_manager()` / grid minsize 的断言 |
-| `2026-10-23-ui-density-assertions.py` | **混合**：截断口径、标题格式、状态栏文案、spec 列格式、10 列集合 → 保留（只换 `truncate_text` 的调用方式）；触及 `_cells` / `_header_labels` / widget 结构的 → 改为 `model.data(...)` / `model.headerData(...)` |
-| `2026-10-26-header-alignment-assertions.py` | 测的是「表头与正文逐列 Δ=0」→ Qt 的表头与正文**同一个 view**，天然对齐。改为断言「表头列 x 与模型列 x 一致」+「横向滚动时表头与正文同步」 |
+| pool & data separation | 模型只持一份 `_rows`；`rowCount()` 随追加增长 |
+| Render — scroll updates slot bindings | 追加 → `data(index, Qt.DisplayRole)` 立刻是新值 |
+| Column resize — throttle & minsize | `set_column_width()` → 表头/单元格重新截断 + `headerDataChanged`/`dataChanged` 发出；最小 20px |
+| Column resize — release flushes pending text | 同一套语义（Qt 没有节流） |
+| Column resize — unmapped widget skips | **删掉**（Qt 无池 widget） |
+| clear() — resets data & bindings | `clear()` → `rowCount()==0`、无残留 |
+| reorder() — sorts in place | `reorder()` 按当前排序态重排；无排序态是 no-op |
+| Scroll — 无上/下空白 | **删掉**（Qt 不存在 spacer 问题）；换成「滚动不影响行的内容」 |
+| Scroll — 未用池 slot 移出布局 | **删掉** |
+| Scroll — 无隐藏内容时滚轮/滚动条禁用 | **删掉**（Qt 原生） |
+| Public API — preserved | 模型的公开 API：`rowCount`/`columnCount`/`data`/`headerData`/`append_result`/`clear`/`reorder`/`is_sorted`/`set_column_width`/`on_header_clicked` |
+| Bound keys — `_on_data_configure` no longer bound | **删掉**（Tk 特有） |
 
-**红线**：每条改写都要能说清「原语义 → 新断言」的对照，**不能把断言改弱**。改写前**先在报告里写出对照表**。
+- [ ] **Step 3: 整体改写 `2026-10-26-header-alignment-assertions.py`**
 
-- [ ] **Step 3: 删掉 `2026-10-26-restore-black-assertions.py`**
+它测的是「表头与正文逐列 Δ=0」+「横滚时表头跟着动」。Qt 的表头与正文**在同一个
+`QTableView` 里**，天然对齐 —— 所以改测：
 
-它的断言是「Tk 池 widget 映射数 ≤ 40」—— Qt 下**没有对应量**（`QTableView` 有 viewport/表头/滚动条，不是「零子窗口」）。这条断言的**意图**（恢复时不用逐个重绘几百个 HWND）由架构保证。
+| 原小节 | 改测 |
+|---|---|
+| 表头与正文 canvas 同宽 | 同一个 view 的表头与 viewport 宽度一致 |
+| 表头与正文逐列对齐 (Δ=0) | 表头 section 的 x == 模型 `_col_layout` 的 x（逐列） |
+| 横向滚动时表头跟着动 | **删掉**（同一个 view 天然同步）—— 换成「排序后列位置不变」 |
+| 拖宽列后表头列宽同步 | `set_column_width()` → 表头文字重新截断 + `headerDataChanged` |
+| 表头点击排序仍可用 | `on_header_clicked()` → 排序态翻转 + 行顺序改变 |
+
+- [ ] **Step 4: `2026-10-23-ui-density-assertions.py` 删掉 Tk 表格相关小节**
+
+删掉（其余小节保留，弹窗部分等 Task 6、app 部分等 Task 5）：
+
+- `section("_format_cell — title 分支委托 format_title")`
+- `section("单位规则 — cell 不带单位, N/A 不受影响")`
+- `section("headers — 表头带单位")`
+- `section("_format_cell — spec 列")`
+- `section("列集合 — 10 列 + 四个可排序列仍存在")`
+- `section("VideoGridView._truncate_text — 委托且行为一致")`
+- `section("网格 cell 带 _truncated 标记")`
+
+**注意**：`section("truncate_text — 像素级截断")` **保留**（它测的是 `video_core.truncate_text`，与框架无关）。
+
+被移走的语义**必须在 `2026-10-27-qt-table-assertions.py` 里有对应断言**（补齐）：
+
+| 移走的语义 | 补到 Qt 脚本的断言 |
+|---|---|
+| title 分支委托 `format_title` | `data(idx, Qt.DisplayRole)` == `format_title(info)` |
+| 单位规则（cell 不带单位） | 帧率格 = `'30.00'`（不是 `'30.00 fps'`）、采样率格 = `'48.0'`；`N/A` 字段仍是 `'N/A'` |
+| headers 带单位 | 表头文字 == `'帧率(fps)'` / `'码率(kbps)'` / `'采样率(kHz)'` |
+| spec 列格式 | `data(idx, Qt.DisplayRole)` == `'mp4/h264/aac'` |
+| 10 列 + 4 个可排序列 | 已在 Qt 脚本里（`VIDEO_COLUMNS` 那节）—— 确认覆盖 |
+
+- [ ] **Step 5: 删掉 `2026-10-26-restore-black-assertions.py`**
 
 ```bash
 git rm docs/superpowers/specs/2026-10-26-restore-black-assertions.py
 ```
 
-- [ ] **Step 4: 跑全部断言**
+它断言的是 **Tk 的池 widget 映射数**（`len([w for w in grid._widget_pool if w.winfo_manager()]) <= 40`）。
+Qt 下**没有对应量**：`QTableView` 有 viewport / 表头 / 滚动条，不是「零子窗口」。
+
+这条断言的**意图**（恢复时不用逐个重绘几百个 HWND）由 Qt 架构保证 —— Qt 顶层窗口是
+离屏渲染 + 一次性 blit，且 `QTableView` 只画可见单元格。
+
+**不能改成「断言通过」了事。** 要么删（意图由架构保证），要么换成可测的等价断言。
+
+- [ ] **Step 6: 跑全部断言**
 
 ```bash
 for f in docs/superpowers/specs/*-assertions.py; do python "$f" >/dev/null || echo "FAIL $(basename $f)"; done
 ```
 
-预期：全绿。
+预期：全绿（13 个脚本 —— 删掉 restore-black 后是 13；新增的 Qt 表格脚本已在）。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add -A
-git commit -m "refactor: Tk GUI 移到 video_checker_tk.py, 改写 3 个表格断言
+git add -A docs/superpowers/specs/
+git commit -m "test(qt): 表格断言改测 Qt 模型
 
-Tk 版**整块移出**, 不改一行逻辑 —— 重构全程保留它当对照物与回归基线,
-P9 删掉。
+Tk 特有的虚拟滚动 (40 个池 widget / spacer / window item 偏移) 在 Qt 里
+不存在 —— QTableView 原生就是虚拟滚动 (只画可见单元格)。所以这两个脚本
+整体改写为测 VideoTableModel: 追加/清空/排序/列宽变化/公开 API。
 
-改写 3 个触及 Tk 内部结构的断言脚本 (virtual-scroll / ui-density /
-header-alignment), 每条都写出「原语义 → 新断言」对照:
-- 虚拟滚动是 Tk 特有 → 改为测 Qt 模型的 rowCount / clear / 排序顺序
-- 表头正文 Δ=0 → Qt 同一个 view 天然对齐, 改为「表头列 x == 模型列 x」
+表头正文 Δ=0 那个脚本同理改写: Qt 的表头与正文在同一个 QTableView 里,
+天然对齐, 改成验「表头 section 的 x == 模型列的 x」。
 
-删掉 restore-black 脚本: 它断言的是 Tk 池 widget 映射数, Qt 下无对应量
-(QTableView 有 viewport/表头/滚动条, 不是「零子窗口」)。该断言的意图
+ui-density 删掉 7 个 Tk 表格小节, 对应语义补进 Qt 表格脚本。
+
+删掉 restore-black 脚本: 它断言 Tk 的池 widget 映射数, Qt 下无对应量
+(QTableView 有 viewport/表头/滚动条, 不是零子窗口)。该断言的意图
 (恢复时不用逐个重绘几百个 HWND) 由 Qt 架构保证。
 
-Co-Authored-By: Claude <noreply@anthropic.com>
+Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
 
----
 
 ### Task 5: Qt 主窗口
 
@@ -1025,12 +1079,28 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 | 「浏览」 | `QFileDialog.getExistingDirectory`；结果是**父目录**，再套 `checked` / `snapshot` |
 | 字体 | 全 app 统一 9pt（`UI_FONT`） |
 
-- [ ] **Step 4: 跑断言，确认通过** → 预期全绿
+- [ ] **Step 4: 改写三个 app 层断言脚本（它们一直 import Tk 的 GUI 类）**
 
-- [ ] **Step 5: 提交**
+Task 4 的依赖盘点里列了三个脚本，它们测的是**app 层行为**，Tk 的 `VideoCheckerApp`
+一移走就 import 断了。Qt 主窗口写完后，它们对应的实现是 `video_qt.MainWindow`：
+
+| 脚本 | 原来 import | 改成 | 改测什么 |
+|---|---|---|---|
+| `2026-10-23-sync-derived-paths-assertions.py` | `VideoCheckerApp` | `video_qt.MainWindow` | 派生路径（迁移地址 = `<源>\checked`、截图地址 = `<源>\snapshot`）、无条件覆盖、只填字段不建目录、浏览选父目录 |
+| `2026-10-26-lazy-dir-creation-assertions.py` | `VideoCheckerApp` | `video_qt.MainWindow` | 扫描/浏览阶段不建目录；点「开始截图」才建 snapshot；点「移动」才建 checked |
+| `2026-09-16-bug-audit-assertions.py` | `VideoGridView` + `VideoCheckerApp` | `video_qt`（表格部分）+ `video_qt.MainWindow`（`_get_unique_dest` 部分） | `_truncate_text` 那小节改成直接测 `video_core.truncate_text` 的快路径（**不再需要 `VideoGridView.__new__` + `_cell_font = None` 那套**）；`_get_unique_dest` 那小节改测 Qt 版的去重命名函数 |
+
+> **只许改「测什么」和「import 什么」，不许把断言改弱。** 每个改写都要写出
+> 「原语义 → 新断言」对照（写进报告）。
+> `bug-audit` 的其余小节（scan_video_files / parse_video_info ×3 / _cell_fg 全矩阵 /
+> format_duration / format_file_size）**一个字都不许动**。
+
+- [ ] **Step 5: 跑断言，确认通过** → 预期全绿
+
+- [ ] **Step 6: 提交**
 
 ```bash
-git add video_qt.py docs/superpowers/specs/2026-10-27-qt-main-assertions.py
+git add video_qt.py docs/superpowers/specs/
 git commit -m "feat(qt): 主窗口 —— 布局/状态栏/按钮态/扫描线程/拖拽/迁移
 
 文案逐字照搬 docs/产品文档.md §4.3, 含全角冒号、间隔号, 以及
@@ -1149,11 +1219,23 @@ if __name__ == '__main__':
     main()
 ```
 
-- [ ] **Step 2: 删掉 `video_checker_tk.py`**
+- [ ] **Step 2: 删掉 Tk GUI**
+
+Task 4 推迟了这一步（因为 app 层的三个断言脚本还 import Tk 的类）。现在 Qt 版
+完整了，删：
+
+- `video_checker_tk.py`（整个文件）—— 如果之前没建过就跳过这步
+- `video_checker.py` 里的 `VideoGridView` / `Tooltip` / `EnlargeDialog` /
+  `SnapshotProgressDialog` / `VideoCheckerApp` 五个类，以及 `tkinter` /
+  `tkinterdnd2` / `tkinter.ttk` 的 import
 
 ```bash
 git rm video_checker_tk.py
 ```
+
+> **这一步之后**，`video_checker.py` 只剩 core 的重新导出 + 转发到 `video_qt.main()`。
+> 剩下的脚本里若还有 `from video_checker import VideoCheckerApp` 之类的 import，
+> 在这一步里一并改成 `from video_qt import ...`。
 
 - [ ] **Step 3: 改 `video_checker.spec`**
 
