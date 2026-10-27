@@ -9,15 +9,14 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Callable
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import QStyledItemDelegate
 
 from video_core import (
-    FG_FAIL, FG_PASS, VideoInfo, _cell_fg, _extract_sort_key,
-    _header_text_with_arrow, _next_sort_state, format_title, truncate_text,
+    VideoInfo, _cell_fg, _extract_sort_key, _header_text_with_arrow,
+    _next_sort_state, format_title, truncate_text,
 )
 
 # 与现状一致的字体: 9pt。**不能**跟 Qt 的 app 默认字体 (macOS 上 13pt),
@@ -87,12 +86,17 @@ class VideoTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
+        row = index.row()
+        if not 0 <= row < len(self._rows):
+            return None                    # 过期 index (clear() 之前取的)
         section = index.column()
+        if not 0 <= section < len(self._columns):
+            return None
         col = self._columns[section]
-        info = self._rows[index.row()]
+        info = self._rows[row]
         if role == Qt.DisplayRole:
             if col.key is None:                    # 序号列: 排序后的新位置
-                return str(index.row() + 1)
+                return str(row + 1)
             return self._truncated(section, info)
         if role == Qt.ForegroundRole:
             if col.key is None:                    # 序号列永远黑色
@@ -169,6 +173,8 @@ class VideoTableModel(QAbstractTableModel):
 
     def set_column_width(self, section: int, width: int) -> None:
         """列宽变化 → 重新截断该列的表头文字与单元格文本。"""
+        if not 0 <= section < len(self._columns):
+            return                              # 越界: 不往 dict 里塞野列
         width = max(20, width)                  # 最小 20px, 与现状一致
         if self._widths.get(section) == width:
             return
@@ -183,11 +189,29 @@ class VideoTableModel(QAbstractTableModel):
 
     def on_header_clicked(self, section: int) -> None:
         """表头点击 → 三态循环 → 就地排序。"""
+        if not 0 <= section < len(self._columns):
+            return                              # 越界: 无反应
         col = self._columns[section]
         if col.key is None or not col.sortable:
             return                              # 不可排序列: 完全无反应
         self.sort_key, self.sort_desc = _next_sort_state(
             self.sort_key, self.sort_desc, col.key)
+        self._apply_sort()
+        # 箭头变了 → 所有表头文字都要重写。取消排序那一档 _apply_sort 早退
+        # (不发 layoutChanged), 不显式通知的话表头上会留着一个过期箭头
+        # (Tk 版每次点击都显式重写所有表头 label, 见 _refresh_headers)。
+        self.headerDataChanged.emit(Qt.Horizontal, 0, len(self._columns) - 1)
+
+    def is_sorted(self) -> bool:
+        """是否处于排序状态 (供 App 在扫描完成后决定是否 reorder)。"""
+        return self.sort_key is not None
+
+    def reorder(self) -> None:
+        """按当前排序状态重排现有行。无排序状态或 0 行时为 no-op。
+
+        扫描过程中结果按插入序追加; 扫描结束后 App 调它统一排一次 ——
+        与 Tk 版 VideoGridView.reorder() 同名同义。
+        """
         self._apply_sort()
 
     def _apply_sort(self) -> None:
