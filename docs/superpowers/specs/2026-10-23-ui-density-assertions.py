@@ -106,25 +106,25 @@ def main() -> None:
 
     section("truncate_text — 像素级截断")
     short = 'ab.mp4'
-    check("短文本原样返回", truncate_text(short, 250, font) == short,
-          f"got={truncate_text(short, 250, font)!r}")
+    check("短文本原样返回", truncate_text(short, 250, font.measure) == short,
+          f"got={truncate_text(short, 250, font.measure)!r}")
 
     long_ascii = 'a' * 200
-    got = truncate_text(long_ascii, 100, font)
+    got = truncate_text(long_ascii, 100, font.measure)
     check("超长 ASCII 被截断", len(got) < len(long_ascii), f"len={len(got)}")
     check("截断结果以 ... 结尾", got.endswith('...'), f"got={got[-10:]!r}")
     check("截断结果不超列宽", font.measure(got) <= 100 - 10,
           f"w={font.measure(got)}")
 
     long_cjk = '中文标题' * 40
-    got = truncate_text(long_cjk, 100, font)
+    got = truncate_text(long_cjk, 100, font.measure)
     check("超长 CJK 被截断", font.measure(got) <= 100 - 10,
           f"w={font.measure(got)}")
 
-    got = truncate_text('anything', 5, font)
+    got = truncate_text('anything', 5, font.measure)
     check("列宽 < 10 → 返回 '...'", got == '...', f"got={got!r}")
 
-    got = truncate_text('', 250, font)
+    got = truncate_text('', 250, font.measure)
     check("空串原样返回", got == '', f"got={got!r}")
 
     section("SnapshotProgressDialog — 横向滚动条")
@@ -382,7 +382,7 @@ def main() -> None:
     grid = VideoGridView(ttk.Frame(root), {'title': ('标题', 250)})
     check("方法委托给模块级 truncate_text",
           grid._truncate_text('a' * 200, 100)
-          == truncate_text('a' * 200, 100, grid._cell_font))
+          == truncate_text('a' * 200, 100, grid._cell_font.measure))
     check("短文本不受影响", grid._truncate_text('a.mp4', 250) == 'a.mp4')
 
     section("mark_done — PhotoImage 只留 display")
