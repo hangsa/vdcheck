@@ -59,13 +59,28 @@
 - 线程模型（queue + 100ms 轮询 → `QThread` + 信号）
 - 打包配置（`video_checker.spec` / `build.bat`）
 
-### 保留（**逐字不动**）
+### 保留
 
-纯逻辑层 ~400 行，从 `video_checker.py` 原样搬出：
+纯逻辑层，从 `video_checker.py` 搬进 `video_core.py`，分三类：
 
-`get_ffprobe_path` / `get_ffmpeg_path` / `VideoInfo` / `format_duration` / `format_file_size` / `parse_time_token` / `time_token_to_string` / `format_title` / `truncate_text` / `_parse_drop_data` / `run_ffprobe` / `extract_frame` / `parse_video_info` / `_cell_fg` / `_extract_sort_key` / `_next_sort_state` / `scan_video_files`
+**① 逐字不动（15 个）**
 
-**唯一的例外**：`truncate_text` 的字体测量要从 `tkfont.Font.measure` 换成 `QFontMetrics.horizontalAdvance`（见 §5.3）。
+`get_ffprobe_path` / `get_ffmpeg_path` / `VideoInfo` / `format_duration` / `format_file_size` / `parse_time_token` / `time_token_to_string` / `format_title` / `run_ffprobe` / `extract_frame` / `parse_video_info` / `_extract_sort_key` / `_next_sort_state` / `_header_text_with_arrow` / `scan_video_files`
+
+**② 需小改（2 个）**
+
+| 函数 | 为什么要改 |
+|---|---|
+| `_cell_fg` | 现在引用 `VideoGridView.FG_PASS` / `VideoGridView.FG_FAIL` —— **它不能逐字搬走**。把两个颜色常量提到 `video_core.py` 的模块级，函数体其余部分不动 |
+| `truncate_text` | 签名是 `font: tkfont.Font` —— **依赖 tkinter**。字体测量换成 `QFontMetrics.horizontalAdvance`，余量/省略号/快路径估算的口径全部保留（见 §5.3） |
+
+**③ 删除（2 个）**
+
+| 对象 | 原因 |
+|---|---|
+| `_parse_drop_data` | 它解析的是 `tkinterdnd2` 私有的 `{f1} {f2}` 格式，Qt 用 `mimeData().urls()`，格式不存在了 |
+| `Tooltip` 类（102 行） | Qt 的 `Qt.ToolTipRole` 内置，延迟关闭/窗口复用/`lift()` 那套是绕开 Tk 限制的手工活 |
+
 
 ### 明确不做
 
@@ -95,11 +110,13 @@
 ### 4.1 文件划分
 
 ```
-video_core.py       ~420 行  纯逻辑（从 video_checker.py 原样搬出）
+video_core.py       ~420 行  纯逻辑（15 个逐字搬 + 2 个小改，详见 §2）
 video_checker.py   ~1900 行  全部 GUI + 入口（打包入口不变）
 ```
 
-**为什么只拆两个**：现有 12 个断言脚本都 `import video_checker`。让 `video_checker.py` 显式 `from video_core import ...` 重新导出，**脚本一行都不用改**，回归基线直接复用。若实施中 `video_checker.py` 超过 ~2200 行，再把截图弹窗拆出去（届时单独决策，不预先拆）。
+**为什么只拆两个**：现有 12 个断言脚本里，**7 个是纯逻辑的**（`from video_checker import X` 拿纯函数）。让 `video_checker.py` 显式 `from video_core import ...` 重新导出，**这 7 个一行都不用改**，回归基线直接复用。另 4 个触及 Tk 内部结构、要改写；1 个（旧拖拽格式）删除 —— 详见 §10.1。
+
+若实施中 `video_checker.py` 超过 ~2200 行，再把截图弹窗拆出去（届时单独决策，不预先拆）。
 
 ### 4.2 数据流
 
@@ -116,7 +133,9 @@ video_checker.py   ~1900 行  全部 GUI + 入口（打包入口不变）
                     └──────────────────────────────────────────────────────┘
 ```
 
-`list[VideoInfo]` 是**唯一数据真值**（与现状一致：`_data` 是真值，widget 只是视图）。模型持有它，worker 通过信号把新行交给主线程，主线程 `beginInsertRows` → 表格增量刷新。
+**数据真值有两份**（与现状一致，见 §4.5）：app 侧一份**插入序**（专供移动文件用），模型一份**显示序**（排序后）。两者是同一批 `VideoInfo` 对象的**引用**，不是拷贝。
+
+模型持有显示序那份，worker 通过信号把新行交给主线程，主线程 `beginInsertRows` → 表格增量刷新。
 
 ### 4.3 线程模型
 
@@ -134,9 +153,23 @@ video_checker.py   ~1900 行  全部 GUI + 入口（打包入口不变）
 
 Qt 的 `mimeData().urls()` 给的是标准 URL 列表，**含空格的路径天然正确**（现状在 macOS/Linux 上会被切错）。
 
-`_parse_drop_data` 是 `tkinterdnd2` 私有格式（`{f1} {f2}`）的解析器，**Qt 侧不再需要**。但它的 16 个用例背后的**语义**要保留 → 断言脚本改成「Qt URL 解析」的等价断言（含空格路径、Windows 路径分隔符）。
+`_parse_drop_data` 解析的是 `tkinterdnd2` 私有的 `{f1} {f2}` 格式，Qt 侧这个格式不存在了 → **函数与它的 16 用例断言脚本一并删除**。
 
-> **产品文档 §6 第 35 条**（`_parse_drop_data` 不处理含空格的 macOS/Linux 路径）**不适用于 Qt 实现** —— Qt 天然正确。这属于「框架换了之后自动消失的缺陷」，不是行为变更，changelog 记一笔。
+**但覆盖不能跟着一起丢**：新增一条断言，验 Qt 侧从 `mimeData().urls()` 取路径的行为 —— 重点是**含空格的路径不被切错**（现状的缺陷）与 Windows 路径分隔符。这是**升级**而非等价改写：删掉的是旧格式的用例，加上的比旧格式更严。
+
+> **产品文档 §6 第 35 条**（`_parse_drop_data` 不处理含空格的 macOS/Linux 路径）在 Qt 实现下**自动消失** —— 不是行为变更，是框架换了之后这个缺陷不复存在。changelog 记一笔。
+
+### 4.5 移动顺序（现状有两份列表，Qt 版只有一份）
+
+现状里 `VideoCheckerApp.video_results`（**插入序**）与 `VideoGridView._data`（**排序序**）是**两份独立列表**：
+
+- 排序（`reorder`）只排 `grid._data` → **表格**显示排序后的顺序
+- 移动文件遍历 `video_results` → **移动顺序与失败清单顺序是插入序**
+
+Qt 版只有一份列表（模型的），排序会改它的顺序 → **移动顺序与失败清单顺序会变成排序序**。
+
+**决策：保持现状**。app 侧保留一份**插入序**的列表专供移动用，模型另持一份用于显示。代价是多一份 `list[VideoInfo]` 的**引用**（不是拷贝），换来行为零差异。changelog 不必记（行为一致）。
+
 
 ---
 
@@ -145,17 +178,41 @@ Qt 的 `mimeData().urls()` 给的是标准 URL 列表，**含空格的路径天�
 ### 5.1 模型
 
 ```python
+@dataclass(frozen=True)
+class ColumnSpec:
+    """一列的规格。key=None 表示序号列。"""
+    key: str | None      # 数据列的 key；序号列是 None
+    header: str          # 表头基础文字（不含排序箭头）
+    width: int           # 默认宽（px）
+    align: str           # 'w' | 'center'
+    sortable: bool
+
+
 class VideoTableModel(QAbstractTableModel):
-    def __init__(self, columns: list[ColumnSpec], parent=None): ...
+    def __init__(self, columns: list[ColumnSpec], parent=None):
+        self._columns = columns
+        self._rows: list[VideoInfo] = []       # 显示序
+        self._sort_key: str | None = None
+        self._sort_desc: bool = False
+    # --- Qt 必需接口 ---
     def rowCount(self, parent=QModelIndex()) -> int: ...
     def columnCount(self, parent=QModelIndex()) -> int: ...
     def data(self, index, role=Qt.DisplayRole): ...
     def headerData(self, section, orientation, role=Qt.DisplayRole): ...
-    # 内部
+    # --- 内部 ---
     def append_result(self, info: VideoInfo) -> None: ...
     def clear(self) -> None: ...
-    def sort_by(self, key: str, desc: bool) -> None: ...
+    def on_header_clicked(self, section: int) -> None:
+        """表头点击 → 三态循环 → 就地排序。排序态存在模型里。"""
+        key = self._columns[section].key
+        if key is None or not self._columns[section].sortable:
+            return                                  # 不可排序列: 完全无反应
+        self._sort_key, self._sort_desc = _next_sort_state(
+            self._sort_key, self._sort_desc, key)
+        self._apply_sort()
 ```
+
+**排序态放在模型里**（现状放在 `VideoGridView._sort_key/_sort_desc`）—— 因为数据在模型里。三态循环复用 `_next_sort_state`（纯逻辑，不改）✅
 
 **列集合 = 现状的 10 个数据列 + 1 个序号列**，key 与宽度完全照搬产品文档 §4.2。序号列是**第 0 列**（不是 Qt 的 vertical header），保持「固定 45px、不排序、不可拖宽、永不染色」。
 
@@ -168,52 +225,62 @@ def data(self, index, role):
         if col.key is None:            # 序号列
             return QBrush(Qt.black)    # 永不染色
         info = self._rows[index.row()]
-        fg = _cell_fg(info, col.key)   # 复用纯逻辑层, 一行不改
+        fg = _cell_fg(info, col.key)   # 复用纯逻辑层（仅颜色常量提到模块级）
         return QBrush(QColor(fg or '#000000'))
 ```
 
-`_cell_fg` **原样复用**（在 `video_core.py` 里）—— 着色规则一个字都不改。
+`_cell_fg` **原样复用**（在 `video_core.py` 里）—— 着色规则一个字都不改，只有 `VideoGridView.FG_PASS` / `FG_FAIL` 两个常量提到模块级（见 §2）。
 
 **不画整行底色**（与现状一致：只有前景色）。
 
-### 5.3 截断
+### 5.3 截断与字体
 
 现状是**在 Python 里按像素截断**（`truncate_text`），不是靠控件 elide。Qt 的 `QTableView` 默认会 elide（且是单字符 `…`），与现状的三个 ASCII 点 `...` 不一致。
 
 **做法**：自定义 `QStyledItemDelegate`，`setElideMode(Qt.ElideNone)`，文本在 `data()` 里就**预先截断好**返回。
+
+**字体必须显式指定，不能跟 Qt 的 app 默认字体**。现状所有文字都是 `('TkDefaultFont', 9)`（Windows = Segoe UI 9，macOS = Helvetica 9）。Qt 的 app 默认字体在 macOS 上是 13pt —— 跟了就让**所有列的视觉宽度全变**，列宽 250px 的含义也变了。
+
+| 平台 | 现状字体 | Qt 版要用 |
+|---|---|---|
+| Windows | `('TkDefaultFont', 9)` = Segoe UI 9 | `QFont('Segoe UI', 9)` |
+| macOS | `('TkDefaultFont', 9)` = Helvetica 9 | `QFont('.AppleSystemUIFont', 9)` 或取系统 UI 字体再 setPointSize(9) |
 
 `truncate_text` 的端口（`video_core.py` 里改这一处）：
 
 | | Tk 版 | Qt 版 |
 |---|---|---|
 | 测量 | `tkfont.Font.measure(text)` | `QFontMetrics.horizontalAdvance(text)` |
-| 快路径估算 | ASCII 7px/字符、CJK 14px/字符 | **保留**（同一口径，跨平台一致） |
-| 余量 | `col_width - 10` | **保留**（口径不变，视觉与现状一致；如实测有偏差再调） |
+| 快路径估算 | ASCII 7px/字符、CJK 14px/字符 | **保留**（同一口径） |
+| 余量 | `col_width - 10` | **保留**（口径不变；实测有偏差再调） |
 | 省略号 | `'...'`（三个 ASCII 点） | **保留** |
 
-> `truncate_text` 需要一个字体度量对象。把它改成接受「一个 `measure(str) -> int` 的可调用对象」或接受 `QFontMetrics` —— 具体形态在实施时定，**但结果必须与现状逐字符一致**（现有断言 `2026-10-23-ui-density-assertions.py` 会验）。
+> **一致性要求**：同一平台、同一字体下，截断结果必须与现状**逐字符一致**。跨框架（不同字体的实际宽度不同）允许差异，但**口径**（余量、省略号、快路径估算）必须一致。
+> 现有断言 `2026-10-23-ui-density-assertions.py` 里有截断用例 —— 该脚本属于「必须改写」的那 4 个（§10.1），改写后仍要验这个口径。
 
 ### 5.4 排序
 
 - 可排序列 4 个：`result` / `bitrate` / `frame_rate` / `audio_sample_rate`
 - 排序键复用 `_extract_sort_key`（纯逻辑，不改）
 - **三态循环**：无 → 升序 → 降序 → 无；切到别的列重置为升序（`_next_sort_state` 不改）
-- 箭头：`QHeaderView.setSortIndicator(section, order)` —— **Qt 原生箭头，与现状的「表头文字后缀 `▲`」视觉不同**
-  - **决策**：用 Qt 原生箭头（更地道、不会被列宽截断）
-  - **行为差异**：现状箭头是文字后缀（加完会重新截断，列窄时箭头可能消失）；Qt 原生箭头独立于文字，永不消失
-  - **changelog 记一笔**
-  - 理由：产品文档 §6 第 16 条「箭头是文字后缀」是为了配合「表头文字也按宽度截断」的实现，Qt 换成原生箭头后这条约束自动消失，**不是语义变更**（排序行为本身不变）
+- 箭头：**保持现状的「表头文字后缀」**（`码率(kbps) ▲`），**不用** `QHeaderView.setSortIndicator`
+  - 产品文档 §6 第 16 条明确把「排序箭头是表头文字后缀，会随列宽被重新截断」列为**刻意保留**的行为 → 必须保留
+  - 所以表头文字 = `基础文字 + 箭头`，**再按列宽截断**（与现状 `_refresh_headers` 的顺序一致：先加箭头，再截断）
+  - 实现：`headerData` 返回**已截断**的文字（用 `truncate_text` 的同一套口径）；`QHeaderView` 的 elide 设为 `Qt.ElideNone`，避免 Qt 再截一次
+  - `_header_text_with_arrow` 因此**继续被使用**，排序断言脚本（`2026-10-13-sort-headers`）**一行不改**
 - 排序在**模型内**做（`list.sort` + `beginResetModel`/`endResetModel`），**保存并恢复垂直滚动位置**（现状是原地重绘，滚动位置不变）
 - 扫描过程中结果按插入序追加；**扫描结束后若处于排序态则统一排一次** —— 与现状一致 ✅
 - 排序稳定（Python `list.sort` 稳定）✅
 
 ### 5.5 列宽
 
+**`_col_widths` 归模型**（现状归 `VideoGridView._col_widths`）。理由：截断要用它、表头文字要用它 —— 它是「显示规格」的一部分，和数据放在一起最省事。
+
 - `QHeaderView.setSectionResizeMode(QHeaderView.Interactive)` + 初始 `resizeSection`
 - 序号列：`QHeaderView.Fixed` + `resizeSection(0, 45)`
-- 用户拖动 → `sectionResized(index, old, new)` → 更新 `_col_widths` → **重算受影响的列的截断文本** → `dataChanged(该列的整列范围)`
+- 用户拖动 → `sectionResized(index, old, new)` → 视图调 `model.set_column_width(index, w)` → 模型更新宽度 → **重算该列的表头文字**（加箭头后再截断）→ `headerDataChanged` + `dataChanged(该列的整列范围)`
 - 用一个 `_updating_widths` 标志区分「用户拖的」与「程序设的」，避免回环
-- 最小宽度 20px（`sectionResized` 里 `max(20, new)`）
+- 最小宽度 20px（`set_column_width` 里 `max(20, w)`）
 - 列宽只存内存，不持久化 ✅
 
 **已知差异**：现状最后一列**没有**拖拽手柄（9 个手柄），Qt 每列右侧都有 → 最后一列（结果）也能拖宽。无害，**changelog 记一笔**。
@@ -246,6 +313,9 @@ def data(self, index, role):
 - 表头文字 `T{c+1}: 00-00-07-24`（`time_token_to_string` 不改）
 - 初始状态（未起跑）只有序号 + 标题两列 —— 与现状一致 ✅
 - 起跑时按 N 个时间点重建列 —— 与现状一致 ✅
+- **标题列的着色与主表格不同**（产品文档 §6 第 15 条）：弹窗里**不达标行的标题格整格红字**（不是只红失败的那几列），序号格同样跟着红。主表格是「只红失败列」，弹窗是「标题格整格红」—— 两处刻意不同，别统一
+- **标题格也挂 tooltip**（`Qt.ToolTipRole` 返回完整路径，仅当被截断时）—— 与现状一致 ✅
+- 标题格按 250px 截断（与主表格同一口径）
 
 ### 6.2 缩略图内存
 
@@ -274,6 +344,23 @@ Qt 版：delegate 持有 `QPixmap`（320px）；放大窗口从磁盘 `QImage` �
 - **拖入文件立即开始扫描**（不需要再点「开始检测」）✅
 - 「浏览」只选文件夹（`QFileDialog.getExistingDirectory`）✅
 
+### 7.0 按钮状态机（照搬产品文档 §4.4，别简化）
+
+- **开始检测**：`开始检测` → 点按后变 `检测中`（**仍可点**，点即取消）→ 取消瞬间变 `正在停止...` 且禁用 → 扫描结束恢复 `开始检测`
+- **其余按钮从不禁用**，靠弹窗拒绝（现状如此；重写可保持或改好，但要在 changelog 写明）
+
+### 7.0.1 「清除记录」的完整语义
+
+点了要清：结果列表、表格、达标计数、**迁移地址**、**截图地址**、拖拽留下的文件列表。
+点了**不**清：码率/采样率阈值输入框。
+
+### 7.0.2 拖拽的拒绝规则
+
+- 扫描中拖入 → 拒绝并提示「正在检测中，请等待完成后再添加文件。」
+- 阈值非法 → 对应的错误框（与点「开始检测」同一套校验）
+- 拖入的全是非视频扩展名 → 「没有找到视频文件。」
+- 拖入**目录**不生效（只按扩展名过滤，目录没有扩展名）
+
 ### 7.1 派生路径
 
 `_sync_derived_paths` 逻辑（无条件覆盖 + 迁移地址无条件转反斜杠 + 截图地址仅 win32 转）**原样保留** ✅
@@ -296,7 +383,7 @@ Qt 版：delegate 持有 `QPixmap`（320px）；放大窗口从磁盘 `QImage` �
 |---|---|
 | `datas` | 去掉 `tkinterdnd2`，保留 `ffprobe/` |
 | `hiddenimports` | 去掉 `tkinterdnd2` / `tkdnd` |
-| `excludes` | 加 `PySide6.QtQuick`、`PySide6.QtWebEngine*`、`PySide6.Qt3D*`、`PySide6.QtMultimedia*`、`PySide6.QtCharts`、`PySide6.QtDataVisualization`、`PySide6.QtNetwork`(若不需要) 等，显著减小体积 |
+| `excludes` | 排掉用不到的 Qt 模块以显著减小体积。**排除前逐个确认没用到** —— `QtNetwork` 大概率被 `QtWidgets` 依赖，排掉会构建失败。候选：`PySide6.QtQuick`、`PySide6.QtWebEngine*`、`PySide6.Qt3D*`、`PySide6.QtMultimedia*`、`PySide6.QtCharts`、`PySide6.QtDataVisualization`、`PySide6.QtPdf`、`PySide6.QtQml` |
 | `console` | 保持 `False` |
 | 其余 | 不变（单文件、UPX） |
 
@@ -328,17 +415,34 @@ Qt 版：delegate 持有 `QPixmap`（320px）；放大窗口从磁盘 `QImage` �
 
 ### 10.1 行为不退化（主）
 
-现有 12 个断言脚本**全部仍退出 0**。其中大量断言 Tkinter 内部结构的（`winfo_manager()`、`_widget_pool`、`grid_columnconfigure` minsize、`_cells` 布局、`hsb.master is _middle`）需**改写为用户可见行为的等价断言**：
+现有 12 个断言脚本分两类（按是否触碰 Tkinter 内部结构实测划分）：
 
-| 原断言 | 改写为 |
+**① 一行不改的（7 个）** —— 纯逻辑，与框架无关：
+
+`2026-09-16-bug-audit` / `2026-09-28-container-format` / `2026-10-13-sort-headers` / `2026-10-16-snapshot` / `2026-10-23-sync-derived-paths` / `2026-10-26-lazy-dir-creation` / `2026-10-26-path-override`
+
+> 前提：`video_checker.py` 显式 `from video_core import ...` 把这些名字**重新导出**，脚本的 `from video_checker import X` 不用动。
+> `2026-09-29-dnd-parsing` **删除**（旧格式不存在了），换成新的 Qt URL 解析断言。
+
+**② 必须改写的（4 个）** —— 断言了 Tk 内部结构：
+
+| 脚本 | 触及的 Tk 内部 | 改写为 |
+|---|---|---|
+| `2026-10-14-virtual-scroll` | `_widget_pool` / `winfo_manager()` / `grid_columnconfigure` minsize | model 的 `rowCount` 与表格可见行数；列宽由 `_col_widths` 断言；节流语义改为「重排序在主线程一次完成」 |
+| `2026-10-23-ui-density` | `_cells[i][1].cget('text')` / `_header_labels` | `model.data(index, Qt.DisplayRole)` / `model.headerData(...)`；tooltip 改为断言 `Qt.ToolTipRole` 的返回值 |
+| `2026-10-26-header-alignment` | `grid_bbox` / `winfo_rootx` / `_col_layout` | 表头列 x 与模型列 x 逐列相等（**同一个 view 的表头与正文，天然 Δ=0**） |
+| `2026-10-26-restore-black` | 池 widget 映射数 | **删除**。这条断言的意图是「恢复时不用逐个重绘几百个 HWND」—— Qt 的 `QTableView` 由架构保证（一个 view + 一个 delegate 画可见单元格），没有可测的对应量。**不能改成「断言通过」了事。**changelog 记「恢复露底由架构消除」 |
+
+> `2026-10-23-ui-density` 是**混合**的：截断口径、标题格式、状态栏文案、spec 列格式、10 列集合这些用例是纯逻辑的，**保留**；只有触及 `_cells` / `_header_labels` / widget 结构的用例改写。
+
+**改写的红线**：每条都要能说清「改写后验的是同一个用户可见语义」，**不能顺手把断言改弱**。
+
+### 10.1.1 删除的脚本
+
+| 脚本 | 原因 |
 |---|---|
-| `grid_columnconfigure` 的 minsize | 表头/正文的**列 x 位置逐列相等**（Δ=0） |
-| `_cells[i][1].cget('text')` | `model.data(index, Qt.DisplayRole)` |
-| `winfo_manager()` 判定池 widget 映射 | model 的 `rowCount` + 表格里可见行数 |
-| `hsb.master is _middle` | 横向滚动时表头与正文对齐 |
-| `_widget_pool` 长度 | 表格能显示全部行（虚拟滚动的语义） |
-
-**逐条都要能说清「改写后验的是同一个用户可见语义」**，不能顺手把断言改弱。
+| `2026-09-29-dnd-parsing` | 测的是 `tkinterdnd2` 的 `{f1} {f2}` 私有格式，Qt 侧不存在。换成新的 Qt URL 解析断言（含空格路径） |
+| `2026-10-26-restore-black` | 断言的是 Tk 的池 widget 映射数，Qt 下无对应量（见 §10.1 的红线） |
 
 ### 10.2 黑窗（本次的靶子）
 
@@ -356,13 +460,13 @@ Windows 上：扫 200 个文件 → 最小化 → 从任务栏恢复 → **表�
 
 | 阶段 | 内容 | 可验证产物 |
 |---|---|---|
-| **P1** | 抽 `video_core.py`（纯逻辑逐字搬出）+ 修 `run_ffprobe` 平台守卫 + 阈值 `inf/nan` 校验 | 12 个断言脚本**一行不改**仍全绿（`video_checker.py` 重新导出 core 的名字） |
-| **P2** | 写 `VideoTableModel` + `QTableView`（含着色、排序、列宽、tooltip）+ 新断言脚本 | 表格相关断言全绿；Tk 表格代码删除 |
-| **P3** | 主窗口迁移（布局、状态栏、按钮态、拖拽、派生路径、目录按需创建） | 主窗口相关断言全绿；人工比对界面 |
+| **P1** | 抽 `video_core.py`（15 个逐字搬 + 2 个小改）+ 修 `run_ffprobe` 平台守卫 + 阈值 `inf/nan` 校验。**GUI 一行不动** | **12 个断言脚本一行不改、全部仍全绿**（P1 阶段 GUI 还是 Tk，脚本测的还是 Tk 结构；`video_checker.py` 重新导出 core 的名字） |
+| **P2** | 写 `VideoTableModel` + `QTableView`（含着色、排序、列宽、tooltip）+ 改写表格相关断言 + **删掉自绘 `Tooltip` 类** | 表格相关断言全绿；Tk 表格代码删除 |
+| **P3** | 主窗口迁移（布局、状态栏、按钮态、拖拽、派生路径、目录按需创建）+ **删掉 `_parse_drop_data`** 与它的断言脚本，换成 Qt URL 解析断言 | 主窗口相关断言全绿；人工比对界面 |
 | **P4** | 定点截图弹窗 + 放大窗口 | 截图相关断言全绿 |
 | **P5** | 打包（spec + build.bat）+ Windows 实测（黑屏、exe 体积） | Windows 上人工验收清单全过 |
 
-**P1 是关键**：它不动任何界面行为，却把「不能改的部分」和「要重写的部分」切开，并让现有 12 个断言脚本继续可用 —— 后面每一步都有机器可读的回归保护。
+**P1 是关键**：它不动任何界面行为，却把「不能改的部分」和「要重写的部分」切开 —— **P1 结束时 12 个断言脚本仍然一行不改全绿**，说明这次拆分没有引入任何行为变化。后面每一步都有机器可读的回归保护。
 
 ---
 
@@ -371,7 +475,7 @@ Windows 上：扫 200 个文件 → 最小化 → 从任务栏恢复 → **表�
 | 风险 | 缓解 |
 |---|---|
 | 改写断言脚本时**把断言改弱**（原断言 Tk 内部结构，新断言恰好不覆盖同一语义） | 每条改写都要写清「原语义 → 新断言」对照；改完人工复核 |
-| Qt 的 elide / tooltip / 排序箭头与现状视觉不同 | 已知差异清单（§5.4 §5.5 §5.6），changelog 逐条记 |
+| Qt 的 elide / tooltip 位置与现状视觉不同 | 已知差异清单（§5.3 §5.5 §5.6），changelog 逐条记。**排序箭头不改**（保留文字后缀，§5.4） |
 | PySide6 打包后 exe 体积暴涨 | spec 的 `excludes` 排掉用不到的 Qt 模块；实测体积记进 changelog |
 | 事件顺序/时序变化导致状态栏文案序列变化 | P3 的断言要逐条比对文案序列，不只是最终状态 |
 | 表格「一格一 widget」换成 delegate 后，hover/选中/编辑等交互细节变化 | P2 阶段人工逐项过一遍交互清单 |
