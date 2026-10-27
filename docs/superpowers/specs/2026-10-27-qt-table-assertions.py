@@ -14,6 +14,14 @@ from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import QApplication
 
+# QApplication 必须先于 video_qt 建好: video_qt 的 UI_FONT = QFont() 会拷贝
+# **当前 app 的默认字体**, app 还不存在时字体族留空 → 字宽度量跟真机对不上
+# (cocoa 下 '码率(kbps)' 会从 48px 变成 67px)。断言里的 QFontMetrics(UI_FONT)
+# 必须跟模型里的 QFontMetrics(UI_FONT) 是同一套度量。
+app = QApplication.instance() or QApplication(sys.argv)
+
+from video_qt import UI_FONT
+
 _failures = []
 
 
@@ -130,9 +138,19 @@ def main():
     check("set_column_width 发 headerDataChanged(Horizontal, 4, 4)",
           events == [(Qt.Horizontal, 4, 4)], f"got={events}")
     after_hdr = mw.headerData(4, Qt.Horizontal, Qt.DisplayRole)
-    # 截断到几行取决于字体度量 (CJK 字宽各平台不同), 只断言「被重新截断了」
-    check("变窄后表头被重新截断",
-          after_hdr != before_hdr and after_hdr.endswith('...'),
+    # 截断到几行取决于字体度量 (CJK 字宽各平台不同), 所以不写死确切字符串,
+    # 改成断言「按 truncate_text 的口径被重新截断了」:
+    #   ① 结果以 '...' 结尾
+    #   ② 结果是原文的**前缀** (截断), 不是拼接 (拼接会得到 '码率(kbps)...')
+    #   ③ 结果装得进新预算 (col_width - 10)
+    #   ④ 完整文字在新预算下装不下 → 截断是必须的 (排除「本来就不用截」)
+    fm = QFontMetrics(UI_FONT)
+    budget = 30 - 10          # truncate_text 的口径: col_width - 10
+    check("变窄后表头被重新截断 (新预算下的原文前缀+省略号)",
+          after_hdr.endswith('...')
+          and before_hdr.startswith(after_hdr[:-3])       # 是截断而非拼接
+          and fm.horizontalAdvance(after_hdr) <= budget   # 结果装得进新预算
+          and fm.horizontalAdvance(before_hdr) > budget,  # 完整文字在新预算下装不下 → 截断是必须的
           f"got={after_hdr!r}")
     mw.set_column_width(4, 20)
     hdr20 = mw.headerData(4, Qt.Horizontal, Qt.DisplayRole)
@@ -145,6 +163,29 @@ def main():
           no_raise(lambda: mw.set_column_width(99, 50)) is None
           and 99 not in mw._widths,
           f"got={sorted(mw._widths)}")
+
+    section("列宽变化 → 单元格重截断")
+    mc = VideoTableModel(VIDEO_COLUMNS)
+    mc.append_result(mk('a.mp4'))
+    app.processEvents()
+    fm = QFontMetrics(UI_FONT)
+    cell_budget = 30 - 10      # truncate_text 的口径: col_width - 10
+    cell_before = mc.data(mc.index(0, 4), Qt.DisplayRole)
+    dc_events = []
+    mc.dataChanged.connect(lambda *args: dc_events.append(args))
+    mc.set_column_width(4, 30)
+    cell_after = mc.data(mc.index(0, 4), Qt.DisplayRole)
+    check("变窄后单元格被重新截断 (新预算下的原文前缀+省略号)",
+          cell_after.endswith('...')
+          and cell_before.startswith(cell_after[:-3])     # 是截断而非拼接
+          and fm.horizontalAdvance(cell_after) <= cell_budget  # 结果装得进新预算
+          and fm.horizontalAdvance(cell_before) > cell_budget,  # 完整文字装不下 → 截断是必须的
+          f"got={cell_after!r}")
+    check("set_column_width 发 dataChanged (含 DisplayRole)",
+          len(dc_events) == 1
+          and dc_events[0][0].row() == 0 and dc_events[0][0].column() == 4
+          and Qt.DisplayRole in dc_events[0][2],
+          f"got={dc_events}")
 
     section("序号列 = 排序后的新位置")
     m2 = VideoTableModel(VIDEO_COLUMNS)
