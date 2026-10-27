@@ -10,6 +10,7 @@ docs/superpowers/plans/2026-10-27-pyside6-qtableview.md 的 Task 5
 """
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -22,7 +23,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
-    QDragEnterEvent, QDropEvent, QFontMetrics,
+    QDragEnterEvent, QDropEvent, QFont, QFontMetrics,
 )
 from PySide6.QtWidgets import QApplication, QHeaderView  # noqa: E402
 
@@ -132,6 +133,28 @@ def _run() -> int:
           f"app={app.font()!r}")
     check("app 的字号是 9pt", app.font().pointSize() == 9,
           f"got={app.font().pointSize()}")
+    # MainWindow 自己也要 apply —— 直接 MainWindow() (断言脚本、将来的嵌入
+    # 用法) 拿到的必须是同一套字体, 否则模型按 9pt 量宽、视图按 app 默认
+    # 字体渲染, 预截断好的文字会溢出列宽 (清单 #2)。
+    app.setFont(QFont('Courier', 14))          # 明显不是 ui_font()
+    check("前置: app 字体被换成别的", app.font() != ui_font(),
+          f"got={app.font()!r}")
+    win_font = MainWindow()
+    check("MainWindow 自己就把 app 字体设回 ui_font() (不用先调 main())",
+          app.font() == ui_font(), f"got={app.font()!r}")
+
+    # app 之前取字体 → 明确报错, 不是 abort (退出码 134) 也不是悄悄绑一个
+    # 用不了的字体。用子进程验 —— 本进程里 app 已经在了。
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
+    proc = subprocess.run(
+        [sys.executable, '-c',
+         'import video_qt; video_qt.ui_font()'],
+        capture_output=True, text=True, cwd=repo_root)
+    check("app 之前取字体 → 明确报错 (不是 abort / 退出码 134)",
+          proc.returncode not in (134, -6)
+          and 'QApplication' in (proc.stdout + proc.stderr),
+          f"rc={proc.returncode} out={proc.stdout[-120:]!r} "
+          f"err={proc.stderr[-120:]!r}")
 
     # ================================================================
     section("状态栏文案序列")
@@ -344,14 +367,17 @@ def _run() -> int:
         win6._show_move_result = lambda text: results.append(text)
         mov_src = tempfile.mkdtemp(prefix='vdcheck_qt_mov_')
         paths = []
-        for name in ('a.mp4', 'b.mp4', 'c.mp4'):
+        for name in ('a.mp4', 'b.mp4', 'c.mp4', 'd.mp4'):
             p = os.path.join(mov_src, name)
             open(p, 'w').close()
             paths.append(p)
-        # 故意乱序插入 —— 证明移动按**插入序**而不是排序后的显示序
+        # 故意乱序插入 —— 证明移动按**插入序**而不是排序后的显示序。
+        # d.mp4 故意**不达标**: 「移动全部文件」要连不达标的文件一起搬,
+        # 没有这个 fixture 的话两个按钮在断言里区分不出来。
         win6._add_result(make_info('c.mp4', paths[2], bitrate=1000.0))
         win6._add_result(make_info('a.mp4', paths[0], bitrate=50000.0))
         win6._add_result(make_info('b.mp4', paths[1], bitrate=20000.0))
+        win6._add_result(make_info('d.mp4', paths[3], passing=False))
         dest_parent = tempfile.mkdtemp(prefix='vdcheck_qt_dest_')
         dest = checked_dest_for(dest_parent)
         win6.dest_edit.setText(dest)
@@ -370,22 +396,31 @@ def _run() -> int:
             win6._move_passing_files()
         finally:
             video_qt.shutil.move = real_move
-        check("确认框文案逐字照搬",
+        check("确认框文案逐字照搬 (只算达标的 3 个)",
               confirms == [f"确定要将 3 个达标文件移动到:\n{dest}\n？"],
               f"got={confirms!r}")
         check("移动顺序 = **插入序** (不是排序后的显示序)",
               moved_order == [paths[2], paths[0], paths[1]],
               f"got={moved_order!r}")
+        check("不达标的文件没被「移动达标文件」带走",
+              paths[3] not in moved_order, f"got={moved_order!r}")
         check("结果框文案「成功移动 3 个文件。」",
               results == ['成功移动 3 个文件。'], f"got={results!r}")
 
-        # ---- 「移动全部文件」的确认框文案不同 ----
+        # ---- 「移动全部文件」: 连不达标的文件一起搬 ----
         confirms.clear()
         results.clear()
-        win6._move_all_files()
-        check("移动全部的确认框文案",
-              confirms == [f"确定要将 3 个文件移动到:\n{dest}\n？"],
+        moved_order.clear()
+        video_qt.shutil.move = lambda s, d: moved_order.append(s)
+        try:
+            win6._move_all_files()
+        finally:
+            video_qt.shutil.move = real_move
+        check("移动全部的确认框文案 (4 个, 含不达标的)",
+              confirms == [f"确定要将 4 个文件移动到:\n{dest}\n？"],
               f"got={confirms!r}")
+        check("移动全部把**不达标的**文件也带走了",
+              paths[3] in moved_order, f"got={moved_order!r}")
 
         # ---- 没有达标文件 / 没有文件 ----
         win6.video_results.clear()
@@ -490,6 +525,85 @@ def _run() -> int:
           infos8 == ['采样率标准必须为正数。'], f"got={infos8!r}")
     win8.sample_rate_edit.setText('48')
 
+    # ---- 含空格的路径不被切错 ----
+    # 旧的 tkinterdnd2 私有格式 (DND_FILES) 是空格分隔的一串路径,
+    # 含空格的路径会被切错 (产品文档 §6 #35 明说旧实现处理不了)。
+    # Qt 走 mimeData().urls() —— 每个 URL 是一个完整路径, 天然正确。
+    section("拖拽: 含空格的路径不被切错")
+    win8b = MainWindow()
+    spaced_dir = tempfile.mkdtemp(prefix='vdcheck_qt spaced dir ')
+    spaced_file = os.path.join(spaced_dir, 'a b c.mp4')
+    open(spaced_file, 'w').close()
+    md2 = QMimeData()
+    md2.setUrls([QUrl.fromLocalFile(spaced_file)])
+    # 真拖放是 DragEnter → DragMove* → Drop; 只发 Drop 的话 Qt 不会派发
+    # (实测: 单发一个 QDropEvent 收不到, 前面补一个 DragEnter 才行)。
+    enter2 = QDragEnterEvent(QPointF(10, 10), Qt.CopyAction, md2,
+                              Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(win8b.view.viewport(), enter2)
+    drop2 = QDropEvent(QPointF(10, 10), Qt.CopyAction, md2,
+                        Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(win8b.view.viewport(), drop2)
+    ok = wait_scan(win8b)
+    check("含空格的路径扫完了", ok)
+    check("含空格的路径**完整保留** (没被切成两半)",
+          win8b._selected_files == [spaced_file],
+          f"got={win8b._selected_files!r} want={[spaced_file]!r}")
+    check("含空格的路径扫出了 1 个结果",
+          len(win8b.video_results) == 1,
+          f"got={len(win8b.video_results)}")
+    check("标题列用的是完整文件名",
+          win8b.model.data(win8b.model.index(0, 1), Qt.DisplayRole)
+          == './a b c',
+          f"got={win8b.model.data(win8b.model.index(0, 1), Qt.DisplayRole)!r}")
+
+    # ================================================================
+    section("截图目录: 「开始截图」才建 (按钮 → ensure_snapshot_dir 的口子)")
+    winS = MainWindow()
+    snap_parent = tempfile.mkdtemp(prefix='vdcheck_qt_snap_')
+    winS._sync_derived_paths(snap_parent)
+    snap_dir = winS.snapshot_dest
+    check("派生路径阶段截图目录还不存在",
+          not os.path.isdir(snap_dir), f"path={snap_dir!r}")
+    # 「定点截图」按钮自己**不建**目录 —— 建目录是弹窗里「开始截图」那一步
+    winS._show_info = lambda text: None
+    winS.open_snapshot_dialog = lambda: None      # Task 6 之前没有弹窗
+    winS._on_snapshot_btn_click()
+    check("点「定点截图」不建目录 (归弹窗里的「开始截图」建)",
+          not os.path.isdir(snap_dir), f"path={snap_dir!r}")
+    winS.ensure_snapshot_dir()
+    check("ensure_snapshot_dir() 建目录",
+          os.path.isdir(snap_dir), f"path={snap_dir!r}")
+    # 规矩: 建目录只有两个口子 —— 截图归 ensure_snapshot_dir, 迁移归
+    # _move_files。Task 6 的弹窗**必须**走 ensure_snapshot_dir, 自己
+    # os.makedirs 就破坏了「扫描/浏览阶段绝不建目录」。
+    import inspect
+    mw_makedirs = sorted(
+        name for name, obj in vars(MainWindow).items()
+        if inspect.isfunction(obj) and 'os.makedirs(' in inspect.getsource(obj))
+    check("规矩: 只有 ensure_snapshot_dir 与 _move_files 会建目录 "
+          "(Task 6 的弹窗必须走 ensure_snapshot_dir)",
+          mw_makedirs == ['_move_files', 'ensure_snapshot_dir'],
+          f"got={mw_makedirs}")
+
+    # ================================================================
+    section("不着色的格用调色板默认色 (不是写死黑色)")
+    winC = MainWindow()
+    winC._add_result(make_info('bad.mp4', '/x/bad.mp4', passing=False,
+                               bitrate=1000.0))
+    app.processEvents()
+
+    def fg_at(row, col):
+        brush = winC.model.data(winC.model.index(row, col), Qt.ForegroundRole)
+        return brush.color().name() if brush else None
+
+    check("不达标行的失败列是红色",
+          fg_at(0, 1) == '#dc143c', f"got={fg_at(0, 1)}")
+    check("不达标行的**非失败列返回 None** (Qt 用调色板默认色)",
+          fg_at(0, 2) is None, f"got={fg_at(0, 2)}")
+    check("序号列仍然是黑色 (规格 §3.3: 永不染色)",
+          fg_at(0, 0) == '#000000', f"got={fg_at(0, 0)}")
+
     # ================================================================
     section("列宽两个方向的接线")
     win9 = MainWindow()
@@ -503,10 +617,16 @@ def _run() -> int:
     app.processEvents()
     check("view → model: 用户拖宽第 4 列后模型跟着变",
           win9.model._widths[4] == 300, f"got={win9.model._widths[4]}")
-    check("view → model: 表头按新宽度重新截断",
-          win9.model.headerData(4, Qt.Horizontal, Qt.DisplayRole)
-          == '码率(kbps)',
-          f"got={win9.model.headerData(4, Qt.Horizontal, Qt.DisplayRole)!r}")
+    # 窄列才看得出「按新宽度重新截断」—— 85px 时 '码率(kbps)' 装得下,
+    # 断言恒过, 等于没断言。
+    win9.view.setColumnWidth(4, 40)
+    app.processEvents()
+    hdr40 = win9.model.headerData(4, Qt.Horizontal, Qt.DisplayRole)
+    check("view → model: 窄列 → 模型宽度跟着变",
+          win9.model._widths[4] == 40, f"got={win9.model._widths[4]}")
+    check("view → model: 窄列 → 表头按新宽度重新截断 (原文前缀 + 省略号)",
+          hdr40.endswith('...') and '码率(kbps)'.startswith(hdr40[:-3]),
+          f"got={hdr40!r}")
 
     # ================================================================
     section("Qt 特有的行为对齐清单 (8 条)")

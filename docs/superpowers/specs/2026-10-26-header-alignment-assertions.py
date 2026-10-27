@@ -115,7 +115,7 @@ def build(columns):
 
 
 def main() -> int:
-    from video_qt import VIDEO_COLUMNS, UI_FONT
+    from video_qt import VIDEO_COLUMNS, ui_font
 
     model, view, hdr, state = build(VIDEO_COLUMNS)
     for i in range(60):
@@ -146,7 +146,7 @@ def main() -> int:
     check("表头没有被裁切 (高度 = sizeHint)",
           hdr.height() == hdr.sizeHint().height(),
           f"h={hdr.height()} sizeHint={hdr.sizeHint().height()}")
-    fm = QFontMetrics(UI_FONT)
+    fm = QFontMetrics(ui_font())
     for i, col in enumerate(VIDEO_COLUMNS):
         txt = model.headerData(i, Qt.Horizontal, Qt.DisplayRole)
         check(f"表头「{col.header}」装得进列宽 (没被切掉)",

@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import QApplication, QTableView, QWidget
 
-# QApplication 必须先于 video_qt 建好: video_qt 的 UI_FONT = QFont() 会拷贝
+# QApplication 必须先于 video_qt 建好: video_qt 的 ui_font() 会拷贝
 # **当前 app 的默认字体**, app 还不存在时字体族留空 → 字宽度量跟真机对不上。
 app = QApplication.instance() or QApplication(sys.argv)
 

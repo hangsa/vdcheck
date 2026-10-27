@@ -126,9 +126,11 @@ def main() -> int:
           f"path={snap_expect(picked)!r}")
 
     # ================= 3. 真要用截图目录时才建 =================
-    section("真要用截图目录时才建 snapshot 目录")
-    # 截图弹窗 (Task 6) 里点「开始截图」走的就是 ensure_snapshot_dir ——
-    # 主窗口这一侧先把「按需创建」这一步落下来, 断言也落在这里。
+    section("ensure_snapshot_dir() 才建 snapshot 目录")
+    # 这一节验的是**建目录的那个口子** (ensure_snapshot_dir), 不是
+    # 「点『开始截图』按钮」—— 那个按钮在定点截图弹窗里, 是 Task 6 的
+    # 活儿。按钮 → 这个口子的接线由 Task 6 验 (qt-main 里那条
+    # 「截图目录只由 ensure_snapshot_dir() 建」是给它立的规矩)。
     snap_dir = snap_expect(picked)
     app.snapshot_dest = snap_dir
     check("建之前目录不存在",

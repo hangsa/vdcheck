@@ -14,13 +14,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QApplication
 
-# QApplication 必须先于 video_qt 建好: video_qt 的 UI_FONT = QFont() 会拷贝
+# QApplication 必须先于 video_qt 建好: video_qt 的 ui_font() 会拷贝
 # **当前 app 的默认字体**, app 还不存在时字体族留空 → 字宽度量跟真机对不上
-# (cocoa 下 '码率(kbps)' 会从 48px 变成 67px)。断言里的 QFontMetrics(UI_FONT)
-# 必须跟模型里的 QFontMetrics(UI_FONT) 是同一套度量。
+# (cocoa 下 '码率(kbps)' 会从 48px 变成 67px)。断言里量宽度用的
+# QFontMetrics(ui_font()) 必须跟模型里的 QFontMetrics(ui_font()) 是同一套度量。
+#
+# 注意: 用 ui_font() 而不是 `from video_qt import UI_FONT` —— 后者是**快照**
+# 语义 (import 那一刻求值一次, 之后 app 建好了也不刷新)。
 app = QApplication.instance() or QApplication(sys.argv)
 
-from video_qt import UI_FONT
+from video_qt import ui_font
 
 _failures = []
 
@@ -312,7 +315,7 @@ def main():
     #   ② 结果是原文的**前缀** (截断), 不是拼接 (拼接会得到 '码率(kbps)...')
     #   ③ 结果装得进新预算 (col_width - 10)
     #   ④ 完整文字在新预算下装不下 → 截断是必须的 (排除「本来就不用截」)
-    fm = QFontMetrics(UI_FONT)
+    fm = QFontMetrics(ui_font())
     budget = 30 - 10          # truncate_text 的口径: col_width - 10
     check("变窄后表头被重新截断 (新预算下的原文前缀+省略号)",
           after_hdr.endswith('...')
@@ -336,7 +339,7 @@ def main():
     mc = VideoTableModel(VIDEO_COLUMNS)
     mc.append_result(mk('a.mp4'))
     app.processEvents()
-    fm = QFontMetrics(UI_FONT)
+    fm = QFontMetrics(ui_font())
     cell_budget = 30 - 10      # truncate_text 的口径: col_width - 10
     cell_before = mc.data(mc.index(0, 4), Qt.DisplayRole)
     dc_events = []

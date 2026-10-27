@@ -32,7 +32,8 @@ from video_core import (
 )
 
 # 阈值默认值。这两个常量现在住在 video_checker.py (Tk 版); Qt 层自带一份,
-# 免得反过来依赖 Tk 入口 —— Task 7 删 Tk 时并回 video_core.py。
+# 免得反过来依赖 Tk 入口 —— **Task 7 删 Tk 时并回 video_core.py**
+# (否则同一个字面量会有两份, 改一处忘一处)。
 DEFAULT_BITRATE_KBPS = 30000
 DEFAULT_SAMPLE_RATE_KHZ = 48
 
@@ -49,16 +50,23 @@ def ui_font() -> QFont:
         accessing QFontDatabase
 
     所以这里是**惰性**的 —— 第一次有人要用字体时才建, 而不是 import 时。
-    没人建过 app 时建出来的字体族是空的, 那种字体**不缓存**: 一旦缓存下来,
-    后面 app 建好了也拿不到正确的度量了。
+
+    app 还不存在时**明确报错**, 而不是给一个用不了的字体:
+    QFontMetrics 没有 QGuiApplication 就 abort (实测退出码 134), 换任何
+    字体族都一样 (三种构造方式全 134) —— 与其让人在别处撞上那个 abort,
+    不如在这里说清楚。
     """
     global _ui_font
     if _ui_font is None:
+        if QApplication.instance() is None:
+            raise RuntimeError(
+                'ui_font() 必须在 QApplication 建好之后调用: '
+                'QFontMetrics 没有 QGuiApplication 会直接 abort 进程 '
+                '(退出码 134), 字体族是不是空的不影响这件事')
         font = QFont('Segoe UI', 9) if sys.platform == 'win32' else QFont()
         if sys.platform != 'win32':
             font.setPointSize(9)
-        if font.family():          # app 还没建 → 字体族是空的, 别缓存
-            _ui_font = font
+        _ui_font = font
         return font
     return _ui_font
 
@@ -66,8 +74,12 @@ def ui_font() -> QFont:
 def __getattr__(name: str):
     """模块级惰性属性 (PEP 562)。
 
-    只为 UI_FONT 一个名字存在: `from video_qt import UI_FONT` 取到的是
+    只为 UI_FONT 一个名字存在: `video_qt.UI_FONT` **属性访问**每次都拿到
     **当前 app 的**字体, 而不是 import 时刻那个字体族为空的空壳。
+
+    注意: `from video_qt import UI_FONT` 走的是**快照**语义 —— 绑定那一刻
+    求值一次, 之后 app 建好了也不会刷新。代码里**一律用 ui_font()**,
+    不要用 from-import 拿 UI_FONT。
     """
     if name == 'UI_FONT':
         return ui_font()
@@ -159,7 +171,13 @@ class VideoTableModel(QAbstractTableModel):
         if role == Qt.ForegroundRole:
             if col.key is None:                    # 序号列永远黑色
                 return QBrush(QColor('#000000'))
-            return QBrush(QColor(_cell_fg(info, col.key) or '#000000'))
+            fg = _cell_fg(info, col.key)
+            if fg is None:
+                # 该格**不着色** → 返回 None 让 Qt 用调色板默认色。
+                # 写死黑色的话深色主题下就是黑字黑底 (规格 §3.3 写的是
+                # 「其余保持默认色」)。
+                return None
+            return QBrush(QColor(fg))
         if role == Qt.TextAlignmentRole:
             return _ALIGN_FLAGS.get(col.align, int(Qt.AlignCenter))
         if role == Qt.ToolTipRole:
@@ -345,6 +363,11 @@ class ScanStats:
         self.total_files = 0
 
 
+# 关窗口时没等完的扫描线程。绝不能析构一个还在跑的 QThread (会 abort),
+# 所以摘出 parent 关系存在这里, 由 main() 在退出前等它自然结束。
+_ORPHANED_THREADS: list[QThread] = []
+
+
 class ScanWorker(QObject):
     """扫描工作线程的主体。
 
@@ -427,6 +450,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('视频检测v3.3')
         self.resize(1280, 700)
         self.setMinimumSize(1000, 500)
+
+        # 全 app 统一 9pt —— **在窗口这一层就 apply**, 不只 main() 里做:
+        # 任何人直接 `MainWindow()` (断言脚本、将来的嵌入用法) 拿到的都
+        # 必须是同一套字体, 否则模型按 9pt 量宽、视图按 app 默认字体渲染,
+        # 预截断好的文字会溢出列宽 (清单 #2)。
+        app = QApplication.instance()
+        if app is not None:
+            apply_app_font(app)
+            # app 退出 (app.quit()) 时也要把扫描线程停掉 —— 不然 QThread
+            # 会在运行中被析构, 进程直接 abort。
+            app.aboutToQuit.connect(self._stop_scan)
 
         # ---- 数据 ----
         # video_results 是**插入序**的那份 —— 「移动文件」按它走,
@@ -835,10 +869,20 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_thread_finished(self) -> None:
-        """扫描线程收尾 (可能是上一轮的线程, 别把新线程的引用也清掉)。"""
-        if self.sender() is self._thread:
+        """扫描线程收尾。
+
+        QThread 是窗口的 child —— 光把 Python 引用置 None 不会回收 C++ 侧
+        那个对象 (扫 1000 次就攒 1000 个 QThread), 所以显式 deleteLater。
+
+        可能是上一轮的线程 (用户又点了一次「开始检测」), 所以只清**当前**
+        那一轮的引用, 别把新线程的引用也清掉。
+        """
+        thread = self.sender()
+        if thread is self._thread:
             self._thread = None
             self._worker = None
+        if thread is not None:
+            thread.deleteLater()
 
     def _on_header_clicked(self, section: int) -> None:
         """表头点击 → 三态循环 → 就地排序。
@@ -890,8 +934,13 @@ class MainWindow(QMainWindow):
     def open_snapshot_dialog(self) -> None:
         """打开定点截图弹窗 (Task 6 实现)。
 
-        截图目录**按需创建** —— 弹窗里点「开始截图」时才建 (见
-        ensure_snapshot_dir), 打开弹窗这一步绝不建。
+        截图目录**按需创建** —— 弹窗里点「开始截图」时才建。
+
+        TODO(Task 6): 弹窗的「开始截图」按钮**必须**调
+        `self.ensure_snapshot_dir()` 建目录 (不能自己 os.makedirs) ——
+        「扫描/浏览阶段绝不建目录」这条规矩由那个口子兜着,
+        qt-main 里「截图目录只由 ensure_snapshot_dir() 建」那条断言就是
+        给 Task 6 立的规矩 (Task 6 要是绕过这个口子, 那条断言会红)。
         """
 
     # ---- 移动文件 ----
@@ -984,9 +1033,13 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event) -> bool:
         """表格区 (表头 + 正文) 的拖放转给主窗口处理。
 
-        Qt 的拖放事件只发给鼠标下面那个 widget, 不会自动往上冒到
-        QMainWindow —— 产品文档 §3.6 要求**整个表格区**都能接住,
-        所以 viewport 与表头各装一个事件过滤器。
+        其实**不装这个过滤器也接得住** —— Qt 的拖放事件会沿 parent 链上溯,
+        表格区里没接住的话会一路冒到 QMainWindow (它 setAcceptDrops(True))。
+        装上它是为了: ① 不依赖 Qt 的上溯细节; ② 拖放落在表格上时**一定**
+        走本窗口的处理, 不会先被 QTableView 自己截胡 (QTableView 默认
+        DragDrop 模式, 虽然没有模型能吃下 mimeData, 但流程上多一层变数)。
+
+        产品文档 §3.6: 接收区域是**整个表格区** (含表头与正文)。
         """
         etype = event.type()
         if etype == QEvent.DragEnter:
@@ -1043,20 +1096,46 @@ class MainWindow(QMainWindow):
     # ---- 收尾 ----
 
     def closeEvent(self, event) -> None:
-        """关窗口前把扫描线程停掉 (否则 QThread 会被析构在运行中)。
+        """关窗口前把扫描线程停掉。"""
+        self._stop_scan()
+        super().closeEvent(event)
 
-        cancel 标志会让 worker 在**当前文件**跑完后退出循环; ffprobe 自己
-        有 30s 超时, 所以最坏情况就是等它这一趟。真等不出来 (5s 还活着)
-        就 terminate 掉 —— 宁可窗口关得慢一点, 也别让进程 abort。
+    def _stop_scan(self, timeout_ms: int = 5000) -> None:
+        """停掉扫描线程 (取消 + 等它结束)。
+
+        **不用 QThread.terminate()** —— 目标平台是 Windows, terminate 一个
+        持有 GIL 的 Python 线程会把**整个进程**挂死 (ffprobe 子进程还会
+        变成孤儿)。取消标志让 worker 在**当前文件**跑完后退出循环;
+        ffprobe 自带 30s 超时, 等它自然结束是安全的。
+
+        等不出来 (比如 ffprobe 卡在网络盘上) 就不等了, 但**绝不能**析构一个
+        还在跑的 QThread (那会 abort) —— 把它从窗口的 child 关系里摘出来,
+        由 main() 在退出前等它收尾。
         """
         self._cancel.set()
         thread = self._thread
-        if thread is not None:
-            thread.quit()
-            if not thread.wait(5000):
-                thread.terminate()
-                thread.wait()
-        super().closeEvent(event)
+        if thread is None:
+            return
+        thread.quit()
+        if not thread.wait(timeout_ms):
+            thread.setParent(None)
+            _ORPHANED_THREADS.append(thread)
+
+    def __del__(self) -> None:
+        """窗口被回收时把扫描线程停掉。
+
+        QThread 是窗口的 child —— 窗口先没了、线程还在跑的话, 线程会被
+        连带析构, 进程直接 abort (QThread: Destroyed while thread is still
+        running)。解释器退出时窗口就是被回收的, 所以这条兜底必须有。
+        """
+        try:
+            self._stop_scan(timeout_ms=2000)
+        except Exception:
+            pass
+
+
+# 关窗口时没等完的扫描线程。绝不能析构一个还在跑的 QThread (会 abort),
+# 所以摘出 parent 关系存在这里, 由 main() 在退出前等它自然结束。
 
 
 def main() -> None:
@@ -1069,4 +1148,9 @@ def main() -> None:
     window = MainWindow()
     window.show()
     app.exec()
+    # 收尾: 关窗口时没等完的扫描线程, 在这儿等它自然结束 ——
+    # 带着一个还在跑的 QThread 退出进程会 abort。ffprobe 的超时是 30s,
+    # 留 5s 余量。
+    for thread in _ORPHANED_THREADS:
+        thread.wait(35000)
 
