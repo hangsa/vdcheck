@@ -22,7 +22,15 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 
-from video_checker import VideoInfo  # noqa: E402
+# Qt 版主窗口要 QApplication 才能建 (QFontMetrics 没有 QGuiApplication 会
+# 直接 abort 进程), 所以先建 app 再 import video_qt。没有显示环境时用
+# offscreen 平台。
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+_app = QApplication.instance() or QApplication(sys.argv)
+
+from video_qt import MainWindow  # noqa: E402
 
 
 _failures: list[str] = []
@@ -40,52 +48,24 @@ def section(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
-def make_info(title='a.mp4') -> VideoInfo:
-    return VideoInfo(
-        rel_path='./', title=title, resolution='1920x1080', frame_rate='25.00',
-        bitrate_kbps=32000.0, video_codec='h264', audio_codec='aac',
-        audio_channels='2', audio_sample_rate='48.0', duration='00:01:00',
-        file_size='1.0 GB', is_passing=True, sample_rate_passing=True,
-        bitrate_std=30000.0, sample_rate_std=48.0,
-        full_path=f'/x/{title}', container_format='mp4',
-    )
-
-
-class FakeDropEvent:
-    def __init__(self, data: str):
-        self.data = data
-
-
 def stub_scan(app, calls):
-    """把两个 worker 换成记录器, 免得真起线程调 ffprobe。"""
-    app._scan_worker = lambda d, r, b, s: calls.append(('dir', d))
-    app._scan_files_worker = lambda f, b, s: calls.append(('files', tuple(f)))
-    app._check_queue = lambda: None
+    """把真正开扫描的那一步换成记录器, 免得真起线程调 ffprobe。"""
+    app._begin_scan = (lambda kind, payload, bitrate_std, sample_rate_std:
+                       calls.append((kind, payload)))
 
 
 def drop(app, files):
-    """模拟拖拽。stub 的 worker 不会发 done, scanning 会一直 True,
-    下一次拖拽/检测会弹模态框卡住 —— 这里先复位。"""
-    app.scanning = False
-    app._on_file_drop(FakeDropEvent(' '.join(files)))
+    """模拟拖拽。stub 掉的 _begin_scan 不会真去扫。"""
+    app._on_file_drop(files)
 
 
 def scan(app):
-    """模拟点「开始检测」。同样先复位 scanning。"""
-    app.scanning = False
+    """模拟点「开始检测」。"""
     app._start_scan()
-    app.scanning = False
 
 
 def main() -> int:
-    from tkinterdnd2 import TkinterDnD
-    from video_checker import VideoCheckerApp
-    # 必须用 TkinterDnD.Tk(): VideoGridView.bind_drop 会调 drop_target_register,
-    # 普通 tk.Tk() 上会 AttributeError。
-    root = TkinterDnD.Tk()
-    root.geometry('1280x700')
-    app = VideoCheckerApp(root)
-    root.update_idletasks()
+    app = MainWindow()
 
     calls: list = []
     stub_scan(app, calls)
@@ -94,36 +74,32 @@ def main() -> int:
     other_dir = tempfile.mkdtemp(prefix='vdcheck_other_')
     drop_files = [os.path.join(drop_dir, 'a.mp4'),
                   os.path.join(drop_dir, 'b.mp4')]
+    for f in drop_files:
+        open(f, 'w').close()
 
     section("拖拽加载文件")
     drop(app, drop_files)
-    root.update_idletasks()
     check("_selected_files 记下了拖入的文件",
           app._selected_files == drop_files, f"got={app._selected_files!r}")
-    check("path_var 填成了拖入文件的所在目录",
-          app.path_var.get().strip().replace('\\', '/') == drop_dir,
-          f"got={app.path_var.get()!r}")
+    check("路径框填成了拖入文件的所在目录",
+          app.path_edit.text().strip().replace('\\', '/') == drop_dir,
+          f"got={app.path_edit.text()!r}")
 
     section("手动改路径后立即生效 (不用先清除记录)")
-    app.path_var.set(other_dir)          # 模拟用户手动输入
-    root.update_idletasks()
+    app.path_edit.setText(other_dir)          # 模拟用户手动输入
     check("改路径后 _selected_files 被丢弃",
           app._selected_files is None, f"got={app._selected_files!r}")
 
     calls.clear()
-    app.path_var.set(other_dir)
+    app.path_edit.setText(other_dir)
     scan(app)
-    root.update_idletasks()
     check("开始检测扫的是新路径 (整个目录)",
           calls == [('dir', other_dir)], f"got={calls!r}")
 
     section("拖拽后不碰路径框 → 仍然扫拖入的那批文件")
     drop(app, drop_files)
-    root.update_idletasks()
     check("拖拽后 _selected_files 又有了",
           app._selected_files == drop_files, f"got={app._selected_files!r}")
-    # 这里用 _scan_target 而不是 _start_scan: 拖拽把路径框填成反斜杠形式,
-    # macOS 上 os.path.isdir 不认那个路径 → _start_scan 会弹模态框卡住。
     kind, payload = app._scan_target(other_dir)
     check("扫描目标仍是拖入的文件列表",
           kind == 'files' and tuple(payload) == tuple(drop_files),
@@ -131,11 +107,9 @@ def main() -> int:
 
     section("浏览选文件夹仍然清空 (不能回归)")
     drop(app, drop_files)
-    root.update_idletasks()
     check("先拖拽建立了文件列表模式",
           app._selected_files is not None)
     app._selected_files = None            # 浏览路径的既有行为
-    root.update_idletasks()
     check("浏览后 _selected_files 为空", app._selected_files is None)
     check("浏览后扫描目标是整个目录",
           app._scan_target(other_dir) == ('dir', other_dir),
@@ -143,14 +117,12 @@ def main() -> int:
 
     section("拖拽进来的文件本身仍按文件扫 (不受影响)")
     drop(app, drop_files)
-    root.update_idletasks()
     calls.clear()
     kind, payload = app._scan_target(other_dir)
     check("扫描目标仍是拖入的文件",
           kind == 'files' and tuple(payload) == tuple(drop_files),
           f"kind={kind!r} payload={payload!r}")
 
-    root.destroy()
     print()
     if _failures:
         print(f"✗ {len(_failures)} 条断言失败")

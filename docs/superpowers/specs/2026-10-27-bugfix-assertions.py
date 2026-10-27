@@ -17,6 +17,14 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 
+# Qt 版主窗口要 QApplication 才能建 (QFontMetrics 没有 QGuiApplication 会
+# 直接 abort 进程), 所以先建 app 再 import video_qt。没有显示环境时用
+# offscreen 平台。
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+_app = QApplication.instance() or QApplication(sys.argv)
+
 _failures: list[str] = []
 
 
@@ -79,33 +87,32 @@ def main():
               f"抛了 {type(e).__name__}: {e}")
 
     section("目录里没有视频文件时状态栏文案")
-    import video_checker
-    from video_checker import VideoCheckerApp
-    from tkinterdnd2 import TkinterDnD
-    root = TkinterDnD.Tk()
-    root.withdraw()
-    app = VideoCheckerApp(root)
-    root.update_idletasks()
+    # 原断言 (Tk 版): 建一个 VideoCheckerApp, total_files 清零, 调
+    # _scan_complete, 看状态栏是不是「未找到视频文件」。
+    # Qt 版对应: video_qt.MainWindow (状态栏是 QStatusBar, 文案走
+    # currentMessage())。
+    from video_qt import MainWindow
+    app = MainWindow()
     app.total_files = 0
     app._scan_complete()
-    root.update_idletasks()
+    _app.processEvents()
     check("显示「未找到视频文件」",
-          app.status_var.get() == '未找到视频文件',
-          f"got={app.status_var.get()!r}")
+          app.status_bar.currentMessage() == '未找到视频文件',
+          f"got={app.status_bar.currentMessage()!r}")
 
     section("app 的阈值入口拒绝 inf / nan (真调 app, 文案不变)")
     # 光测纯函数不够 —— 还得证明 app 真的走了这个入口, 且弹的是原来那句文案。
     tmp_dir = tempfile.mkdtemp()
     stub = _MsgStub()
-    orig_msgbox = video_checker.messagebox
-    video_checker.messagebox = stub
+    # 弹窗是模态的, 会把脚本卡住 —— 换成记录器。
+    app._show_error = lambda text: stub.showerror('错误', text)
     try:
-        app.path_var.set(tmp_dir)   # 先给个有效目录, 否则先撞路径校验
+        app.path_edit.setText(tmp_dir)   # 先给个有效目录, 否则先撞路径校验
         # 哨兵: 阈值过了之后 _start_scan 会把 total_files 清零并起扫描线程,
         # 所以「没被清零」= 校验没过就 return 了 (比看 scanning 标志可靠:
         # 空目录的扫描瞬间就结束, scanning 会被 _scan_complete 改回 False)。
         app.total_files = 123
-        app.bitrate_var.set('inf')
+        app.bitrate_edit.setText('inf')
         app._start_scan()
         check("inf 被 app 拒绝, 文案不变",
               stub.errors == [("错误", "码率标准必须为正数。")],
@@ -114,8 +121,8 @@ def main():
               f"got={app.total_files!r}")
         stub.errors.clear()
         app.total_files = 123
-        app.bitrate_var.set('30000')
-        app.sample_rate_var.set('nan')
+        app.bitrate_edit.setText('30000')
+        app.sample_rate_edit.setText('nan')
         app._start_scan()
         check("nan 被 app 拒绝, 文案不变",
               stub.errors == [("错误", "采样率标准必须为正数。")],
@@ -123,10 +130,7 @@ def main():
         check("nan 时没继续往下走", app.total_files == 123,
               f"got={app.total_files!r}")
     finally:
-        video_checker.messagebox = orig_msgbox
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    root.destroy()
 
     # 原先这里还有一节「类属性与 core 常量同源 (不能各抄一份字面量)」——
     # 断言 VideoGridView.FG_PASS / FG_FAIL 就是 core 的那两个常量。

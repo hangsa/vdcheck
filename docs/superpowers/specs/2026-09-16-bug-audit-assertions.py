@@ -15,16 +15,26 @@ from contextlib import contextmanager
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 
-from video_checker import (
-    scan_video_files,
-    parse_video_info,
-    _cell_fg,
+# Qt 版主窗口要 QApplication 才能建 (QFontMetrics 没有 QGuiApplication 会
+# 直接 abort 进程), 所以先建 app 再 import video_qt。没有显示环境时用
+# offscreen 平台。
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+_app = QApplication.instance() or QApplication(sys.argv)
+
+from video_checker import (  # noqa: E402
+    FG_FAIL,
+    FG_PASS,
     VideoInfo,
-    VideoGridView,
+    _cell_fg,
     format_duration,
     format_file_size,
-    VideoCheckerApp,
+    parse_video_info,
+    scan_video_files,
+    truncate_text,
 )
+from video_qt import MainWindow  # noqa: E402
 
 
 @contextmanager
@@ -327,8 +337,16 @@ if __name__ == "__main__":
 
     section("_cell_fg 全矩阵")
 
-    FG_PASS = VideoGridView.FG_PASS
-    FG_FAIL = VideoGridView.FG_FAIL
+    # 原断言: `VideoGridView.FG_PASS` 就是 core 的 FG_PASS —— 网格类属性
+    # 不能各抄一份颜色字面量。Qt 版没有网格类 (着色走 core 的 _cell_fg),
+    # 同一个不变量的 Qt 形态: 界面层**不持有**自己的颜色常量。
+    import video_qt
+    check("界面层没有自己的 FG_PASS (不另抄一份)",
+          not hasattr(video_qt, 'FG_PASS'),
+          f"got={getattr(video_qt, 'FG_PASS', None)!r}")
+    check("界面层没有自己的 FG_FAIL (不另抄一份)",
+          not hasattr(video_qt, 'FG_FAIL'),
+          f"got={getattr(video_qt, 'FG_FAIL', None)!r}")
 
     def mk(bitrate_kbps, sr_passing, std=30000, sr_std=48):
         return VideoInfo(
@@ -372,17 +390,20 @@ if __name__ == "__main__":
 
     section("_truncate_text")
 
-    gv = VideoGridView.__new__(VideoGridView)  # 跳过 __init__
-    gv._cell_font = None  # type: ignore  # 触发 tk 创建路径需要 root，此处只测纯逻辑分支
+    # 原断言 (Tk 版): 造一个 `VideoGridView.__new__` 的空壳, 把
+    # `_cell_font` 设成 None, 只测「短 ASCII 走快路径」这一支。
+    # 截断逻辑抽到 video_core.truncate_text 之后, 那一支可以直接测纯函数 ——
+    # 不用再造 Tk 的空壳对象 (网格类在 Qt 版里已经没有了)。
+    def _boom(_text):
+        raise AssertionError("短文本不该走到 measure (快路径)")
 
-    # 短 ASCII 不截断
     short = "hello"
-    if gv._cell_font is None:
-        # 不创建 root 时无法测真实 measure；只测快路径
-        check("短 ASCII 快路径（估算）",
-              gv._truncate_text(short, 200) == short,
-              detail="需要 Tk root 才能测真实 measure；快路径逻辑估算")
-    # 留作后续：实际 measure 测试在有 root 时跑
+    check("短 ASCII 快路径（不截断，也不调 measure）",
+          truncate_text(short, 200, _boom) == short,
+          detail="短文本走快路径: 直接返回, 根本不量宽度")
+    check("长文本才需要 measure（慢路径）",
+          truncate_text("x" * 200, 100, lambda t: len(t) * 7).endswith('...'),
+          detail="200 个字符塞进 100px → 必须截断")
 
     section("format_duration")
     check("0 秒", format_duration(0) == "00:00:00")
@@ -409,17 +430,17 @@ if __name__ == "__main__":
         src = os.path.join(d, "src", "a.mp4")
         os.makedirs(os.path.dirname(src))
         open(src, "w").close()
-        result = VideoCheckerApp._get_unique_dest(src, d)
+        result = MainWindow._get_unique_dest(src, d)
         check("无冲突 → 直接", result == os.path.join(d, "a.mp4"))
 
         # 目标已存在同名
         open(os.path.join(d, "a.mp4"), "w").close()
-        result = VideoCheckerApp._get_unique_dest(src, d)
+        result = MainWindow._get_unique_dest(src, d)
         check("冲突 → _1", result == os.path.join(d, "a_1.mp4"))
 
         # 多个同名
         open(os.path.join(d, "a_1.mp4"), "w").close()
-        result = VideoCheckerApp._get_unique_dest(src, d)
+        result = MainWindow._get_unique_dest(src, d)
         check("多重冲突 → _2", result == os.path.join(d, "a_2.mp4"))
 
         # 源文件已叫 a_1.mp4
@@ -427,7 +448,7 @@ if __name__ == "__main__":
         src2 = os.path.join(d, "src", "a_1.mp4")
         open(src2, "w").close()
         # 注意此时 d 中已有 a.mp4, a_1.mp4
-        result = VideoCheckerApp._get_unique_dest(src2, d)
+        result = MainWindow._get_unique_dest(src2, d)
         check("源文件已含 _1 后缀 → a_1_1.mp4（语义丢失？）",
               result == os.path.join(d, "a_1_1.mp4"),
               detail=f"got {result}")

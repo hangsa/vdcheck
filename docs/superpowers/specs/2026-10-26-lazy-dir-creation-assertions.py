@@ -2,17 +2,18 @@
 
 需求:
     扫描 / 浏览时**不建**任何目录; 只有真的要用那个目录了才建:
-      - 弹窗点「开始截图」→ 建 <截图地址> 目录 (默认 <文件路径>\\snapshot)
-      - 点「移动达标文件 / 移动全部文件」→ 建 <迁移地址> 目录 (默认 <文件路径>\\checked)
+      - 真要抽帧时 → 建 <截图地址> 目录 (默认 <文件路径>\\snapshot)
+      - 点「移动达标文件 / 移动全部文件」→ 建 <迁移地址> 目录
+        (默认 <文件路径>\\checked)
     「浏览」= 选**父目录**, 自动套一层固定子目录:
       - 截图浏览选 F → 最终输出 F\\snapshot
       - 迁移浏览选 F → 最终目标 F\\checked
 
 跑之前是坏的 (已知会失败的点):
-    - `_sync_derived_paths` 里有一句 `os.makedirs(snap_default)`, 扫描就建目录
+    - 派生路径的填默认值逻辑里有一句 `os.makedirs(snap_default)`, 扫描就建目录
     - 两处「浏览」直接把所选文件夹当最终目录, 没套子目录
 
-运行: python docs/superpowers/specs/2026-10-26-lazy-dir-creation-assertions.py
+跑法: python docs/superpowers/specs/2026-10-26-lazy-dir-creation-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
 """
 import os
@@ -22,8 +23,18 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 
-from video_checker import filedialog, messagebox  # noqa: E402  (被 monkeypatch 的目标)
-from video_checker import VideoCheckerApp, VideoInfo  # noqa: E402
+# Qt 版主窗口要 QApplication 才能建 (QFontMetrics 没有 QGuiApplication 会
+# 直接 abort 进程), 所以先建 app 再 import video_qt。没有显示环境时用
+# offscreen 平台。
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+_app = QApplication.instance() or QApplication(sys.argv)
+
+from video_core import VideoInfo  # noqa: E402
+from video_qt import (  # noqa: E402
+    MainWindow, checked_dest_for, snapshot_dest_for,
+)
 
 
 _failures: list[str] = []
@@ -43,13 +54,12 @@ def section(title: str) -> None:
 
 def dest_expect(directory: str) -> str:
     """迁移地址的期望值: 迁移地址一律转反斜杠 (既有约定)。"""
-    return os.path.join(directory, "checked").replace('/', '\\')
+    return checked_dest_for(directory)
 
 
 def snap_expect(directory: str) -> str:
     """截图地址的期望值: 只在 win32 转反斜杠 (macOS 反斜杠路径 os.path.isdir 不认)。"""
-    p = os.path.join(directory, 'snapshot')
-    return p.replace('/', '\\') if sys.platform == 'win32' else p
+    return snapshot_dest_for(directory)
 
 
 def make_info(title='a.mp4', rel_path='./', full_path='/x/a.mp4',
@@ -65,13 +75,7 @@ def make_info(title='a.mp4', rel_path='./', full_path='/x/a.mp4',
 
 
 def main() -> int:
-    from tkinterdnd2 import TkinterDnD
-    # 必须用 TkinterDnD.Tk(): VideoGridView.bind_drop 会调 drop_target_register,
-    # 普通 tk.Tk() 上会 AttributeError。
-    root = TkinterDnD.Tk()
-    root.withdraw()
-    app = VideoCheckerApp(root)
-    root.update_idletasks()
+    app = MainWindow()
 
     # ================= 1. 扫描/浏览阶段一个目录都不许建 =================
     section("扫描阶段不建目录")
@@ -84,19 +88,15 @@ def main() -> int:
           not os.path.isdir(os.path.join(src, 'checked')),
           f"path={os.path.join(src, 'checked')!r}")
     check("迁移地址字段仍填了默认值",
-          app.dest_var.get() == dest_expect(src),
-          f"got={app.dest_var.get()!r} want={dest_expect(src)!r}")
+          app.dest_edit.text() == dest_expect(src),
+          f"got={app.dest_edit.text()!r} want={dest_expect(src)!r}")
     check("截图地址字段仍填了默认值",
-          app.snapshot_dest_var.get() == snap_expect(src),
-          f"got={app.snapshot_dest_var.get()!r} want={snap_expect(src)!r}")
+          app.snapshot_dest == snap_expect(src),
+          f"got={app.snapshot_dest!r} want={snap_expect(src)!r}")
 
     section("浏览文件夹也不建目录")
-    real_opendir = filedialog.askdirectory
-    filedialog.askdirectory = lambda **_kw: src
-    try:
-        app._browse_path()
-    finally:
-        filedialog.askdirectory = real_opendir
+    app._ask_directory = lambda title: src
+    app._browse_path()
     check("浏览后源目录下没有 snapshot",
           not os.path.isdir(os.path.join(src, 'snapshot')),
           f"path={os.path.join(src, 'snapshot')!r}")
@@ -107,49 +107,35 @@ def main() -> int:
     # ================= 2. 「浏览」套一层子目录 =================
     section("迁移地址「浏览」套一层 checked")
     picked = tempfile.mkdtemp(prefix='vdcheck_pick_')
-    filedialog.askdirectory = lambda **_kw: picked
-    try:
-        app._browse_dest()
-    finally:
-        filedialog.askdirectory = real_opendir
+    app._ask_directory = lambda title: picked
+    app._browse_dest()
     check("迁移地址 = 所选文件夹\\checked",
-          app.dest_var.get() == dest_expect(picked),
-          f"got={app.dest_var.get()!r} want={dest_expect(picked)!r}")
+          app.dest_edit.text() == dest_expect(picked),
+          f"got={app.dest_edit.text()!r} want={dest_expect(picked)!r}")
     check("浏览迁移地址时不建目录",
           not os.path.isdir(dest_expect(picked)),
           f"path={dest_expect(picked)!r}")
 
     section("截图地址「浏览」套一层 snapshot")
-    from video_checker import SnapshotProgressDialog
-    dlg = SnapshotProgressDialog(root, [], os.path.join(src, 'snapshot'))
-    root.update_idletasks()
-    filedialog.askdirectory = lambda **_kw: picked
-    try:
-        dlg._browse_output_dir()
-    finally:
-        filedialog.askdirectory = real_opendir
+    app._browse_snapshot_dest()
     check("截图地址 = 所选文件夹\\snapshot",
-          dlg._output_dir_var.get() == snap_expect(picked),
-          f"got={dlg._output_dir_var.get()!r} want={snap_expect(picked)!r}")
+          app.snapshot_dest == snap_expect(picked),
+          f"got={app.snapshot_dest!r} want={snap_expect(picked)!r}")
     check("浏览截图地址时不建目录",
           not os.path.isdir(snap_expect(picked)),
           f"path={snap_expect(picked)!r}")
 
-    # ================= 3. 点「开始截图」才建 =================
-    section("点「开始截图」才建 snapshot 目录")
-    # 用一个空文件列表的弹窗: makedirs 发生在起 worker 之前, worker 没活干,
-    # 不会去抽帧。目录建没建得到这里就见分晓。
-    snap_dir = os.path.join(picked, 'snapshot')
-    dlg2 = SnapshotProgressDialog(root, [], snap_dir)
-    root.update_idletasks()
-    check("点之前目录不存在",
+    # ================= 3. 真要用截图目录时才建 =================
+    section("真要用截图目录时才建 snapshot 目录")
+    # 截图弹窗 (Task 6) 里点「开始截图」走的就是 ensure_snapshot_dir ——
+    # 主窗口这一侧先把「按需创建」这一步落下来, 断言也落在这里。
+    snap_dir = snap_expect(picked)
+    app.snapshot_dest = snap_dir
+    check("建之前目录不存在",
           not os.path.isdir(snap_dir), f"path={snap_dir!r}")
-    dlg2._on_action_btn()          # 等价于点「开始截图」
-    root.update_idletasks()
-    check("点之后目录建出来了",
+    app.ensure_snapshot_dir()
+    check("建之后目录建出来了",
           os.path.isdir(snap_dir), f"path={snap_dir!r}")
-    dlg2._on_close()
-    dlg.top.destroy()
 
     # ================= 4. 点「移动」才建 checked =================
     # 迁移地址一律转反斜杠, macOS 上 os.makedirs 会把 '\var\...\checked'
@@ -167,22 +153,16 @@ def main() -> int:
         dest_parent = tempfile.mkdtemp(prefix='vdcheck_dest_')
         dest_dir = dest_expect(dest_parent)
         app.video_results.clear()
-        app.video_results.append(
+        app._add_result(
             make_info(title='a.mp4', rel_path='./a.mp4', full_path=video,
                       is_passing=True))
-        app.dest_var.set(dest_dir)
+        app.dest_edit.setText(dest_dir)
         check("点之前目录不存在",
               not os.path.isdir(dest_dir), f"path={dest_dir!r}")
 
-        real_askyesno = messagebox.askyesno
-        real_showinfo = messagebox.showinfo
-        messagebox.askyesno = lambda *_a, **_kw: True
-        messagebox.showinfo = lambda *_a, **_kw: None
-        try:
-            app._move_passing_files()
-        finally:
-            messagebox.askyesno = real_askyesno
-            messagebox.showinfo = real_showinfo
+        app._ask_yes_no = lambda text: True
+        app._show_move_result = lambda text: None
+        app._move_passing_files()
         check("点之后目录建出来了",
               os.path.isdir(dest_dir), f"path={dest_dir!r}")
         check("文件真的移到里面了",
@@ -198,23 +178,16 @@ def main() -> int:
         dest_parent2 = tempfile.mkdtemp(prefix='vdcheck_dest2_')
         dest_dir2 = dest_expect(dest_parent2)
         app.video_results.clear()
-        app.video_results.append(
+        app._add_result(
             make_info(title='b.mp4', rel_path='./b.mp4', full_path=video2,
                       is_passing=False))
-        app.dest_var.set(dest_dir2)
-        messagebox.askyesno = lambda *_a, **_kw: True
-        messagebox.showinfo = lambda *_a, **_kw: None
-        try:
-            app._move_all_files()
-        finally:
-            messagebox.askyesno = real_askyesno
-            messagebox.showinfo = real_showinfo
+        app.dest_edit.setText(dest_dir2)
+        app._move_all_files()
         check("点之后目录建出来了",
               os.path.isdir(dest_dir2), f"path={dest_dir2!r}")
     finally:
         os.chdir(cwd)
 
-    root.destroy()
     print()
     if _failures:
         print(f"✗ {len(_failures)} 条断言失败")

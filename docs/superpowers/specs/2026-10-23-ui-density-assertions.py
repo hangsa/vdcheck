@@ -26,6 +26,10 @@ from tkinter import font as tkfont
 
 from video_checker import VideoInfo, format_title, truncate_text
 
+# Qt 版主窗口那几节要 QApplication (QFontMetrics 没有 QGuiApplication 会
+# 直接 abort 进程)。没有显示环境时 Qt 用 offscreen 平台; Tk 那边不受影响。
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
 
 _failures: list[str] = []
 
@@ -67,6 +71,17 @@ def source_text() -> str:
 def method_body(method: str) -> str:
     """截出某个方法的源码 (从 'def <method>(self' 到下一个同缩进的 def)。"""
     src = source_text()
+    start = src.index(f"    def {method}(self")
+    rest = src[start + 1:]
+    end = rest.index("\n    def ")
+    return src[start:start + 1 + end]
+
+
+def qt_method_body(method: str) -> str:
+    """截出 video_qt.py 里某个方法的源码。"""
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), 'video_qt.py')
+    src = open(path, encoding='utf-8', newline='').read()
     start = src.index(f"    def {method}(self")
     rest = src[start + 1:]
     end = rest.index("\n    def ")
@@ -326,16 +341,18 @@ def main() -> None:
     d6.top.destroy()
 
     section("状态栏合并成一行 (状态 + 统计)")
-    from tkinterdnd2 import TkinterDnD
-    from video_checker import VideoCheckerApp
-    # 必须用 TkinterDnD.Tk(): VideoGridView.bind_drop 会调 drop_target_register,
-    # 普通 tk.Tk() 上会 AttributeError。
-    app_root = TkinterDnD.Tk()
-    app_root.withdraw()
-    app = VideoCheckerApp(app_root)
-    app_root.update_idletasks()
+    # 原断言 (Tk 版): 建一个 VideoCheckerApp, 看状态栏那一行字。
+    # Qt 版对应: video_qt.MainWindow —— 状态栏是 QStatusBar, 文案走
+    # currentMessage()。QApplication 必须**先于** video_qt 建好。
+    from PySide6.QtWidgets import QApplication
+    qt_app = QApplication.instance() or QApplication(sys.argv)
+    from video_qt import MainWindow
+    app = MainWindow()
+    app.show()
+    qt_app.processEvents()
     check("初始文案是「就绪」",
-          app.status_var.get() == '就绪', f"got={app.status_var.get()!r}")
+          app.status_bar.currentMessage() == '就绪',
+          f"got={app.status_bar.currentMessage()!r}")
     check("不再有独立的 count_var (两处合一行)",
           not hasattr(app, 'count_var'),
           f"got={getattr(app, 'count_var', None)!r}")
@@ -343,58 +360,67 @@ def main() -> None:
     app._add_result(make_info(title='p.mp4', is_passing=True))
     app._add_result(make_info(title='f.mp4', is_passing=False))
     app._add_result(make_info(title='p2.mp4', is_passing=True))
-    app_root.update_idletasks()
+    qt_app.processEvents()
     check("中间态不拼统计 (扫描中只显示进度文字)",
-          app.status_var.get() == '就绪', f"got={app.status_var.get()!r}")
+          app.status_bar.currentMessage() == '就绪',
+          f"got={app.status_bar.currentMessage()!r}")
 
     app.total_files = 3
     app._scan_complete()
-    app_root.update_idletasks()
+    qt_app.processEvents()
     check("完成文案合并了统计",
-          app.status_var.get() == '检测完成：共 3 · 达标 2 · 不达标 1',
-          f"got={app.status_var.get()!r}")
+          app.status_bar.currentMessage()
+          == '检测完成：共 3 · 达标 2 · 不达标 1',
+          f"got={app.status_bar.currentMessage()!r}")
 
     app._clear_records()
-    app_root.update_idletasks()
+    qt_app.processEvents()
     check("清除记录后归零",
-          app.status_var.get() == '已清除记录：共 0 · 达标 0 · 不达标 0',
-          f"got={app.status_var.get()!r}")
+          app.status_bar.currentMessage()
+          == '已清除记录：共 0 · 达标 0 · 不达标 0',
+          f"got={app.status_bar.currentMessage()!r}")
 
     section("状态栏 — 0 文件完成时计数归零")
     app.total_files = 0
     app._scan_complete()
-    app_root.update_idletasks()
+    qt_app.processEvents()
     # 2026-10-27 起空目录改显示「未找到视频文件」(不带全是 0 的统计) ——
     # 旧文案「检测完成：共 0 · 达标 0 · 不达标 0」是废话, 而且把 worker
     # 早就发过的那条「未找到视频文件」盖掉了。
     check("0 文件后计数不残留",
-          app.status_var.get() == '未找到视频文件',
-          f"got={app.status_var.get()!r}")
+          app.status_bar.currentMessage() == '未找到视频文件',
+          f"got={app.status_bar.currentMessage()!r}")
 
     section("状态栏 — 中途停止")
     app._add_result(make_info(title='a.mp4', is_passing=True))
     app.total_files = 10
-    app.cancel_event.set()
+    app._cancel.set()
     app._scan_complete()
-    app_root.update_idletasks()
+    qt_app.processEvents()
     check("停止文案带统计且只有一个冒号",
-          app.status_var.get() == '已停止检测（已完成 1/10）：共 1 · 达标 1 · 不达标 0',
-          f"got={app.status_var.get()!r}")
-    app.cancel_event.clear()
+          app.status_bar.currentMessage()
+          == '已停止检测（已完成 1/10）：共 1 · 达标 1 · 不达标 0',
+          f"got={app.status_bar.currentMessage()!r}")
+    app._cancel.clear()
 
-    # brief 漏掉的路径: _start_scan / _on_file_drop 也 clear 了 video_results,
-    # 但 brief 没让它们重置 _passed_count —— 扫第二轮会累加上一轮的达标数,
-    # 状态栏出现「达标 188 · 不达标 -178」。真跑这两个方法要起线程调 ffprobe,
-    # 太重; 退一步锚源码: clear() 之后必须紧跟计数归零。
+    # brief 漏掉的路径: 开始检测 / 拖拽也 clear 了 video_results,
+    # 但必须同时重置 _passed_count —— 扫第二轮会累加上一轮的达标数,
+    # 状态栏出现「达标 188 · 不达标 -178」。真跑这两个方法要起线程调
+    # ffprobe, 太重; 退一步锚源码。
+    # Qt 版把「清空结果 + 计数归零」收敛在 _begin_scan 里 (点按钮与拖拽
+    # 共用这一条路径), 所以: ① _begin_scan 里 clear() 之后必须紧跟计数
+    # 归零; ② 两条入口都得走 _begin_scan —— 少一条就可能漏掉归零。
+    body = qt_method_body('_begin_scan')
+    at = body.index('self.video_results.clear()')
+    window = body[at:at + 320]
+    ok = ('self._passed_count = 0' in window)
+    # check() 无条件打印 detail, 通过时别塞一句像报错的文案
+    check("_begin_scan 清空结果时同步重置计数", ok,
+          "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0")
     for meth in ('_start_scan', '_on_file_drop'):
-        body = method_body(meth)
-        at = body.index('self.video_results.clear()')
-        window = body[at:at + 320]
-        ok = ('self._passed_count = 0' in window)
-        # check() 无条件打印 detail, 通过时别塞一句像报错的文案
-        check(f"{meth} 清空结果时同步重置计数", ok,
-              "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0")
-    app_root.destroy()
+        ok = ('_begin_scan(' in qt_method_body(meth))
+        check(f"{meth} 走 _begin_scan (计数归零不会漏)", ok,
+              "" if ok else f"{meth} 里没找到 _begin_scan(")
 
     # 原先这里还有两节 Tooltip 断言 (「只在截断时显示」/「<Leave> 延迟关闭 +
     # 窗口复用」) —— 它们测的是 Tk 版自绘的 Tooltip 类 (延迟关闭 / 窗口复用 /
