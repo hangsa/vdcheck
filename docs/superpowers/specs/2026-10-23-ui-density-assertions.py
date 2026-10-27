@@ -3,7 +3,15 @@
 验证：
 - format_title 全部 rel_path 形态 (含跨盘符绝对路径 / UNC);
 - truncate_text 像素级截断 (ASCII / CJK / 边界);
-- VideoGridView._truncate_text 委托到模块级实现且行为不变。
+- 定点截图弹窗的横向滚动 / 列对齐 / 缩略图释放;
+- 状态栏文案 (一行合并 + 计数归零 + 中途停止);
+- Tooltip 的显示条件与窗口复用。
+
+**表格相关的小节已迁走** (2026-10-27, Tk → Qt 重构):
+`_format_cell` (title/spec)、表头带单位、10 列集合、`_truncate_text` 委托、
+网格 cell 的 `_truncated` 标记 —— 这些断言的是 Tk 的 VideoGridView 内部结构,
+对应的语义改测 Qt 模型, 见
+`docs/superpowers/specs/2026-10-27-qt-table-assertions.py`。
 
 运行: python docs/superpowers/specs/2026-10-23-ui-density-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
@@ -16,9 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import ttk
 
-from video_checker import VideoInfo, VideoGridView, format_title, truncate_text
+from video_checker import VideoInfo, format_title, truncate_text
 
 
 _failures: list[str] = []
@@ -50,22 +57,11 @@ def make_info(title='a.mp4', rel_path='./', **kw) -> VideoInfo:
     return VideoInfo(**base)
 
 
-def app_widgets_body() -> str:
-    """读 video_checker.py 的 _create_widgets 函数体 (headers 定义在那里)。"""
-    path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), 'video_checker.py')
-    # newline='' 必须: 源码是 CRLF, 不指定的话 Python 会把 \r\n 转成 \n,
-    # 下标/正则对不上源文件。这里只读不写。
-    src = open(path, encoding='utf-8', newline='').read()
-    return src[src.index("    def _create_widgets(self):"):
-               src.index("    # ---- 事件处理 ----")]
-
-
 def source_text() -> str:
     """读整个 video_checker.py 源码 (原样, 不做行尾转换)。"""
     path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), 'video_checker.py')
-    # newline='' 必须, 理由同 app_widgets_body: 源码是 CRLF
+    # newline='' 必须: 源码的行尾不能被 Python 转换, 下标/正则才对得上源文件
     return open(path, encoding='utf-8', newline='').read()
 
 
@@ -92,13 +88,6 @@ def main() -> None:
     for rel, title, want in cases:
         got = format_title(make_info(title=title, rel_path=rel))
         check(f"rel_path={rel!r} → {want!r}", got == want, f"got={got!r}")
-
-    section("_format_cell — title 分支委托 format_title")
-    for rel, title, want in cases:
-        info = make_info(title=title, rel_path=rel)
-        got = VideoGridView._format_cell(info, 'title')
-        check(f"_format_cell rel_path={rel!r} → {want!r}", got == want,
-              f"got={got!r}")
 
     root = tk.Tk()
     root.withdraw()
@@ -287,104 +276,6 @@ def main() -> None:
 
     d3.top.destroy(); d4.top.destroy()
 
-    section("单位规则 — cell 不带单位, N/A 不受影响")
-    from video_checker import parse_video_info
-
-    def _fake_fmt(**kw):
-        d = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
-                          "r_frame_rate": "30/1"}], "format": {"format_name": "mp4"}}
-        d["streams"][0].update(kw)
-        return d
-
-    info = parse_video_info(_fake_fmt(bit_rate='32000000', codec_name='h264'),
-                            '/x/a.mp4', '/x', 30000.0, 48.0)
-    check("frame_rate 不带 fps 后缀", info.frame_rate == '30.00',
-          f"got={info.frame_rate!r}")
-    check("无音频流时 audio_sample_rate = N/A", info.audio_sample_rate == 'N/A',
-          f"got={info.audio_sample_rate!r}")
-    check("排序用的 frame_rate_fps 仍是数值", info.frame_rate_fps == 30.0,
-          f"got={info.frame_rate_fps!r}")
-
-    d_audio = _fake_fmt(bit_rate='32000000', codec_name='h264')
-    d_audio["streams"].append({"codec_type": "audio", "codec_name": "aac",
-                               "channels": 2, "sample_rate": "48000"})
-    info2 = parse_video_info(d_audio, '/x/a.mp4', '/x', 30000.0, 48.0)
-    check("audio_sample_rate 不带 kHz 后缀", info2.audio_sample_rate == '48.0',
-          f"got={info2.audio_sample_rate!r}")
-    check("排序用的 sample_rate_khz 仍是数值", info2.sample_rate_khz == 48.0,
-          f"got={info2.sample_rate_khz!r}")
-
-    d_bad = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
-                          "r_frame_rate": "0/0", "codec_name": "h264"}],
-             "format": {"format_name": "mp4"}}
-    info3 = parse_video_info(d_bad, '/x/a.mp4', '/x', 30000.0, 48.0)
-    check("r_frame_rate=0/0 → N/A (不是 'nan')", info3.frame_rate == 'N/A',
-          f"got={info3.frame_rate!r}")
-    # 帧率未知时 frame_rate_fps 保持 0.0: 排序不受影响,
-    # parse_time_token(帧号) 仍会正确地拒绝未知帧率。
-    check("r_frame_rate=0/0 → frame_rate_fps 仍是 0.0", info3.frame_rate_fps == 0.0,
-          f"got={info3.frame_rate_fps!r}")
-    for bad_rate in ('0/1', 'abc', '30', '', None):
-        info_b = parse_video_info(_fake_fmt(r_frame_rate=bad_rate),
-                                  '/x/a.mp4', '/x', 30000.0, 48.0)
-        check(f"r_frame_rate={bad_rate!r} → N/A", info_b.frame_rate == 'N/A',
-              f"got={info_b.frame_rate!r}")
-    # 正常帧率不受 N/A 分支影响
-    for good_rate, want_fps, want_txt in (('30/1', 30.0, '30.00'),
-                                          ('30000/1001', 30000 / 1001, '29.97')):
-        info_g = parse_video_info(_fake_fmt(r_frame_rate=good_rate),
-                                  '/x/a.mp4', '/x', 30000.0, 48.0)
-        check(f"r_frame_rate={good_rate} → {want_txt}", info_g.frame_rate == want_txt,
-              f"got={info_g.frame_rate!r}")
-        check(f"r_frame_rate={good_rate} → fps={want_fps:.4f}",
-              abs(info_g.frame_rate_fps - want_fps) < 1e-6,
-              f"got={info_g.frame_rate_fps!r}")
-
-    section("headers — 表头带单位")
-    _hdr_ok = "'frame_rate': ('帧率(fps)'" in app_widgets_body()
-    check("帧率表头含 (fps)", _hdr_ok,
-          "" if _hdr_ok else "headers 里帧率列仍是「帧率」")
-    check("采样率表头含 (kHz)",
-          "'audio_sample_rate': ('采样率(kHz)'" in app_widgets_body())
-    check("码率表头含 (kbps)",
-          "'bitrate': ('码率(kbps)'" in app_widgets_body())
-
-    section("_format_cell — spec 列")
-    spec_cases = [
-        (dict(container_format='mp4', video_codec='h264', audio_codec='aac'),
-         'mp4/h264/aac'),
-        (dict(container_format='matroska', video_codec='h264', audio_codec='aac'),
-         'matroska/h264/aac'),
-        (dict(container_format='mp4', video_codec='h264', audio_codec='N/A'),
-         'mp4/h264/N/A'),
-        (dict(container_format='mp4', video_codec='N/A', audio_codec='N/A'),
-         'mp4/N/A/N/A'),
-    ]
-    for kw, want in spec_cases:
-        got = VideoGridView._format_cell(make_info(**kw), 'spec')
-        check(f"spec{kw} → {want!r}", got == want, f"got={got!r}")
-
-    section("列集合 — 10 列 + 四个可排序列仍存在")
-    import re
-    from video_checker import _SORTABLE_COLUMNS
-    app_body = app_widgets_body()
-    header_keys = re.findall(r"'(\w+)':\s*\('", app_body)
-    check("headers 恰好 10 列", len(header_keys) == 10, f"got={len(header_keys)}: {header_keys}")
-    for removed in ('container_format', 'video_codec', 'audio_codec'):
-        check(f"headers 已移除 {removed}", removed not in header_keys)
-    check("headers 含 spec", 'spec' in header_keys)
-    for sortable in sorted(_SORTABLE_COLUMNS):
-        check(f"可排序列 {sortable} 仍在 headers 中", sortable in header_keys)
-    check("死代码 columns 元组已删除 (_create_widgets 里不该再有 columns = ( 元组)",
-          not re.search(r'^\s*columns\s*=\s*\(', app_body, re.M))
-
-    section("VideoGridView._truncate_text — 委托且行为一致")
-    grid = VideoGridView(ttk.Frame(root), {'title': ('标题', 250)})
-    check("方法委托给模块级 truncate_text",
-          grid._truncate_text('a' * 200, 100)
-          == truncate_text('a' * 200, 100, grid._cell_font.measure))
-    check("短文本不受影响", grid._truncate_text('a.mp4', 250) == 'a.mp4')
-
     section("mark_done — PhotoImage 只留 display")
     d5 = SnapshotProgressDialog(root, [make_info()], tempfile.mkdtemp())
     # 时间点 cell 是起跑时 _update_table() 才建的 (构造时只有序号/标题列),
@@ -546,23 +437,6 @@ def main() -> None:
     root.update_idletasks()
     check("移到未截断 cell 后关闭", tip.win is None)
 
-    section("网格 cell 带 _truncated 标记")
-    g = VideoGridView(ttk.Frame(root), {'title': ('标题', 60)})
-    info_cut = make_info(title='x' * 100 + '.mp4', rel_path='./deep/dir')
-    info_short = make_info(title='a.mp4', rel_path='./')
-    g.add_row(info_cut)      # → pool slot 0
-    g.add_row(info_short)    # → pool slot 1
-    root.update_idletasks()
-    slot0 = g._widget_pool[0]._cells[0][1]    # (key, label) 对, 取 title
-    slot1 = g._widget_pool[1]._cells[0][1]
-    check("长路径 cell 标了 _truncated", slot0._truncated is True,
-          f"text={slot0.cget('text')!r}")
-    check("短路径 cell 未标截断", slot1._truncated is False,
-          f"text={slot1.cget('text')!r}")
-    check("cell 存了 _full_text", slot0._full_text.endswith('.mp4'))
-    check("cell 绑了 <Motion>", bool(slot0.bind('<Motion>')))
-    check("cell 绑了 <Leave>", bool(slot0.bind('<Leave>')))
-
     section("Tooltip — <Leave> 延迟关闭 + 窗口复用")
     tip3 = Tooltip(root)
 
@@ -611,65 +485,6 @@ def main() -> None:
     check("同 cell 抖动不销毁重建", tip3.win is win_c,
           f"before={win_c!r} after={tip3.win!r}")
     tip3.hide()
-
-    section("Tooltip — 真实事件派发 (不是查绑定字符串)")
-    # 上面几条是直接调 Tooltip 方法, 只能证明方法本身对, 证明不了 cell 上
-    # 的绑定真的把事件送到了它。这里派发真实 <Motion>/<Leave>。
-    # 注意: bind() 非空 ≠ handler 是对的 —— 绑成空 lambda 照样绿 (前车之鉴),
-    # 所以必须看事件派发后的实际效果。
-    g2 = VideoGridView(ttk.Frame(root), {'title': ('标题', 60)})
-    g2.add_row(make_info(title='x' * 100 + '.mp4', rel_path='./deep/dir'))
-    g2.add_row(make_info(title='y' * 100 + '.mp4', rel_path='./other/dir'))
-    g2.add_row(make_info(title='a.mp4', rel_path='./'))
-    root.update_idletasks()
-    r_cut = g2._widget_pool[0]._cells[0][1]
-    r_cut2 = g2._widget_pool[1]._cells[0][1]
-    r_short = g2._widget_pool[2]._cells[0][1]
-    g2.tooltip.hide()
-
-    r_short.event_generate('<Motion>', x=5, y=5, when='now')
-    root.update_idletasks()
-    check("真实 <Motion> 到未截断 cell → 不弹", g2.tooltip.win is None,
-          f"got={g2.tooltip.win!r}")
-
-    r_cut.event_generate('<Motion>', x=5, y=5, when='now')
-    root.update_idletasks()
-    check("真实 <Motion> 到截断 cell → 弹出", g2.tooltip.win is not None)
-    if g2.tooltip.win is not None:
-        lt = [w.cget('text') for w in g2.tooltip.win.winfo_children()
-              if isinstance(w, tk.Label)]
-        check("真实事件弹出的内容是完整值 (不是截断值)",
-              lt and lt[0] == r_cut._full_text, f"got={lt}")
-
-    r_cut.event_generate('<Leave>', when='now')
-    root.update_idletasks()
-    check("真实 <Leave> 后关闭 (不残留陈旧浮窗)", g2.tooltip.win is None,
-          f"got={g2.tooltip.win!r}")
-
-    r_cut.event_generate('<Motion>', x=5, y=5, when='now')
-    root.update_idletasks()
-    w_live = g2.tooltip.win
-    r_cut.event_generate('<Leave>', when='now')
-    r_cut2.event_generate('<Motion>', x=5, y=5, when='now')
-    root.update_idletasks()
-    check("真实事件 cell→cell 复用窗口", g2.tooltip.win is w_live,
-          f"before={w_live!r} after={g2.tooltip.win!r}")
-    lt2 = ([w.cget('text') for w in g2.tooltip.win.winfo_children()
-            if isinstance(w, tk.Label)] if g2.tooltip.win is not None else [])
-    check("真实事件 cell→cell 后内容是第二个 cell 的完整值",
-          lt2 and lt2[0] == r_cut2._full_text, f"got={lt2}")
-    g2.tooltip.hide()
-
-    section("clear 时关掉悬浮中的 tooltip")
-    tip2 = Tooltip(root)
-    g.tooltip = tip2
-    g.tooltip.show(slot0)
-    root.update_idletasks()
-    check("tooltip 已弹出", tip2.win is not None)
-    g.clear()
-    root.update_idletasks()
-    check("clear 后 tooltip 已关闭 (不残留旧文本)",
-          tip2.win is None, f"got={tip2.win!r}")
 
     root.destroy()
 

@@ -86,6 +86,137 @@ def main():
           sorted(c.key for c in VIDEO_COLUMNS if c.sortable)
           == ['audio_sample_rate', 'bitrate', 'frame_rate', 'result'],
           f"got={sorted(c.key for c in VIDEO_COLUMNS if c.sortable)}")
+    for removed in ('container_format', 'video_codec', 'audio_codec'):
+        check(f"数据列里没有 {removed} (合进了 spec 列)",
+              removed not in keys, f"got={keys}")
+    check("数据列含 spec", 'spec' in keys, f"got={keys}")
+
+    section("表头文字带单位")
+    mh = VideoTableModel(VIDEO_COLUMNS)
+    for want, section_no in (('帧率(fps)', 3), ('码率(kbps)', 4),
+                             ('采样率(kHz)', 7)):
+        got = mh.headerData(section_no, Qt.Horizontal, Qt.DisplayRole)
+        check(f"表头是 {want!r}", got == want, f"got={got!r}")
+
+    section("单元格不带单位 (N/A 不受影响)")
+    from video_core import parse_video_info
+
+    def _fake_fmt(**kw):
+        d = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
+                          "r_frame_rate": "30/1"}], "format": {"format_name": "mp4"}}
+        d["streams"][0].update(kw)
+        return d
+
+    info = parse_video_info(_fake_fmt(bit_rate='32000000', codec_name='h264'),
+                            '/x/a.mp4', '/x', 30000.0, 48.0)
+    check("frame_rate 不带 fps 后缀", info.frame_rate == '30.00',
+          f"got={info.frame_rate!r}")
+    check("无音频流时 audio_sample_rate = N/A", info.audio_sample_rate == 'N/A',
+          f"got={info.audio_sample_rate!r}")
+    check("排序用的 frame_rate_fps 仍是数值", info.frame_rate_fps == 30.0,
+          f"got={info.frame_rate_fps!r}")
+
+    d_audio = _fake_fmt(bit_rate='32000000', codec_name='h264')
+    d_audio["streams"].append({"codec_type": "audio", "codec_name": "aac",
+                               "channels": 2, "sample_rate": "48000"})
+    info2 = parse_video_info(d_audio, '/x/a.mp4', '/x', 30000.0, 48.0)
+    check("audio_sample_rate 不带 kHz 后缀", info2.audio_sample_rate == '48.0',
+          f"got={info2.audio_sample_rate!r}")
+    check("排序用的 sample_rate_khz 仍是数值", info2.sample_rate_khz == 48.0,
+          f"got={info2.sample_rate_khz!r}")
+
+    d_bad = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
+                          "r_frame_rate": "0/0", "codec_name": "h264"}],
+             "format": {"format_name": "mp4"}}
+    info3 = parse_video_info(d_bad, '/x/a.mp4', '/x', 30000.0, 48.0)
+    check("r_frame_rate=0/0 → N/A (不是 'nan')", info3.frame_rate == 'N/A',
+          f"got={info3.frame_rate!r}")
+    # 帧率未知时 frame_rate_fps 保持 0.0: 排序不受影响,
+    # parse_time_token(帧号) 仍会正确地拒绝未知帧率。
+    check("r_frame_rate=0/0 → frame_rate_fps 仍是 0.0", info3.frame_rate_fps == 0.0,
+          f"got={info3.frame_rate_fps!r}")
+    for bad_rate in ('0/1', 'abc', '30', '', None):
+        info_b = parse_video_info(_fake_fmt(r_frame_rate=bad_rate),
+                                  '/x/a.mp4', '/x', 30000.0, 48.0)
+        check(f"r_frame_rate={bad_rate!r} → N/A", info_b.frame_rate == 'N/A',
+              f"got={info_b.frame_rate!r}")
+    # 正常帧率不受 N/A 分支影响
+    for good_rate, want_fps, want_txt in (('30/1', 30.0, '30.00'),
+                                          ('30000/1001', 30000 / 1001, '29.97')):
+        info_g = parse_video_info(_fake_fmt(r_frame_rate=good_rate),
+                                  '/x/a.mp4', '/x', 30000.0, 48.0)
+        check(f"r_frame_rate={good_rate} → {want_txt}", info_g.frame_rate == want_txt,
+              f"got={info_g.frame_rate!r}")
+        check(f"r_frame_rate={good_rate} → fps={want_fps:.4f}",
+              abs(info_g.frame_rate_fps - want_fps) < 1e-6,
+              f"got={info_g.frame_rate_fps!r}")
+
+    # 显示层: 单元格里的值跟解析出来的一致 —— 单位只写在表头上
+    mu = VideoTableModel(VIDEO_COLUMNS)
+    for inf in (info, info2, info3):
+        mu.append_result(inf)
+    app.processEvents()
+    check("帧率格显示 '30.00' (不带 fps 单位)",
+          mu.data(mu.index(0, 3), Qt.DisplayRole) == '30.00',
+          f"got={mu.data(mu.index(0, 3), Qt.DisplayRole)!r}")
+    check("码率格显示 '32000' (不带 kbps 单位)",
+          mu.data(mu.index(0, 4), Qt.DisplayRole) == '32000',
+          f"got={mu.data(mu.index(0, 4), Qt.DisplayRole)!r}")
+    check("采样率格显示 '48.0' (不带 kHz 单位)",
+          mu.data(mu.index(1, 7), Qt.DisplayRole) == '48.0',
+          f"got={mu.data(mu.index(1, 7), Qt.DisplayRole)!r}")
+    check("无音频流时采样率格显示 'N/A'",
+          mu.data(mu.index(0, 7), Qt.DisplayRole) == 'N/A',
+          f"got={mu.data(mu.index(0, 7), Qt.DisplayRole)!r}")
+    check("未知帧率显示 'N/A'",
+          mu.data(mu.index(2, 3), Qt.DisplayRole) == 'N/A',
+          f"got={mu.data(mu.index(2, 3), Qt.DisplayRole)!r}")
+
+    section("title 列委托 format_title")
+    from video_core import format_title
+    rel_cases = [
+        ('./',        'a.mp4', './a.mp4'),
+        ('./A',       'a.mp4', './A/a.mp4'),
+        ('./A/B',     'a.mp4', './A/B/a.mp4'),
+        ('./A/B/',    'a.mp4', './A/B/a.mp4'),
+        ('',          'a.mp4', './a.mp4'),
+        ('D:\\videos\\a.mp4',  'a.mp4', 'D:\\videos\\a.mp4'),
+        ('\\\\srv\\share\\a.mp4', 'a.mp4', '\\\\srv\\share\\a.mp4'),
+    ]
+    mt = VideoTableModel(VIDEO_COLUMNS)
+    for rel, title, _want in rel_cases:
+        inf = mk(title=title)
+        inf.rel_path = rel
+        mt.append_result(inf)
+    app.processEvents()
+    for r, (rel, title, want) in enumerate(rel_cases):
+        got = mt.data(mt.index(r, 1), Qt.DisplayRole)
+        check(f"title 格 rel_path={rel!r} → {want!r}", got == want,
+              f"got={got!r}")
+        check(f"title 格 == format_title(info) (不是各拼各的)",
+              got == format_title(mt.sorted_rows[r]), f"got={got!r}")
+
+    section("spec 列格式")
+    spec_cases = [
+        (dict(container_format='mp4', video_codec='h264', audio_codec='aac'),
+         'mp4/h264/aac'),
+        (dict(container_format='matroska', video_codec='h264', audio_codec='aac'),
+         'matroska/h264/aac'),
+        (dict(container_format='mp4', video_codec='h264', audio_codec='N/A'),
+         'mp4/h264/N/A'),
+        (dict(container_format='mp4', video_codec='N/A', audio_codec='N/A'),
+         'mp4/N/A/N/A'),
+    ]
+    ms = VideoTableModel(VIDEO_COLUMNS)
+    for kw, _want in spec_cases:
+        inf = mk('spec.mp4')
+        for k, v in kw.items():
+            setattr(inf, k, v)
+        ms.append_result(inf)
+    app.processEvents()
+    for r, (kw, want) in enumerate(spec_cases):
+        got = ms.data(ms.index(r, 5), Qt.DisplayRole)
+        check(f"spec{kw} → {want!r}", got == want, f"got={got!r}")
 
     section("着色矩阵")
     m = VideoTableModel(VIDEO_COLUMNS)
@@ -111,6 +242,33 @@ def main():
     check("只码率不达标 → title/result/bitrate 红",
           [c for c in range(1, 11) if fg_at(2, c) == '#dc143c'] == [1, 4, 10],
           f"got={[c for c in range(1, 11) if fg_at(2, c) == '#dc143c']}")
+
+    section("着色常量只有一个来源 (界面层不另抄一份字面量)")
+    # 原断言: VideoGridView.FG_PASS 就是 core 的 FG_PASS (Tk 网格类属性
+    # 不能各抄一份颜色字面量)。Qt 版没有网格类, 着色走 core 的 _cell_fg ——
+    # 同一个不变量的 Qt 形态: 界面层不持有自己的颜色常量。
+    import video_core
+    import video_qt
+    check("video_qt 没有自己的 FG_PASS (不另抄一份)",
+          not hasattr(video_qt, 'FG_PASS'),
+          f"got={getattr(video_qt, 'FG_PASS', None)!r}")
+    check("video_qt 没有自己的 FG_FAIL (不另抄一份)",
+          not hasattr(video_qt, 'FG_FAIL'),
+          f"got={getattr(video_qt, 'FG_FAIL', None)!r}")
+    with open(video_qt.__file__, encoding='utf-8') as fh:
+        qt_src = fh.read().lower()
+    check("video_qt.py 里没有硬抄的 '#228b22' / '#dc143c' 字面量",
+          '#228b22' not in qt_src and '#dc143c' not in qt_src)
+    check("core 的 FG_PASS 是绿色", video_core.FG_PASS.lower() == '#228b22',
+          f"got={video_core.FG_PASS!r}")
+    check("core 的 FG_FAIL 是红色", video_core.FG_FAIL.lower() == '#dc143c',
+          f"got={video_core.FG_FAIL!r}")
+    check("达标行渲染的颜色 == core.FG_PASS",
+          fg_at(0, 1).lower() == video_core.FG_PASS.lower(),
+          f"got={fg_at(0, 1)!r}")
+    check("不达标行渲染的颜色 == core.FG_FAIL",
+          fg_at(1, 1).lower() == video_core.FG_FAIL.lower(),
+          f"got={fg_at(1, 1)!r}")
 
     section("单元格对齐 (Qt.TextAlignmentRole)")
     ma = VideoTableModel(VIDEO_COLUMNS)
@@ -186,6 +344,22 @@ def main():
           and dc_events[0][0].row() == 0 and dc_events[0][0].column() == 4
           and Qt.DisplayRole in dc_events[0][2],
           f"got={dc_events}")
+
+    section("截断口径与 video_core.truncate_text 一致")
+    from video_core import truncate_text
+    mt2 = VideoTableModel(VIDEO_COLUMNS)
+    long_info = mk('x' * 200 + '.mp4')
+    mt2.append_result(long_info)
+    app.processEvents()
+    for col in (1, 5):                      # title / spec
+        want = truncate_text(mt2._full_text(col, long_info),
+                             mt2._widths[col], mt2._measure)
+        got = mt2.data(mt2.index(0, col), Qt.DisplayRole)
+        check(f"第 {col} 列显示的文本 == truncate_text(完整文本, 列宽)",
+              got == want, f"got={got!r} want={want!r}")
+    check("短文本原样返回 (不截断)",
+          mt2.data(mt2.index(0, 5), Qt.DisplayRole) == 'mp4/h264/aac',
+          f"got={mt2.data(mt2.index(0, 5), Qt.DisplayRole)!r}")
 
     section("序号列 = 排序后的新位置")
     m2 = VideoTableModel(VIDEO_COLUMNS)
@@ -274,6 +448,9 @@ def main():
     r3 = no_raise(lambda: m9.data(stale, Qt.DisplayRole))
     check("clear() 之前的 index 过期 → data() 返回 None (不抛 IndexError)",
           r3 is None, f"got={r3!r}")
+    r4 = no_raise(lambda: m9.data(stale, Qt.ToolTipRole))
+    check("clear() 之前的 index 过期 → ToolTipRole 也是 None (不留陈旧完整值)",
+          r4 is None, f"got={r4!r}")
 
     section("排序态变化 → 表头要通知 (箭头刷新)")
     m10 = VideoTableModel(VIDEO_COLUMNS)
@@ -310,6 +487,68 @@ def main():
           f"got={tip!r}")
     tip2 = m6.data(m6.index(0, 2), Qt.ToolTipRole)
     check("没截断的列不给 tooltip", tip2 is None, f"got={tip2!r}")
+
+    section("tooltip — 视图真的向模型要完整值 (真实事件派发)")
+    # 原断言 (Tk 版「Tooltip — 真实事件派发」): 光看绑定字符串不够, 得证明
+    # 事件真的送到了 handler。Qt 版对应: 派一个真的 ToolTip 事件给视口,
+    # 证明视图确实来问模型要 Qt.ToolTipRole 的值。
+    from PySide6.QtCore import QEvent, qInstallMessageHandler
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QTableView
+
+    class _SpyModel(VideoTableModel):
+        """记下每次有人问 ToolTipRole。"""
+
+        def __init__(self, columns):
+            super().__init__(columns)
+            self.tooltip_queries = []
+
+        def data(self, index, role=Qt.DisplayRole):
+            if role == Qt.ToolTipRole:
+                self.tooltip_queries.append((index.row(), index.column()))
+            return super().data(index, role)
+
+    spy = _SpyModel(VIDEO_COLUMNS)
+    spy.append_result(mk('x' * 200 + '.mp4'))
+    spy.append_result(mk('a.mp4'))
+    tv = QTableView()
+    tv.setModel(spy)
+    for i in range(len(VIDEO_COLUMNS)):
+        tv.setColumnWidth(i, spy._widths[i])
+    tv.resize(1000, 600)
+    tv.show()
+    app.processEvents()
+
+    idx_cut = spy.index(0, 1)
+    pos_cut = tv.visualRect(idx_cut).center()
+    spy.tooltip_queries.clear()
+    # offscreen 平台没有窗口可 raise → QToolTip 弹 tooltip 时会打一条
+    # qWarning ("This plugin does not support raise()")。只在这两条断言
+    # 期间吞掉它, 其余 Qt 输出照常。
+    def _qt_msg_handler(mode, context, message):
+        if 'does not support raise()' not in message:
+            sys.stderr.write(message + '\n')
+
+    old_handler = qInstallMessageHandler(_qt_msg_handler)
+    try:
+        QApplication.sendEvent(tv.viewport(),
+                                QHelpEvent(QEvent.ToolTip, pos_cut, pos_cut))
+        check("真实 ToolTip 事件 → 视图确实来问模型要 tooltip",
+              (0, 1) in spy.tooltip_queries, f"got={spy.tooltip_queries}")
+        check("问出来的值是完整值 (不是截断值)",
+              spy.data(idx_cut, Qt.ToolTipRole) == './' + 'x' * 200 + '.mp4',
+              f"got={spy.data(idx_cut, Qt.ToolTipRole)!r}")
+
+        idx_plain = spy.index(1, 1)
+        pos_plain = tv.visualRect(idx_plain).center()
+        spy.tooltip_queries.clear()
+        QApplication.sendEvent(
+            tv.viewport(), QHelpEvent(QEvent.ToolTip, pos_plain, pos_plain))
+        check("没截断的格 → 模型不给完整值 (视图没有可弹的内容)",
+              spy.data(idx_plain, Qt.ToolTipRole) is None,
+              f"got={spy.data(idx_plain, Qt.ToolTipRole)!r}")
+    finally:
+        qInstallMessageHandler(old_handler)
 
     section("空表 / 清空")
     m7 = VideoTableModel(VIDEO_COLUMNS)

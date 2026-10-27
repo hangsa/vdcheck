@@ -128,14 +128,12 @@ def main():
 
     root.destroy()
 
-    section("类属性与 core 常量同源 (不能各抄一份字面量)")
-    from video_checker import VideoGridView
-    check("VideoGridView.FG_PASS 就是 core 的 FG_PASS",
-          VideoGridView.FG_PASS == video_core.FG_PASS,
-          f"got={VideoGridView.FG_PASS!r}")
-    check("VideoGridView.FG_FAIL 就是 core 的 FG_FAIL",
-          VideoGridView.FG_FAIL == video_core.FG_FAIL,
-          f"got={VideoGridView.FG_FAIL!r}")
+    # 原先这里还有一节「类属性与 core 常量同源 (不能各抄一份字面量)」——
+    # 断言 VideoGridView.FG_PASS / FG_FAIL 就是 core 的那两个常量。
+    # 表格 GUI 层换成 Qt 之后, VideoGridView 这个类没了 (Task 7 删),
+    # 同一个不变量的 Qt 形态 (界面层不持有自己的颜色常量、不硬抄字面量)
+    # 改到 docs/superpowers/specs/2026-10-27-qt-table-assertions.py 的
+    # 「着色常量只有一个来源」那一节去断言了。
 
     print()
     if _failures:
