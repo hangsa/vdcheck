@@ -251,7 +251,11 @@ def main():
           [k for k, v in red_cols.items() if v == '#dc143c']
           == [1, 4, 7, 10],
           f"got={red_cols}")
-    check("序号列永远黑色", fg_at(1, 0) == '#000000', f"got={fg_at(1, 0)}")
+    # 规格 §3.3 写的是序号列「永不染色」, 不是「永远是黑色」—— 写死黑色
+    # 的话深色主题下就是黑字黑底。改成「不着色」: 用调色板默认色,
+    # 既不绿也不红 (这才是「永不染色」这条不变量的意思)。
+    check("序号列不着色 (调色板默认色, 既不绿也不红)",
+          fg_at(1, 0) is None, f"got={fg_at(1, 0)}")
     check("只码率不达标 → title/result/bitrate 红",
           [c for c in range(1, 11) if fg_at(2, c) == '#dc143c'] == [1, 4, 10],
           f"got={[c for c in range(1, 11) if fg_at(2, c) == '#dc143c']}")

@@ -10,6 +10,7 @@ docs/superpowers/plans/2026-10-27-pyside6-qtableview.md 的 Task 5
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,24 @@ import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
+
+_tmpdirs: list[str] = []
+
+
+def mkdtemp(prefix: str = 'vdcheck_') -> str:
+    """建临时目录, 记下来, 退出时清掉。
+
+    断言脚本建了一堆 vdcheck_* 目录又不删 —— 用户的 $TMPDIR 会被塞满。
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    _tmpdirs.append(path)
+    return path
+
+
+def cleanup_tmpdirs() -> None:
+    for path in _tmpdirs:
+        shutil.rmtree(path, ignore_errors=True)
+    _tmpdirs.clear()
 
 # 没有显示环境时 Qt 用 offscreen 平台 (会打一条字体族警告到 stderr, 不在范围)。
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -117,6 +136,7 @@ def main() -> int:
         return _run()
     finally:
         video_qt.run_ffprobe = real_run_ffprobe
+        cleanup_tmpdirs()
 
 
 def _run() -> int:
@@ -158,7 +178,7 @@ def _run() -> int:
 
     # ================================================================
     section("状态栏文案序列")
-    src = tempfile.mkdtemp(prefix='vdcheck_qt_src_')
+    src = mkdtemp(prefix='vdcheck_qt_src_')
     for name in ('a.mp4', 'b.mp4', 'c.mp4'):
         open(os.path.join(src, name), 'w').close()
 
@@ -254,8 +274,8 @@ def _run() -> int:
     # ================================================================
     section("派生路径 (迁移地址 / 截图地址)")
     win4 = MainWindow()
-    src_a = tempfile.mkdtemp(prefix='vdcheck_qt_a_')
-    src_b = tempfile.mkdtemp(prefix='vdcheck_qt_b_')
+    src_a = mkdtemp(prefix='vdcheck_qt_a_')
+    src_b = mkdtemp(prefix='vdcheck_qt_b_')
     win4._sync_derived_paths(src_a)
     check("迁移地址 = <源>\\checked (无条件转反斜杠)",
           win4.dest_edit.text() == checked_dest_for(src_a),
@@ -291,7 +311,7 @@ def _run() -> int:
 
     # ================================================================
     section("「浏览」语义: 选的是父目录, 下面套一层子目录")
-    picked = tempfile.mkdtemp(prefix='vdcheck_qt_pick_')
+    picked = mkdtemp(prefix='vdcheck_qt_pick_')
     win4._ask_directory = lambda title: picked
     win4._selected_files = ['/stale/a.mp4', '/stale/b.mp4']
     win4._browse_path()
@@ -356,7 +376,7 @@ def _run() -> int:
     # 迁移地址一律转反斜杠, macOS 上 os.makedirs 会把 '\var\...\checked'
     # 当成一个**字面目录名**在 CWD 里建出来 → 把 CWD 挪进沙箱, 别在仓库
     # 根目录留垃圾。Windows 上反斜杠就是分隔符, 沙箱对它是空操作。
-    sandbox = tempfile.mkdtemp(prefix='vdcheck_qt_sandbox_')
+    sandbox = mkdtemp(prefix='vdcheck_qt_sandbox_')
     cwd = os.getcwd()
     os.chdir(sandbox)
     try:
@@ -365,7 +385,7 @@ def _run() -> int:
         results: list[str] = []
         win6._ask_yes_no = lambda text: (confirms.append(text), True)[1]
         win6._show_move_result = lambda text: results.append(text)
-        mov_src = tempfile.mkdtemp(prefix='vdcheck_qt_mov_')
+        mov_src = mkdtemp(prefix='vdcheck_qt_mov_')
         paths = []
         for name in ('a.mp4', 'b.mp4', 'c.mp4', 'd.mp4'):
             p = os.path.join(mov_src, name)
@@ -378,7 +398,7 @@ def _run() -> int:
         win6._add_result(make_info('a.mp4', paths[0], bitrate=50000.0))
         win6._add_result(make_info('b.mp4', paths[1], bitrate=20000.0))
         win6._add_result(make_info('d.mp4', paths[3], passing=False))
-        dest_parent = tempfile.mkdtemp(prefix='vdcheck_qt_dest_')
+        dest_parent = mkdtemp(prefix='vdcheck_qt_dest_')
         dest = checked_dest_for(dest_parent)
         win6.dest_edit.setText(dest)
         win6.model.on_header_clicked(4)      # 按码率排序 (显示序 ≠ 插入序)
@@ -455,7 +475,7 @@ def _run() -> int:
               f"got={text7[:40]!r}")
 
         # ---- 目标重名 → _1 去重 ----
-        dup_dir = tempfile.mkdtemp(prefix='vdcheck_qt_dup_')
+        dup_dir = mkdtemp(prefix='vdcheck_qt_dup_')
         open(os.path.join(dup_dir, 'a.mp4'), 'w').close()
         dup_src = os.path.join(mov_src, 'a.mp4')
         check("目标已有同名 → _1",
@@ -531,7 +551,7 @@ def _run() -> int:
     # Qt 走 mimeData().urls() —— 每个 URL 是一个完整路径, 天然正确。
     section("拖拽: 含空格的路径不被切错")
     win8b = MainWindow()
-    spaced_dir = tempfile.mkdtemp(prefix='vdcheck_qt spaced dir ')
+    spaced_dir = mkdtemp(prefix='vdcheck_qt spaced dir ')
     spaced_file = os.path.join(spaced_dir, 'a b c.mp4')
     open(spaced_file, 'w').close()
     md2 = QMimeData()
@@ -560,7 +580,7 @@ def _run() -> int:
     # ================================================================
     section("截图目录: 「开始截图」才建 (按钮 → ensure_snapshot_dir 的口子)")
     winS = MainWindow()
-    snap_parent = tempfile.mkdtemp(prefix='vdcheck_qt_snap_')
+    snap_parent = mkdtemp(prefix='vdcheck_qt_snap_')
     winS._sync_derived_paths(snap_parent)
     snap_dir = winS.snapshot_dest
     check("派生路径阶段截图目录还不存在",
@@ -601,8 +621,8 @@ def _run() -> int:
           fg_at(0, 1) == '#dc143c', f"got={fg_at(0, 1)}")
     check("不达标行的**非失败列返回 None** (Qt 用调色板默认色)",
           fg_at(0, 2) is None, f"got={fg_at(0, 2)}")
-    check("序号列仍然是黑色 (规格 §3.3: 永不染色)",
-          fg_at(0, 0) == '#000000', f"got={fg_at(0, 0)}")
+    check("序号列也**不写死颜色** (规格 §3.3「永不染色」, 不是「永远黑色」)",
+          fg_at(0, 0) is None, f"got={fg_at(0, 0)}")
 
     # ================================================================
     section("列宽两个方向的接线")
@@ -705,6 +725,33 @@ def _run() -> int:
     check("扫描目标回落到目录",
           winB._scan_target('/tmp/other') == ('dir', '/tmp/other'),
           f"got={winB._scan_target('/tmp/other')!r}")
+
+    # ================================================================
+    section("关窗口: 同一个扫描线程只停一遍")
+    # closeEvent 与 aboutToQuit 都会调 _stop_scan —— 清了 self._thread,
+    # 第二个调用才是 no-op。否则同一个线程被停两遍 (5s + 5s 的 GUI 冻结),
+    # 而且会孤儿化出两个条目, main() 对同一个对象等两次。
+    winX = MainWindow()
+    winX.path_edit.setText(src)
+    winX._start_scan()
+    try:
+        winX._stop_scan(timeout_ms=0)      # 立刻放弃等待 → 孤儿化
+        check("_stop_scan 之后 self._thread 被清掉",
+              winX._thread is None, f"got={winX._thread!r}")
+        n_before = len(video_qt._ORPHANED_THREADS)
+        check("孤儿线程被记进 _ORPHANED_THREADS (退出时统一收)",
+              n_before >= 1, f"got={n_before}")
+        winX._stop_scan(timeout_ms=0)      # 再来一次 → 必须是 no-op
+        check("再停一次不会重复孤儿化 (同一个线程只停一遍)",
+              len(video_qt._ORPHANED_THREADS) == n_before,
+              f"before={n_before} after={len(video_qt._ORPHANED_THREADS)}")
+    finally:
+        # 收尾: 等那些孤儿线程结束再清列表 —— 解释器退出时析构一个还在跑
+        # 的 QThread 会 abort (退出码 134)
+        for thread in list(video_qt._ORPHANED_THREADS):
+            thread.wait(5000)
+        video_qt._ORPHANED_THREADS.clear()
+        app.processEvents()
 
     print()
     if _failures:

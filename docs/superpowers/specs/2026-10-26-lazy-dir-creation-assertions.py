@@ -16,12 +16,36 @@
 跑法: python docs/superpowers/specs/2026-10-26-lazy-dir-creation-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
 """
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
+
+
+_tmpdirs: list[str] = []
+
+
+def mkdtemp(prefix: str = 'vdcheck_') -> str:
+    """建临时目录, 记下来, 退出时清掉。
+
+    断言脚本建了一堆 vdcheck_* 目录又不删 —— 用户的 $TMPDIR 会被塞满。
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    _tmpdirs.append(path)
+    return path
+
+
+def cleanup_tmpdirs() -> None:
+    for path in _tmpdirs:
+        shutil.rmtree(path, ignore_errors=True)
+    _tmpdirs.clear()
+
+
+atexit.register(cleanup_tmpdirs)
 
 # Qt 版主窗口要 QApplication 才能建 (QFontMetrics 没有 QGuiApplication 会
 # 直接 abort 进程), 所以先建 app 再 import video_qt。没有显示环境时用
@@ -79,7 +103,7 @@ def main() -> int:
 
     # ================= 1. 扫描/浏览阶段一个目录都不许建 =================
     section("扫描阶段不建目录")
-    src = tempfile.mkdtemp(prefix='vdcheck_src_')
+    src = mkdtemp(prefix='vdcheck_src_')
     app._sync_derived_paths(src)
     check("源目录下没有 snapshot",
           not os.path.isdir(os.path.join(src, 'snapshot')),
@@ -106,7 +130,7 @@ def main() -> int:
 
     # ================= 2. 「浏览」套一层子目录 =================
     section("迁移地址「浏览」套一层 checked")
-    picked = tempfile.mkdtemp(prefix='vdcheck_pick_')
+    picked = mkdtemp(prefix='vdcheck_pick_')
     app._ask_directory = lambda title: picked
     app._browse_dest()
     check("迁移地址 = 所选文件夹\\checked",
@@ -125,7 +149,7 @@ def main() -> int:
           not os.path.isdir(snap_expect(picked)),
           f"path={snap_expect(picked)!r}")
 
-    # ================= 3. 真要用截图目录时才建 =================
+    # ================= 3. 建目录的那个口子 (ensure_snapshot_dir) =================
     section("ensure_snapshot_dir() 才建 snapshot 目录")
     # 这一节验的是**建目录的那个口子** (ensure_snapshot_dir), 不是
     # 「点『开始截图』按钮」—— 那个按钮在定点截图弹窗里, 是 Task 6 的
@@ -143,16 +167,16 @@ def main() -> int:
     # 迁移地址一律转反斜杠, macOS 上 os.makedirs 会把 '\var\...\checked'
     # 当成一个**字面目录名**在 CWD 里建出来 → 把 CWD 挪进沙箱, 别在仓库
     # 根目录留垃圾。Windows 上反斜杠就是分隔符, 沙箱对它是空操作。
-    sandbox = tempfile.mkdtemp(prefix='vdcheck_sandbox_')
+    sandbox = mkdtemp(prefix='vdcheck_sandbox_')
     cwd = os.getcwd()
     os.chdir(sandbox)
     try:
         section("点「移动达标文件」才建 checked 目录")
-        mov_src = tempfile.mkdtemp(prefix='vdcheck_mov_')
+        mov_src = mkdtemp(prefix='vdcheck_mov_')
         video = os.path.join(mov_src, 'a.mp4')
         with open(video, 'wb') as f:
             f.write(b'fake')
-        dest_parent = tempfile.mkdtemp(prefix='vdcheck_dest_')
+        dest_parent = mkdtemp(prefix='vdcheck_dest_')
         dest_dir = dest_expect(dest_parent)
         app.video_results.clear()
         app._add_result(
@@ -173,11 +197,11 @@ def main() -> int:
 
         # 移动全部文件同理
         section("点「移动全部文件」才建 checked 目录")
-        mov_src2 = tempfile.mkdtemp(prefix='vdcheck_mov2_')
+        mov_src2 = mkdtemp(prefix='vdcheck_mov2_')
         video2 = os.path.join(mov_src2, 'b.mp4')
         with open(video2, 'wb') as f:
             f.write(b'fake')
-        dest_parent2 = tempfile.mkdtemp(prefix='vdcheck_dest2_')
+        dest_parent2 = mkdtemp(prefix='vdcheck_dest2_')
         dest_dir2 = dest_expect(dest_parent2)
         app.video_results.clear()
         app._add_result(

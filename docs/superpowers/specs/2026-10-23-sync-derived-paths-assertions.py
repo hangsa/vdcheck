@@ -17,12 +17,36 @@
 退出码 0 = 全部通过；非 0 = 有失败。
 """
 import inspect
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
+
+
+_tmpdirs: list[str] = []
+
+
+def mkdtemp(prefix: str = 'vdcheck_') -> str:
+    """建临时目录, 记下来, 退出时清掉。
+
+    断言脚本建了一堆 vdcheck_* 目录又不删 —— 用户的 $TMPDIR 会被塞满。
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    _tmpdirs.append(path)
+    return path
+
+
+def cleanup_tmpdirs() -> None:
+    for path in _tmpdirs:
+        shutil.rmtree(path, ignore_errors=True)
+    _tmpdirs.clear()
+
+
+atexit.register(cleanup_tmpdirs)
 
 # Qt 版主窗口要 QApplication 才能建 (QFontMetrics 没有 QGuiApplication 会
 # 直接 abort 进程), 所以先建 app 再 import video_qt。没有显示环境时用
@@ -70,8 +94,8 @@ def expected_snapshot(directory: str) -> str:
 def main() -> int:
     app = MainWindow()
 
-    tmp_a = tempfile.mkdtemp(prefix='vdcheck_src_a_')
-    tmp_b = tempfile.mkdtemp(prefix='vdcheck_src_b_')
+    tmp_a = mkdtemp(prefix='vdcheck_src_a_')
+    tmp_b = mkdtemp(prefix='vdcheck_src_b_')
 
     # ---- 浏览: 只保留文件夹 ----
     section("浏览只开文件夹选择器")

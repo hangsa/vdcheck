@@ -80,9 +80,15 @@ def __getattr__(name: str):
     注意: `from video_qt import UI_FONT` 走的是**快照**语义 —— 绑定那一刻
     求值一次, 之后 app 建好了也不会刷新。代码里**一律用 ui_font()**,
     不要用 from-import 拿 UI_FONT。
+
+    PEP 562: 这里只能抛 AttributeError —— 抛别的异常的话,
+    hasattr() / getattr(..., default) 对这一个名字就失灵了。
     """
     if name == 'UI_FONT':
-        return ui_font()
+        try:
+            return ui_font()
+        except RuntimeError as e:
+            raise AttributeError(str(e)) from e
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -169,13 +175,12 @@ class VideoTableModel(QAbstractTableModel):
                 return str(row + 1)
             return self._truncated(section, info)
         if role == Qt.ForegroundRole:
-            if col.key is None:                    # 序号列永远黑色
-                return QBrush(QColor('#000000'))
             fg = _cell_fg(info, col.key)
             if fg is None:
                 # 该格**不着色** → 返回 None 让 Qt 用调色板默认色。
                 # 写死黑色的话深色主题下就是黑字黑底 (规格 §3.3 写的是
-                # 「其余保持默认色」)。
+                # 「其余保持默认色」)。序号列也一样 —— 它是「永不染色」,
+                # 不是「永远是黑色」。
                 return None
             return QBrush(QColor(fg))
         if role == Qt.TextAlignmentRole:
@@ -874,11 +879,14 @@ class MainWindow(QMainWindow):
         QThread 是窗口的 child —— 光把 Python 引用置 None 不会回收 C++ 侧
         那个对象 (扫 1000 次就攒 1000 个 QThread), 所以显式 deleteLater。
 
-        可能是上一轮的线程 (用户又点了一次「开始检测」), 所以只清**当前**
-        那一轮的引用, 别把新线程的引用也清掉。
+        三种情况:
+          - 就是当前这一轮 → 清引用
+          - 是被 _stop_scan 孤儿化的那一轮 (self._thread 已经清空) → 也清
+          - 是上一轮的 (用户又点了一次「开始检测」, self._thread 已经是新的)
+            → **不能**碰当前这一轮的引用
         """
         thread = self.sender()
-        if thread is self._thread:
+        if thread is self._thread or self._thread is None:
             self._thread = None
             self._worker = None
         if thread is not None:
@@ -1111,11 +1119,16 @@ class MainWindow(QMainWindow):
         等不出来 (比如 ffprobe 卡在网络盘上) 就不等了, 但**绝不能**析构一个
         还在跑的 QThread (那会 abort) —— 把它从窗口的 child 关系里摘出来,
         由 main() 在退出前等它收尾。
+
+        先把 `self._thread` 清掉: 否则关窗口 (closeEvent) 与 app 退出
+        (aboutToQuit) 会把**同一个**线程各停一次 —— 5s + 5s 的 GUI 冻结,
+        main() 还会对它等两遍。
         """
         self._cancel.set()
         thread = self._thread
         if thread is None:
             return
+        self._thread = None          # ← 别让第二次调用再停同一个线程
         thread.quit()
         if not thread.wait(timeout_ms):
             thread.setParent(None)
@@ -1127,6 +1140,9 @@ class MainWindow(QMainWindow):
         QThread 是窗口的 child —— 窗口先没了、线程还在跑的话, 线程会被
         连带析构, 进程直接 abort (QThread: Destroyed while thread is still
         running)。解释器退出时窗口就是被回收的, 所以这条兜底必须有。
+
+        注意: 兜底只负责「别让线程被连带析构」, **不负责等它结束** ——
+        退出路径上的等待统一由 main() 做 (见 _shutdown_scan_threads)。
         """
         try:
             self._stop_scan(timeout_ms=2000)
@@ -1134,8 +1150,20 @@ class MainWindow(QMainWindow):
             pass
 
 
-# 关窗口时没等完的扫描线程。绝不能析构一个还在跑的 QThread (会 abort),
-# 所以摘出 parent 关系存在这里, 由 main() 在退出前等它自然结束。
+def _shutdown_scan_threads(timeout_ms: int = 5000) -> bool:
+    """等所有被孤儿化的扫描线程结束。
+
+    返回 True = 全都停了; False = 还有线程在跑 (调用方必须用 `os._exit`
+    收尾, 绝不能让它被析构)。
+
+    **列表里的引用不清** —— 清了就等于析构那个 QThread, 而它可能还在跑:
+    QThread 的析构里会 qFatal("QThread: Destroyed while thread is still
+    running") → 进程 abort (退出码 134)。引用要一直留着, 直到进程用
+    os._exit 跳过所有析构。
+    """
+    for thread in list(_ORPHANED_THREADS):
+        thread.wait(timeout_ms)
+    return not any(thread.isRunning() for thread in _ORPHANED_THREADS)
 
 
 def main() -> None:
@@ -1148,9 +1176,21 @@ def main() -> None:
     window = MainWindow()
     window.show()
     app.exec()
-    # 收尾: 关窗口时没等完的扫描线程, 在这儿等它自然结束 ——
-    # 带着一个还在跑的 QThread 退出进程会 abort。ffprobe 的超时是 30s,
-    # 留 5s 余量。
-    for thread in _ORPHANED_THREADS:
-        thread.wait(35000)
+    # ---- 退出路径 ----
+    #
+    # 进程退出时**绝不能**有一个还在跑的 QThread 被析构:
+    #   QThread: Destroyed while thread is still running → std::terminate
+    #   → 退出码 134 (SIGABRT)
+    # 两条路都会撞上:
+    #   ① 解释器退出 → 模块全局被清 → 那个 QThread 的包装被回收 →
+    #      C++ 侧析构一个还在跑的线程 → abort
+    #   ② main() 返回后 Python 跑析构 → 同样的事
+    #
+    # 所以: 先等一会儿 (让 worker 把当前那个文件跑完, ffprobe 子进程
+    # 能正常收尾), 然后**用 os._exit 跳过 C++ 析构**。
+    # 宁可少跑一遍 atexit / Python 的清理, 也不能让进程以 134 退出。
+    _shutdown_scan_threads(timeout_ms=5000)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 

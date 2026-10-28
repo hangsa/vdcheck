@@ -15,12 +15,36 @@
 运行: python docs/superpowers/specs/2026-10-26-path-override-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
 """
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
+
+
+_tmpdirs: list[str] = []
+
+
+def mkdtemp(prefix: str = 'vdcheck_') -> str:
+    """建临时目录, 记下来, 退出时清掉。
+
+    断言脚本建了一堆 vdcheck_* 目录又不删 —— 用户的 $TMPDIR 会被塞满。
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    _tmpdirs.append(path)
+    return path
+
+
+def cleanup_tmpdirs() -> None:
+    for path in _tmpdirs:
+        shutil.rmtree(path, ignore_errors=True)
+    _tmpdirs.clear()
+
+
+atexit.register(cleanup_tmpdirs)
 
 # Qt 版主窗口要 QApplication 才能建 (QFontMetrics 没有 QGuiApplication 会
 # 直接 abort 进程), 所以先建 app 再 import video_qt。没有显示环境时用
@@ -70,8 +94,8 @@ def main() -> int:
     calls: list = []
     stub_scan(app, calls)
 
-    drop_dir = tempfile.mkdtemp(prefix='vdcheck_drop_')
-    other_dir = tempfile.mkdtemp(prefix='vdcheck_other_')
+    drop_dir = mkdtemp(prefix='vdcheck_drop_')
+    other_dir = mkdtemp(prefix='vdcheck_other_')
     drop_files = [os.path.join(drop_dir, 'a.mp4'),
                   os.path.join(drop_dir, 'b.mp4')]
     for f in drop_files:

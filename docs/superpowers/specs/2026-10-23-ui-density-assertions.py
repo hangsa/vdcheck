@@ -15,11 +15,36 @@
 运行: python docs/superpowers/specs/2026-10-23-ui-density-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
 """
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
+
+
+_tmpdirs: list[str] = []
+
+
+def mkdtemp(prefix: str = 'vdcheck_') -> str:
+    """建临时目录, 记下来, 退出时清掉。
+
+    断言脚本建了一堆 vdcheck_* 目录又不删 —— 用户的 $TMPDIR 会被塞满。
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    _tmpdirs.append(path)
+    return path
+
+
+def cleanup_tmpdirs() -> None:
+    for path in _tmpdirs:
+        shutil.rmtree(path, ignore_errors=True)
+    _tmpdirs.clear()
+
+
+atexit.register(cleanup_tmpdirs)
 
 import tkinter as tk
 from tkinter import font as tkfont
@@ -131,11 +156,10 @@ def main() -> None:
     check("空串原样返回", got == '', f"got={got!r}")
 
     section("SnapshotProgressDialog — 横向滚动条")
-    import tempfile
     from video_checker import SnapshotProgressDialog
 
     dlg = SnapshotProgressDialog(root, [make_info(title='a.mp4', rel_path='./')],
-                                tempfile.mkdtemp())
+                                mkdtemp())
     root.update_idletasks()
     check("弹窗有 _hsb", hasattr(dlg, '_hsb'))
     hsb = getattr(dlg, '_hsb', None)
@@ -243,7 +267,7 @@ def main() -> None:
           not missing45, f"未绑={missing45}")
 
     section("SnapshotProgressDialog — 空文件列表不崩")
-    dlg2 = SnapshotProgressDialog(root, [], tempfile.mkdtemp())
+    dlg2 = SnapshotProgressDialog(root, [], mkdtemp())
     root.update_idletasks()
     # 空 files: _inner 里只剩 row 0 的表头 label, 一个数据行 (row >= 1) 都不该有。
     rows = [w for w in dlg2._inner.winfo_children()
@@ -255,7 +279,7 @@ def main() -> None:
     section("SnapshotProgressDialog — 标题显示 rel_path 且按像素限宽")
     d3 = SnapshotProgressDialog(root, [make_info(title='a.mp4', rel_path='./A/B'),
                                       make_info(title='a.mp4', rel_path='./C')],
-                                tempfile.mkdtemp())
+                                mkdtemp())
     root.update_idletasks()
     tl = d3._row_title_labels
     check("第 1 行标题含子文件夹路径", tl[0].cget('text') == './A/B/a.mp4',
@@ -266,7 +290,7 @@ def main() -> None:
 
     d4 = SnapshotProgressDialog(
         root, [make_info(title='很长的批次/子目录/成片_final_v2_1080p.mp4',
-                         rel_path='./2026/10/23')], tempfile.mkdtemp())
+                         rel_path='./2026/10/23')], mkdtemp())
     root.update_idletasks()
     lbl4 = d4._row_title_labels[0]
     check("超长路径被截断", lbl4.cget('text') != lbl4._full_text,
@@ -291,7 +315,7 @@ def main() -> None:
     d3.top.destroy(); d4.top.destroy()
 
     section("mark_done — PhotoImage 只留 display")
-    d5 = SnapshotProgressDialog(root, [make_info()], tempfile.mkdtemp())
+    d5 = SnapshotProgressDialog(root, [make_info()], mkdtemp())
     # 时间点 cell 是起跑时 _update_table() 才建的 (构造时只有序号/标题列),
     # 这里补建, 让 _cells[0][0] 存在。
     d5._update_table(d5._time_tokens)
@@ -299,7 +323,7 @@ def main() -> None:
     # 用 tkinter 造一张 640x360 PNG (不依赖 ffmpeg)
     big = tk.PhotoImage(width=640, height=360)
     big.put('red', to=(0, 0, 639, 359))
-    png = os.path.join(tempfile.mkdtemp(), 'frame.png')
+    png = os.path.join(mkdtemp(), 'frame.png')
     big.write(png, format='png')
     del big
 
@@ -329,7 +353,7 @@ def main() -> None:
     d5.top.destroy()
 
     section("mark_failed — 无残留图片")
-    d6 = SnapshotProgressDialog(root, [make_info()], tempfile.mkdtemp())
+    d6 = SnapshotProgressDialog(root, [make_info()], mkdtemp())
     d6._update_table(d6._time_tokens)
     d6._state = 'running'
     d6.mark_failed(0, 0)
