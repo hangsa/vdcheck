@@ -3,7 +3,6 @@
 验证：
 - format_title 全部 rel_path 形态 (含跨盘符绝对路径 / UNC);
 - truncate_text 像素级截断 (ASCII / CJK / 边界);
-- 定点截图弹窗的横向滚动 / 列对齐 / 缩略图释放;
 - 状态栏文案 (一行合并 + 计数归零 + 中途停止)。
 
 **表格相关的小节已迁走** (2026-10-27, Tk → Qt 重构):
@@ -11,6 +10,20 @@
 网格 cell 的 `_truncated` 标记 —— 这些断言的是 Tk 的 VideoGridView 内部结构,
 对应的语义改测 Qt 模型, 见
 `docs/superpowers/specs/2026-10-27-qt-table-assertions.py`。
+
+**定点截图弹窗的小节也迁走了** (2026-10-27, 同一个 Tk → Qt 重构):
+横向滚动 / 表头与数据列对齐 / 空文件列表 / 标题限宽 / 缩略图只留 320px /
+滚轮绑定 —— 前六项对应的语义见
+`docs/superpowers/specs/2026-10-27-qt-snapshot-assertions.py`;
+**滚轮绑定那节直接删掉, 不补 Qt 版** —— 逐 widget 绑 `<MouseWheel>` 是
+Tk 事件派发机制的产物, `QTableView` 原生支持滚轮, 不需要逐 widget 绑。
+
+另外两处**行为差异** (不是 bug, 是构造方式不同带来的):
+- 旧 Tk 弹窗把表头做成 grid 里的一个 widget, 纵向滚动时随内容滚走 (不钉住);
+  Qt 的表头本来就是独立控件, 天然钉在顶部。
+- 旧 Tk 弹窗的 `mark_done` 用 `PhotoImage.subsample(2,2)` 得到 320px 的
+  display, 640px 原图出作用域即回收; Qt 版同样只留 320px, 放大窗口从磁盘
+  重新加载 640px 原图。
 
 运行: python docs/superpowers/specs/2026-10-23-ui-density-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
@@ -154,215 +167,6 @@ def main() -> None:
 
     got = truncate_text('', 250, font.measure)
     check("空串原样返回", got == '', f"got={got!r}")
-
-    section("SnapshotProgressDialog — 横向滚动条")
-    from video_checker import SnapshotProgressDialog
-
-    dlg = SnapshotProgressDialog(root, [make_info(title='a.mp4', rel_path='./')],
-                                mkdtemp())
-    root.update_idletasks()
-    check("弹窗有 _hsb", hasattr(dlg, '_hsb'))
-    hsb = getattr(dlg, '_hsb', None)
-    check("_hsb 是 Scrollbar", hsb is not None and hsb.winfo_class() == 'TScrollbar',
-          f"got={hsb.winfo_class() if hsb else None!r}")
-    check("_hsb.master 是 _middle (不能是 top)",
-          hsb is not None and hsb.master is dlg._middle,
-          f"master={hsb.master if hsb else None!r}")
-    check("_hsb 已 pack 进布局", hsb is not None and hsb.winfo_manager() == 'pack',
-          f"manager={hsb.winfo_manager() if hsb else None!r}")
-    # 注意: 不能用 'xscroll' in cget('xscrollcommand') 判定 —— tkinter 把 Python
-    # 回调注册成 Tcl 命令再存回选项, cget 拿到的是 '<id>set' 这种字符串化的
-    # 回调 id (跟 cget('command') 同一个坑), 里面并没有 'xscroll' 字样。
-    # 判定改成「选项非空」+ 下面 hsb 位置随 canvas 滚动的功能断言。
-    check("canvas 绑了 xscrollcommand", bool(dlg.canvas.cget('xscrollcommand')),
-          f"got={dlg.canvas.cget('xscrollcommand')!r}")
-
-    # 功能验证: 5 个时间点 → 内容 45+250+5*328=1935 > 窗口 1200, 必须能横滚
-    # 注意不要断言 hsb.cget('command') == canvas.xview —— tkinter 返回的是
-    # 字符串化的回调 id ('4385533376xview'), 不是 bound method, 那样断言必挂。
-    dlg._update_table(['00:00:01:00'] * 5)
-    root.update_idletasks()
-    first, last = dlg.canvas.xview()
-    check("5 个时间点时内容宽出视口 (xview 可见比 < 1)", last - first < 1.0,
-          f"xview={dlg.canvas.xview()}")
-    dlg.canvas.xview_moveto(1.0)
-    root.update_idletasks()
-    check("横向滚动到底 (xview 右端 = 1.0)",
-          abs(dlg.canvas.xview()[1] - 1.0) < 1e-6, f"xview={dlg.canvas.xview()}")
-    check("横向滚动生效 (xview 左端 > 0)", dlg.canvas.xview()[0] > 0.0,
-          f"xview={dlg.canvas.xview()}")
-    check("xscrollcommand 驱动 hsb 位置",
-          hsb is not None and hsb.get()[1] > 0.99, f"hsb={hsb.get() if hsb else None}")
-
-    section("SnapshotProgressDialog — 表头/数据列对齐 (横向滚动不脱节)")
-    # 表头与数据行在 _inner 的同一个 grid 里 (表头 row 0, 数据 row 1..N), 共用同一个
-    # scrollregion。对应关系: 表头第 k 个 label ↔ 第 0 行第 k 个 cell。
-    # winfo_rootx 是窗口级坐标, 不受 canvas 视口裁剪影响, 两者差值即列对齐误差。
-    # 误差要求 0px: 同 grid 分配是结构性对齐, 给了容差就测不出真正的回归。
-    # 表头必须用 _header_labels 显式取, 不能靠「_inner 里 row==0 的 widget」反推 ——
-    # 表头被移出 canvas (钉在视口不动) 时, row 0 上坐的是第一行数据, 那样比等于
-    # 拿数据跟数据比, 恒等于 0, 断言会假绿。
-    hdrs = getattr(dlg, '_header_labels', None)
-    check("弹窗暴露表头 label 列表", hdrs is not None,
-          f"got={[w.cget('text') for w in hdrs] if hdrs else hdrs}")
-    hdrs = hdrs or []
-    body0 = [dlg._row_idx_labels[0], dlg._row_title_labels[0], *dlg._cells[0]]
-    check("表头列数 == 数据列数 (序号+标题+5 个时间点)",
-          len(hdrs) == len(body0) == 7, f"hdr={len(hdrs)} body={len(body0)}")
-    check("表头在 _inner 的 row 0 (与数据行同一 scrollregion)",
-          all(w.master is dlg._inner and int(w.grid_info()['row']) == 0
-              for w in hdrs),
-          f"rows={[int(w.grid_info()['row']) for w in hdrs]}")
-    # 纵向取舍 —— 已知且被接受的行为, 写在这里是为了防止以后被当成 bug 顺手"修掉"。
-    # 表头是 _inner 的孩子 ⇒ 纵向滚动时随内容一起滚出视口, 不钉在顶部。
-    # 不钉住是刻意的: 钉住需要「表头改回 canvas 的兄弟 + 按 canvasx 手工 place
-    # 同步 x 偏移」这套机制, 本机 macOS 上无法验证而部署目标是 Windows, 风险高于收益。
-    # 横向/纵向不可同日而语 —— 横向错位是「错误信息」(表头可见却指着错的列), 纵向滚走
-    # 只是「缺失信息」(滚回去就有, 不产生错误结论)。横向对齐是正确性问题, 必须做到
-    # Δ=0; 纵向不是。
-    check("纵向取舍: 表头不钉住 (master 是 _inner ⇒ 随内容滚出视口)",
-          bool(hdrs) and all(w.master is dlg._inner for w in hdrs),
-          f"master 集合={sorted({w.master.__class__.__name__ for w in hdrs}) if hdrs else '无表头'}")
-    check("表头第 k 列与第 0 行第 k 个 cell 同列",
-          [int(w.grid_info()['column']) for w in hdrs] == [0, 1, 2, 3, 4, 5, 6])
-    # 两个滚动位置各跑一次, 但**它验不到滚动耦合**: 本脚本 root.withdraw(), 弹窗
-    # 从未 map, canvas 不会因 xview 变化去重排 window item 里的 widget —— 实测两个
-    # 位置读到的 winfo_rootx 一字不差, 两次喂进去的是同一份输入。所以这里验的只是
-    # 「两者在同一个 grid 里的相对对齐恒为 0」。滚动耦合由上面那条 master 结构断言
-    # 保证 (_inner 同一个 grid ⇒ 共用一个 scrollregion ⇒ 一起滚)。
-    # 保留两个位置是为了: 将来若改成不 withdraw, 这里会自动开始真的验滚动耦合。
-    for tag, moveto in (("滚动位置 0", 0.0), ("滚到最右", 1.0)):
-        dlg.canvas.xview_moveto(moveto)
-        root.update_idletasks()
-        detail = []
-        worst = -1   # 起点 -1: 表头列表为空时「无对比」不得算通过
-        for h, b in zip(hdrs, body0):
-            hx, bx = h.winfo_rootx(), b.winfo_rootx()
-            worst = max(worst, abs(hx - bx))
-            detail.append(f"{h.cget('text')}={hx}/{bx}")
-        check(f"{tag}: 表头 x 与数据 cell x 对齐 (误差 0px)", worst == 0,
-              f"Δmax={worst}  " + " ".join(detail))
-
-    section("SnapshotProgressDialog — 滚轮绑定 (事件不向父 widget 冒泡)")
-    # Tk 事件只沿 bindtags (自身/class/toplevel/all) 派发, 不向父 widget 冒泡, 所以
-    # 绑在 canvas/_inner 上并不能覆盖停在子 widget 上的滚轮 —— 每个要能滚的 widget
-    # 都得各自显式绑。cell 占了弹窗绝大部分面积, 漏绑等于滚轮在内容区基本是死的。
-    def wheel_targets(d):
-        """所有应该接滚轮的 widget: canvas / _inner / 表头 / 第 0 行数据。"""
-        return [('canvas', d.canvas), ('_inner', d._inner),
-                *[(f'表头 {w.cget("text")}', w) for w in d._header_labels],
-                *[(f'第0行 cell[{c}]', w) for c, w in enumerate(d._cells[0])],
-                ('第0行 序号', d._row_idx_labels[0]),
-                ('第0行 标题', d._row_title_labels[0])]
-
-    targets = wheel_targets(dlg)
-    check("受检滚轮目标数 (canvas+_inner+7 表头+5 cell+序号+标题=16)",
-          len(targets) == 16, f"got={len(targets)}")
-    missing = [tag for tag, w in targets if not w.bind('<MouseWheel>')]
-    check("canvas/_inner/表头/数据 cell 都挂了 <MouseWheel>",
-          not missing, f"未绑={missing}")
-    missing45 = [tag for tag, w in targets
-                 if not w.bind('<Button-4>') or not w.bind('<Button-5>')]
-    check("canvas/_inner/表头/数据 cell 都挂了 <Button-4>/<Button-5> (X11 滚轮)",
-          not missing45, f"未绑={missing45}")
-
-    section("SnapshotProgressDialog — 空文件列表不崩")
-    dlg2 = SnapshotProgressDialog(root, [], mkdtemp())
-    root.update_idletasks()
-    # 空 files: _inner 里只剩 row 0 的表头 label, 一个数据行 (row >= 1) 都不该有。
-    rows = [w for w in dlg2._inner.winfo_children()
-            if int(w.grid_info().get('row', 0)) != 0]
-    check("空 files 不建任何数据行", rows == [],
-          f"数据行={len(rows)} _inner 总 children={len(dlg2._inner.winfo_children())}")
-    dlg2.top.destroy(); dlg.top.destroy()
-
-    section("SnapshotProgressDialog — 标题显示 rel_path 且按像素限宽")
-    d3 = SnapshotProgressDialog(root, [make_info(title='a.mp4', rel_path='./A/B'),
-                                      make_info(title='a.mp4', rel_path='./C')],
-                                mkdtemp())
-    root.update_idletasks()
-    tl = d3._row_title_labels
-    check("第 1 行标题含子文件夹路径", tl[0].cget('text') == './A/B/a.mp4',
-          f"got={tl[0].cget('text')!r}")
-    check("第 2 行标题是 ./C/a.mp4", tl[1].cget('text') == './C/a.mp4',
-          f"got={tl[1].cget('text')!r}")
-    width_short = d3._inner.winfo_reqwidth()
-
-    d4 = SnapshotProgressDialog(
-        root, [make_info(title='很长的批次/子目录/成片_final_v2_1080p.mp4',
-                         rel_path='./2026/10/23')], mkdtemp())
-    root.update_idletasks()
-    lbl4 = d4._row_title_labels[0]
-    check("超长路径被截断", lbl4.cget('text') != lbl4._full_text,
-          f"shown_len={len(lbl4.cget('text'))}")
-    check("截断后以 ... 结尾", lbl4.cget('text').endswith('...'))
-    check("_full_text 存的是完整值", lbl4._full_text.endswith('.mp4'))
-    check("_truncated 标记为 True", lbl4._truncated is True)
-    # 列宽: A/B 对比 —— 超长路径不应把整表撑宽。
-    # 不用 grid_bbox (它报的是分配区宽度, 不随文本变化, 测不出任何东西)。
-    # truncate_text 留 10px 余量扣 padx+bd, 实测标题 label 的 reqwidth 会是
-    # 250~251, 所以断言总宽差 <= 2px 而不是精确相等。
-    width_long = d4._inner.winfo_reqwidth()
-    check("超长路径不撑宽标题列 (总宽差 <= 2px)",
-          abs(width_long - width_short) <= 2,
-          f"short={width_short} long={width_long}")
-
-    section("SnapshotProgressDialog — 短路径不标 _truncated")
-    check("未截断时 _truncated=False", tl[0]._truncated is False,
-          f"got={tl[0]._truncated!r}")
-    check("未截断时 shown == full", tl[0].cget('text') == tl[0]._full_text)
-
-    d3.top.destroy(); d4.top.destroy()
-
-    section("mark_done — PhotoImage 只留 display")
-    d5 = SnapshotProgressDialog(root, [make_info()], mkdtemp())
-    # 时间点 cell 是起跑时 _update_table() 才建的 (构造时只有序号/标题列),
-    # 这里补建, 让 _cells[0][0] 存在。
-    d5._update_table(d5._time_tokens)
-    root.update_idletasks()
-    # 用 tkinter 造一张 640x360 PNG (不依赖 ffmpeg)
-    big = tk.PhotoImage(width=640, height=360)
-    big.put('red', to=(0, 0, 639, 359))
-    png = os.path.join(mkdtemp(), 'frame.png')
-    big.write(png, format='png')
-    del big
-
-    d5._state = 'running'
-    # Tk 的 image table 才是真正的持有者: 只看 _photo_refs 长度的话, 把 640px
-    # 原图藏进别的属性/模块缓存/闭包都能照样全绿。所以直接对比 image table。
-    before = set(root.tk.call('image', 'names'))
-    d5.mark_done(0, 0, png)
-    after = set(root.tk.call('image', 'names'))
-    new = after - before
-    sizes = {n: (root.tk.call('image', 'width', n),
-                 root.tk.call('image', 'height', n)) for n in new}
-    check("640x360 原图已从 Tk image table 释放",
-          all(s != (640, 360) for s in sizes.values()),
-          f"残留 640x360: {[n for n, s in sizes.items() if s == (640, 360)]}")
-    check("image table 里留下的是 320x180 缩略图",
-          sizes.get(d5._photo_refs[0].name) == (320, 180),
-          f"name={d5._photo_refs[0].name} sizes={sizes}")
-    check("_photo_refs 每 cell 恰好 1 项 (原来 2 项)",
-          len(d5._photo_refs) == 1, f"len={len(d5._photo_refs)}")
-    check("留下的是 320px display 不是 640px 原图",
-          d5._photo_refs[0].width() == 320, f"w={d5._photo_refs[0].width()}")
-    check("cell 挂的正是 _photo_refs[0] 这张图",
-          d5._cells[0][0].cget('image') == d5._photo_refs[0].name,
-          f"cell={d5._cells[0][0].cget('image')!r} "
-          f"ref={d5._photo_refs[0].name!r}")
-    d5.top.destroy()
-
-    section("mark_failed — 无残留图片")
-    d6 = SnapshotProgressDialog(root, [make_info()], mkdtemp())
-    d6._update_table(d6._time_tokens)
-    d6._state = 'running'
-    d6.mark_failed(0, 0)
-    check("失败后 _photo_refs 为空", len(d6._photo_refs) == 0,
-          f"len={len(d6._photo_refs)}")
-    check("失败 cell 无残留 image", d6._cells[0][0].cget('image') == '',
-          f"got={d6._cells[0][0].cget('image')!r}")
-    check("失败计数 +1", d6._failed_count == 1, f"got={d6._failed_count}")
-    d6.top.destroy()
 
     section("状态栏合并成一行 (状态 + 统计)")
     # 原断言 (Tk 版): 建一个 VideoCheckerApp, 看状态栏那一行字。

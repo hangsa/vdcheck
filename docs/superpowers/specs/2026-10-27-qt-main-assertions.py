@@ -594,17 +594,13 @@ def _run() -> int:
     winS.ensure_snapshot_dir()
     check("ensure_snapshot_dir() 建目录",
           os.path.isdir(snap_dir), f"path={snap_dir!r}")
-    # 规矩: 建目录只有两个口子 —— 截图归 ensure_snapshot_dir, 迁移归
-    # _move_files。Task 6 的弹窗**必须**走 ensure_snapshot_dir, 自己
-    # os.makedirs 就破坏了「扫描/浏览阶段绝不建目录」。
-    import inspect
-    mw_makedirs = sorted(
-        name for name, obj in vars(MainWindow).items()
-        if inspect.isfunction(obj) and 'os.makedirs(' in inspect.getsource(obj))
-    check("规矩: 只有 ensure_snapshot_dir 与 _move_files 会建目录 "
-          "(Task 6 的弹窗必须走 ensure_snapshot_dir)",
-          mw_makedirs == ['_move_files', 'ensure_snapshot_dir'],
-          f"got={mw_makedirs}")
+    # 规矩「只有 ensure_snapshot_dir 与 _move_files 会建目录」**不再在这里断言** ——
+    # 原来那条只扫 MainWindow 上直接定义的函数 (inspect.getsource), 弹窗类
+    # 自己 os.makedirs 抓不到, 是个有缺口的断言。
+    # 那条规矩现在由**扫全模块的 AST 强断言**守着:
+    # docs/superpowers/specs/2026-10-27-qt-snapshot-assertions.py
+    #   「建目录只有两个口子 (整个模块扫)」
+    # 两边都断言的话将来容易各改各的 —— 只留强的那个。
 
     # ================================================================
     section("不着色的格用调色板默认色 (不是写死黑色)")

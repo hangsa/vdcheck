@@ -8,28 +8,40 @@ tooltip 走 Qt.ToolTipRole, 虚拟滚动/列宽拖拽/横向滚动全部用 Qt �
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import sys
 import threading
 from dataclasses import dataclass
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QEvent, QModelIndex, QObject, Qt, QThread, Signal, Slot,
+    QAbstractTableModel, QEvent, QModelIndex, QObject, QRect, Qt, QThread,
+    QTimer, Signal, Slot,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QFontMetrics, QKeySequence, QShortcut,
+    QBrush, QColor, QFont, QFontMetrics, QImage, QKeySequence, QPixmap,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-    QStatusBar, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
+    QApplication, QAbstractItemView, QCheckBox, QDialog, QFileDialog,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QProgressBar, QPushButton, QStatusBar, QStyledItemDelegate, QTableView,
+    QVBoxLayout, QWidget,
 )
 
 from video_core import (
-    VIDEO_EXTENSIONS, VideoInfo, _cell_fg, _extract_sort_key,
-    _header_text_with_arrow, _next_sort_state, format_title, parse_threshold,
-    parse_video_info, run_ffprobe, scan_video_files, truncate_text,
+    EXTRACT_THUMB_W, VIDEO_EXTENSIONS, VideoInfo, _cell_fg,
+    _extract_sort_key, _header_text_with_arrow, _next_sort_state, extract_frame,
+    format_title, parse_threshold, parse_time_token, parse_video_info,
+    run_ffprobe, scan_video_files, time_token_to_string, truncate_text,
 )
+
+# 着色常量**只从 video_core 取** —— 界面层不持有自己的颜色常量
+# (断言: 「界面层没有自己的 FG_PASS / FG_FAIL」)。
+# 用 `video_core.FG_PASS` 而不是 `from video_core import FG_PASS` ——
+# 后者会把 FG_PASS 塞进 video_qt 的模块命名空间, 那条断言就红了。
+import video_core  # noqa: E402
+
 
 # 阈值默认值。这两个常量现在住在 video_checker.py (Tk 版); Qt 层自带一份,
 # 免得反过来依赖 Tk 入口 —— **Task 7 删 Tk 时并回 video_core.py**
@@ -340,6 +352,657 @@ class TruncatingDelegate(QStyledItemDelegate):
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
         option.textElideMode = Qt.ElideNone
+
+
+# ================================================================
+# 定点截图 (Task 6)
+# ================================================================
+#
+# 行为基准: 产品文档 §3.5 与旧版的 SnapshotProgressDialog / EnlargeDialog。
+#
+# 两处**刻意**与主表格不同, 别统一:
+#   1. 着色 —— 主表格「只红失败的那几列」; 这里不达标行的**序号格与标题格
+#      整格红字** (达标行整格绿字), 见产品文档 §6 #15。
+#   2. 网格用 QTableView + 委托画 QPixmap —— 不用 QTableWidget (每格一个
+#      QLabel), 表格区不留子窗口。
+#
+# 内存: 只留 320px 的缩略图, 640px 原图用完即弃; 放大窗口要原图时
+# **从磁盘重新加载** (产品文档 §6 #25/#26)。
+
+# 抽帧存盘宽度 (640px) 与弹窗里的显示宽度 (320px) —— 现状就是「存 640 显示 320」
+SNAPSHOT_FULL_W = EXTRACT_THUMB_W
+SNAPSHOT_MEM_W = EXTRACT_THUMB_W // 2
+# 时间点列的宽度: 缩略图 + 左右留白 (与现状的 THUMB_DISPLAY_W + 8 一致)
+SNAPSHOT_CELL_W = SNAPSHOT_MEM_W + 8
+# 标题列宽 —— 与主表格 title 列一致 (250px)
+SNAPSHOT_TITLE_W = 250
+# 序号列宽 (固定, 不随时间点数量变化)
+SNAPSHOT_IDX_W = 45
+
+# 自定义 role: 把单元格的抽帧状态递给 delegate (画面由 delegate 画)
+SNAPSHOT_STATE_ROLE = int(Qt.UserRole) + 1
+
+
+@dataclass
+class CellState:
+    """一个时间点单元格的抽帧状态 (存在 model 的 dict[(row, col)] 里)。
+
+    status: 'idle' (还没轮到) | 'loading' | 'done' | 'failed'
+    image_path: 抽出来的 PNG 的磁盘路径 —— 放大窗口从磁盘重新加载原图时用
+    """
+    status: str = 'idle'
+    image_path: str | None = None
+
+
+class SnapshotGridModel(QAbstractTableModel):
+    """定点截图网格的模型: 行 = 文件, 列 = 序号 + 标题 + N 个时间点。
+
+    初始只有序号 + 标题两列 —— 时间点列在「开始截图」时按 N 个时间点重建
+    (与现状一致)。
+    """
+
+    def __init__(self, files: list[VideoInfo], parent=None):
+        super().__init__(parent)
+        self._files = list(files)
+        self._tokens: list[str] = []
+        self._cells: dict[tuple[int, int], CellState] = {}
+        self._fm = QFontMetrics(ui_font())
+
+    # ---- Qt 必需接口 ----
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._files)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else 2 + len(self._tokens)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row, col = index.row(), index.column()
+        if not 0 <= row < len(self._files):
+            return None
+        info = self._files[row]
+        if role == SNAPSHOT_STATE_ROLE:
+            # 时间点列: 画面由 delegate 画, 这里只把状态递过去
+            return self._cells.get((row, col)) if self.is_time_column(col) else None
+        if col == 0:
+            if role == Qt.DisplayRole:
+                return str(row + 1)
+            if role == Qt.ForegroundRole:
+                return self._row_brush(info)
+            return None
+        if col == 1:
+            if role == Qt.DisplayRole:
+                return self._title(row)
+            if role == Qt.ForegroundRole:
+                # **整格红字** —— 不达标行的标题格整格红, 不是「只红失败列」。
+                # 与主表格刻意不同 (产品文档 §6 #15)。
+                return self._row_brush(info)
+            if role == Qt.ToolTipRole:
+                full = format_title(info)
+                return full if full != self._title(row) else None
+            return None
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation != Qt.Horizontal or role != Qt.DisplayRole:
+            return None
+        if section == 0:
+            return '序号'
+        if section == 1:
+            return '标题'
+        c = section - 2
+        if 0 <= c < len(self._tokens):
+            return f"T{c + 1}: {time_token_to_string(self._tokens[c])}"
+        return None
+
+    # ---- 时间点列 ----
+
+    def set_time_tokens(self, tokens: list[str]) -> None:
+        """按时间点重建列 (起跑时调用)。
+
+        列数变了 → 整个模型 reset; 旧的单元格状态一并清掉 (列号变了,
+        (row, col) 这个键不再对应同一个时间点)。
+        """
+        self.beginResetModel()
+        self._tokens = list(tokens)
+        self._cells.clear()
+        self.endResetModel()
+
+    @property
+    def time_tokens(self) -> list[str]:
+        return list(self._tokens)
+
+    def is_time_column(self, section: int) -> bool:
+        """该列是不是时间点列 (画面列)。"""
+        return section >= 2
+
+    def cell_state(self, row: int, col: int) -> CellState | None:
+        return self._cells.get((row, col))
+
+    def mark_loading(self, row: int, col: int) -> None:
+        self._set_cell(row, col, CellState(status='loading'))
+
+    def mark_done(self, row: int, col: int, image_path: str) -> None:
+        self._set_cell(row, col, CellState(status='done',
+                                           image_path=image_path))
+
+    def mark_failed(self, row: int, col: int) -> None:
+        self._set_cell(row, col, CellState(status='failed'))
+
+    def _set_cell(self, row: int, col: int, state: CellState) -> None:
+        self._cells[(row, col)] = state
+        idx = self.index(row, col)
+        if idx.isValid():
+            self.dataChanged.emit(idx, idx, [SNAPSHOT_STATE_ROLE])
+
+    # ---- 内部 ----
+
+    def _row_brush(self, info: VideoInfo) -> QBrush:
+        # 颜色常量从 video_core 取 (界面层不另抄一份)
+        return QBrush(QColor(video_core.FG_PASS if info.is_passing
+                             else video_core.FG_FAIL))
+
+    def _title(self, row: int) -> str:
+        return truncate_text(format_title(self._files[row]),
+                             SNAPSHOT_TITLE_W, self._measure)
+
+    def _measure(self, text: str) -> int:
+        return self._fm.horizontalAdvance(text)
+
+
+class SnapshotDelegate(QStyledItemDelegate):
+    """定点截图网格的 delegate —— **自己画 QPixmap**。
+
+    不用 QTableWidget (每格一个 QLabel): 表格区不留子窗口。
+
+    三态 (加上起跑前的 idle):
+      加载中 → 蓝色 '…'
+      成功   → 320px 缩略图 (QPixmap)
+      失败   → 红色 '×'
+
+    缩略图缓存在 delegate 里 —— **只留 320px 那一份**, 640px 原图
+    用完即弃 (产品文档 §6 #25/#26)。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmaps: dict[tuple[int, int], QPixmap] = {}
+
+    # ---- 缩略图缓存 ----
+
+    def set_thumbnail(self, row: int, col: int, path: str) -> bool:
+        """从磁盘加载缩略图 (主线程)。成功返回 True。
+
+        640px 原图只在函数内存在, 缩到 320px 之后原图就被丢掉 —— 内存里
+        只留显示用的那一份 (产品文档 §6 #26)。
+        """
+        full = QPixmap(path)
+        if full.isNull():
+            return False
+        self._pixmaps[(row, col)] = full.scaledToWidth(
+            SNAPSHOT_MEM_W, Qt.SmoothTransformation)
+        return True
+
+    def thumbnail(self, row: int, col: int) -> QPixmap | None:
+        return self._pixmaps.get((row, col))
+
+    def clear_thumbnails(self) -> None:
+        self._pixmaps.clear()
+
+    # ---- 画 ----
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        # 标题文字在 model 里已经按 250px 截断好了, 别让 Qt 再 elide 一次
+        option.textElideMode = Qt.ElideNone
+
+    def paint(self, painter, option, index):
+        model = index.model()
+        if not isinstance(model, SnapshotGridModel) \
+                or not model.is_time_column(index.column()):
+            # 序号 / 标题两列: 默认画法 (文字与颜色由 model 给)
+            super().paint(painter, option, index)
+            return
+        state = model.cell_state(index.row(), index.column())
+        painter.save()
+        painter.fillRect(option.rect, option.palette.base())
+        if state is not None and state.status == 'done':
+            pixmap = self.thumbnail(index.row(), index.column())
+            if pixmap is not None and not pixmap.isNull():
+                self._paint_pixmap(painter, option, pixmap)
+                painter.restore()
+                return
+        text, color = self._glyph(state)
+        painter.setPen(color)
+        painter.drawText(option.rect, Qt.AlignCenter, text)
+        painter.restore()
+
+    @staticmethod
+    def _glyph(state: CellState | None) -> tuple[str, QColor]:
+        """状态 → (文字, 颜色)。与现状一致: 待抽是灰 '…', 抽帧中蓝 '…',
+        失败红 '×'。"""
+        if state is None or state.status == 'idle':
+            return '…', QColor('gray')
+        if state.status == 'loading':
+            return '…', QColor('blue')
+        if state.status == 'failed':
+            return '×', QColor('red')
+        return '…', QColor('gray')
+
+    @staticmethod
+    def _paint_pixmap(painter, option, pixmap: QPixmap) -> None:
+        """把缩略图按比例缩到单元格里居中画。"""
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        size = pixmap.size()
+        if size.width() > rect.width() or size.height() > rect.height():
+            size = size.scaled(rect.size(), Qt.KeepAspectRatio)
+            pixmap = pixmap.scaled(size.width(), size.height(),
+                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        x = rect.x() + (rect.width() - size.width()) // 2
+        y = rect.y() + (rect.height() - size.height()) // 2
+        painter.drawPixmap(x, y, pixmap)
+
+
+class TimeTokenEdit(QLineEdit):
+    """时间点输入框 —— 双击**只选所在的那一段** (HH / MM / SS / frame)。
+
+    整段全选的话改一个字段就得重打一遍 (现状是分段选的, 产品文档 §3.5)。
+
+    定位用的是 QLineEdit 自己算出来的光标位置: 双击前 Qt 必先发一次
+    mousePressEvent, 那一次已经把光标放到点击处最近的字符边界上了 ——
+    比自己拿像素宽度换算准 (不同平台的 QLineEdit 内边距不一样)。
+    """
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self.select_segment_at_cursor()
+        event.accept()
+
+    def select_segment_at_cursor(self) -> None:
+        """按当前光标位置选中所在的那一段。"""
+        text = self.text()
+        if not text:
+            return
+        idx = self.cursorPosition()
+        colons = [i for i, c in enumerate(text) if c == ':']
+        if not colons:
+            self.setSelection(0, len(text))
+            return
+        if idx <= colons[0]:
+            start, end = 0, colons[0]
+        elif len(colons) >= 2 and idx <= colons[1]:
+            start, end = colons[0] + 1, colons[1]
+        elif len(colons) >= 3 and idx <= colons[2]:
+            start, end = colons[1] + 1, colons[2]
+        else:
+            start, end = colons[-1] + 1, len(text)
+        # setSelection 的第二个参数是**长度** (旧版 select_range 是右开区间)
+        self.setSelection(start, end - start)
+
+
+class EnlargeDialog(QDialog):
+    """放大查看窗口 —— **从磁盘重新加载** 640px 原图。
+
+    不复用网格里那张 320px 缩略图 (省内存, 产品文档 §6 #25/#26)。
+    """
+
+    def __init__(self, parent, image_path: str, title: str):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setStyleSheet(
+            'QDialog { background-color: #202020; }'
+            'QLabel { color: #cccccc; }')
+        root = QVBoxLayout(self)
+        # 原图: 重新从磁盘读 (网格里只留了 320px 的缩略图)
+        self._image = QImage(image_path)
+        label = QLabel()
+        if not self._image.isNull():
+            label.setPixmap(QPixmap.fromImage(self._image))
+        label.setAlignment(Qt.AlignCenter)
+        root.addWidget(label)
+        path_label = QLabel(image_path)
+        path_label.setWordWrap(True)
+        root.addWidget(path_label)
+        close_btn = QPushButton('关闭')
+        close_btn.clicked.connect(self.close)
+        root.addWidget(close_btn)
+
+
+def _snapshot_worker(files, tokens, output_dir, cancel_event, result_queue):
+    """抽帧的 worker (后台线程)。
+
+    **只往队列里放磁盘路径** —— QPixmap 非线程安全, 加载留给主线程。
+
+    取消标志只在**格子之间**查: 已经在跑的 ffmpeg 不会被杀掉
+    (产品文档 §6 #27)。
+    """
+    total = len(files) * len(tokens)
+    done = 0
+    for r, info in enumerate(files):
+        if cancel_event.is_set():
+            break
+        for c, token in enumerate(tokens):
+            if cancel_event.is_set():
+                break
+            result_queue.put(('cell_start', (r, c)))
+            result_queue.put(('progress', (done, total, info.title)))
+            try:
+                seconds = parse_time_token(token, info.frame_rate_fps)
+            except ValueError:
+                result_queue.put(('cell_failed', (r, c)))
+                done += 1
+                continue
+            base = os.path.splitext(info.title)[0] or 'video'
+            out_name = f"{base}_t{c + 1}_{time_token_to_string(token)}.png"
+            out_path = os.path.join(output_dir, out_name)
+            if extract_frame(info.full_path, seconds, out_path):
+                result_queue.put(('cell_done', (r, c, out_path)))
+            else:
+                result_queue.put(('cell_failed', (r, c)))
+            done += 1
+    result_queue.put(('done', (done, total, cancel_event.is_set())))
+
+
+class SnapshotDialog(QDialog):
+    """定点截图弹窗 (模态)。
+
+    布局与现状一致:
+      顶部: 截图地址 + 「浏览」+「开始截图」
+      第二行: 时间点输入 (N 个) + 「+」
+      中间: 文件 × 时间点 的网格
+      底部: 状态文字 + 进度条
+
+    抽帧跑在**普通后台线程**里 (不是 QThread): 弹窗可以在抽帧途中被关掉,
+    而 QThread 随 dialog 一起析构会 abort (QThread: Destroyed while thread
+    is still running)。普通 daemon 线程没有这个坑 —— 关窗后它把当前这一帧
+    抽完就退出, **已启动的 ffmpeg 不会被杀** (产品文档 §6 #27)。
+    """
+
+    def __init__(self, main, files: list[VideoInfo], output_dir: str,
+                 default_time_tokens: tuple[str, ...] =
+                 ('00:00:07:24', '00:00:08:00')):
+        super().__init__(main)
+        self._main = main
+        self._files = list(files)
+        self._output_dir = output_dir
+        self._tokens = list(default_time_tokens)
+        self._state = 'idle'          # idle / running / done
+        self._failed_count = 0
+        self._cells_processed = 0
+        self._total = len(self._files) * len(self._tokens)
+        self._closed = False
+        self._cancel = threading.Event()
+        self._worker_thread = None
+        self._result_queue: queue.Queue = queue.Queue()
+
+        self.setWindowTitle('定点截图')
+        self.setModal(True)
+        self.resize(1200, 700)
+        self._build_widgets()
+
+    # ---- 界面 ----
+
+    def _build_widgets(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(5, 5, 5, 5)
+        root.setSpacing(4)
+
+        # === 顶部: 截图地址 + 浏览 + 开始截图 ===
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel('截图地址:'))
+        self.output_edit = QLineEdit(self._output_dir)
+        row1.addWidget(self.output_edit, 1)
+        browse_btn = QPushButton('浏览')
+        browse_btn.clicked.connect(self._browse_output_dir)
+        row1.addWidget(browse_btn)
+        self.action_btn = QPushButton('开始截图')
+        self.action_btn.clicked.connect(self._on_action_btn)
+        row1.addWidget(self.action_btn)
+        root.addLayout(row1)
+
+        # === 第二行: 时间点输入 ===
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel('时间点:'))
+        # 入口装在自己的 layout 里 —— 新增的入口总是排在「+」按钮前面
+        self._tp_layout = QHBoxLayout()
+        self._tp_layout.setContentsMargins(0, 0, 0, 0)
+        self._tp_layout.setSpacing(5)
+        row2.addLayout(self._tp_layout)
+        add_btn = QPushButton('+')
+        add_btn.setFixedWidth(30)
+        add_btn.clicked.connect(lambda: self._add_time_token_entry('00:00:00:00'))
+        row2.addWidget(add_btn)
+        root.addLayout(row2)
+        self._tp_entries: list[TimeTokenEdit] = []
+        for tok in self._tokens:
+            self._add_time_token_entry(tok)
+
+        # === 中间: 网格 ===
+        self.model = SnapshotGridModel(self._files, self)
+        self.delegate = SnapshotDelegate(self)
+        self.view = QTableView()
+        self.view.setModel(self.model)
+        self.view.setItemDelegate(self.delegate)
+        self.view.setShowGrid(False)
+        self.view.setSelectionMode(QAbstractItemView.NoSelection)
+        self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.view.clicked.connect(self._on_cell_clicked)
+        root.addWidget(self.view, 1)
+
+        # === 底部: 状态文字 + 进度条 ===
+        row3 = QVBoxLayout()
+        self.status_label = QLabel('就绪 — 点「开始截图」开始')
+        row3.addWidget(self.status_label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, max(self._total, 1))
+        row3.addWidget(self.progress)
+        root.addLayout(row3)
+
+        self._sync_columns()
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(100)
+        self._poll_timer.timeout.connect(self._poll_queue)
+
+    def _sync_columns(self) -> None:
+        """列宽: 序号 45 / 标题 250 / 每个时间点 328。"""
+        header = self.view.horizontalHeader()
+        header.setMinimumSectionSize(20)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        self.view.setColumnWidth(0, SNAPSHOT_IDX_W)
+        self.view.setColumnWidth(1, SNAPSHOT_TITLE_W)
+        for c in range(len(self.model.time_tokens)):
+            header.setSectionResizeMode(c + 2, QHeaderView.Fixed)
+            self.view.setColumnWidth(c + 2, SNAPSHOT_CELL_W)
+
+    def _add_time_token_entry(self, default: str = '00:00:00:00') -> None:
+        """加一个时间点入口 (初始两个 + 「+」追加的都是这个)。"""
+        edit = TimeTokenEdit(default)
+        edit.setFixedWidth(110)
+        self._tp_layout.addWidget(edit)
+        self._tp_entries.append(edit)
+
+    # ---- 截图地址 ----
+
+    def _ask_directory(self, title: str) -> str:
+        """选文件夹对话框 (取消时返回空串)。"""
+        return QFileDialog.getExistingDirectory(self, title)
+
+    def _browse_output_dir(self) -> None:
+        """「浏览」选的是**父目录**, 下面套一层 snapshot。
+
+        目录本身**不建** —— 等点「开始截图」才建 (产品文档 §6 #10)。
+        """
+        folder = self._ask_directory('选择截图存放文件夹')
+        if folder:
+            self.output_edit.setText(snapshot_dest_for(folder))
+
+    # ---- 状态机 ----
+
+    def _on_action_btn(self) -> None:
+        """「开始截图」/「截图中」: idle/done → 起新一轮; running → 取消。
+
+        取消只置标志 —— **已启动的 ffmpeg 不会被杀** (产品文档 §6 #27)。
+        """
+        if self._state == 'running':
+            self._cancel.set()
+            self.action_btn.setEnabled(False)
+            return
+        self._start_snap()
+
+    def _start_snap(self) -> None:
+        """校验 → 建目录 → 重建网格 → 起 worker。"""
+        tokens = [e.text().strip() for e in self._tp_entries]
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            QMessageBox.warning(self, '提示', '请输入至少一个时间点。')
+            return
+        for tok in tokens:
+            try:
+                parse_time_token(tok, 30.0)      # fps 只做语法校验
+            except ValueError as e:
+                QMessageBox.critical(self, '错误', f"时间点格式错误: {e}")
+                return
+        output_dir = self.output_edit.text().strip()
+        if not output_dir:
+            QMessageBox.warning(self, '提示', '请先设置截图地址。')
+            return
+        # **建目录只有一个口子** —— 主窗口的 ensure_snapshot_dir。
+        # 弹窗自己不 os.makedirs (「扫描/浏览阶段绝不建目录」那条规矩,
+        # qt-snapshot 断言里有一条**模块级**扫描盯着这件事)。
+        try:
+            output_dir = self._main.ensure_snapshot_dir(output_dir)
+        except OSError as e:
+            QMessageBox.critical(self, '错误', f"无法创建截图地址:\n{e}")
+            return
+
+        self._tokens = tokens
+        self.model.set_time_tokens(tokens)
+        self.delegate.clear_thumbnails()
+        self._sync_columns()
+        self._cancel.clear()
+        self._failed_count = 0
+        self._cells_processed = 0
+        self._total = len(self._files) * len(tokens)
+        self.progress.setRange(0, max(self._total, 1))
+        self.progress.setValue(0)
+        self._state = 'running'
+        self.action_btn.setText('截图中')
+        self._set_time_points_enabled(False)
+        self.output_edit.setEnabled(False)
+
+        self._result_queue = queue.Queue()
+        self._worker_thread = threading.Thread(
+            target=_snapshot_worker,
+            args=(self._files, tokens, output_dir, self._cancel,
+                  self._result_queue),
+            daemon=True,
+        )
+        self._worker_thread.start()
+        self._poll_timer.start()
+
+    def _set_time_points_enabled(self, enabled: bool) -> None:
+        for edit in self._tp_entries:
+            edit.setEnabled(enabled)
+
+    # ---- worker 结果 ----
+
+    def _poll_queue(self) -> None:
+        """主线程 100ms 轮询: 消费 cell 状态 / 进度消息。"""
+        try:
+            while True:
+                msg_type, payload = self._result_queue.get_nowait()
+                if self._closed:
+                    return
+                if msg_type == 'cell_start':
+                    r, c = payload
+                    self.model.mark_loading(r, c + 2)
+                elif msg_type == 'cell_done':
+                    r, c, path = payload
+                    self._mark_done(r, c + 2, path)
+                elif msg_type == 'cell_failed':
+                    r, c = payload
+                    self._mark_failed(r, c + 2)
+                elif msg_type == 'progress':
+                    done, total, current = payload
+                    self._update_status(done, total, current)
+                elif msg_type == 'done':
+                    done, total, cancelled = payload
+                    self._on_snap_done(done, total, cancelled)
+                    return
+        except queue.Empty:
+            pass
+
+    def _mark_done(self, row: int, col: int, path: str) -> None:
+        """抽帧成功 → 主线程加载 320px 缩略图 (QPixmap 非线程安全)。"""
+        if not self.delegate.set_thumbnail(row, col, path):
+            self._mark_failed(row, col)
+            return
+        self.model.mark_done(row, col, path)
+        self._cells_processed += 1
+        self.progress.setValue(self._cells_processed)
+
+    def _mark_failed(self, row: int, col: int) -> None:
+        self.model.mark_failed(row, col)
+        self._failed_count += 1
+        self._cells_processed += 1
+        self.progress.setValue(self._cells_processed)
+
+    def _update_status(self, done: int, total: int, current: str) -> None:
+        if self._state != 'running':
+            return
+        suffix = f" ({current})" if current else ""
+        self.status_label.setText(f"抽帧中 {done}/{total}{suffix}")
+
+    def _on_snap_done(self, done: int, total: int, cancelled: bool) -> None:
+        self._poll_timer.stop()
+        self._state = 'idle' if cancelled else 'done'
+        self.action_btn.setText('开始截图')
+        self.action_btn.setEnabled(True)
+        self._set_time_points_enabled(True)
+        self.output_edit.setEnabled(True)
+        status = '抽帧已取消' if cancelled else '抽帧完成'
+        self.status_label.setText(
+            f"{status}: {done}/{total} "
+            f"({done - self._failed_count} 成功, {self._failed_count} 失败)")
+        self.progress.setValue(self.progress.maximum())
+
+    # ---- 点缩略图 → 放大窗口 ----
+
+    def _on_cell_clicked(self, index) -> None:
+        """点已成功的缩略图 → 放大窗口 (从磁盘重新加载原图)。"""
+        if not index.isValid():
+            return
+        state = self.model.cell_state(index.row(), index.column())
+        if state is None or state.status != 'done' or not state.image_path:
+            return
+        info = self._files[index.row()]
+        c = index.column() - 2
+        EnlargeDialog(self, image_path=state.image_path,
+                      title=f"{info.title} @ T{c + 1}").show()
+
+    # ---- 关闭 ----
+
+    def closeEvent(self, event) -> None:
+        """抽帧中点关闭 → 二次确认。
+
+        确认后**只置取消标志**, 不 kill 已启动的 ffmpeg 进程
+        (产品文档 §6 #27)。
+        """
+        if self._state == 'running':
+            answer = QMessageBox.question(
+                self, '确认关闭', '抽帧还在进行中, 确定要关闭吗?',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+            self._cancel.set()
+        self._closed = True
+        self._poll_timer.stop()
+        super().closeEvent(event)
 
 
 # ---- 派生路径的两个小助手 ----
@@ -758,16 +1421,19 @@ class MainWindow(QMainWindow):
         if folder:
             self.snapshot_dest = snapshot_dest_for(folder)
 
-    def ensure_snapshot_dir(self) -> str:
+    def ensure_snapshot_dir(self, path: str | None = None) -> str:
         """截图目录**按需创建** —— 真要往里写 PNG 时才建。
 
         扫描 / 浏览阶段一个目录都不许建 (产品文档 §6 #10)。
+
+        path: 弹窗里用户改过的地址 (定点截图弹窗有自己的输入框);
+        省略时用主窗口的默认值 snapshot_dest。
         """
-        path = self.snapshot_dest.strip()
-        if not path:
+        target = (self.snapshot_dest if path is None else path).strip()
+        if not target:
             raise ValueError('请先设置截图地址。')
-        os.makedirs(path, exist_ok=True)
-        return path
+        os.makedirs(target, exist_ok=True)
+        return target
 
     # ---- 扫描 ----
 
@@ -958,16 +1624,17 @@ class MainWindow(QMainWindow):
         self.open_snapshot_dialog()
 
     def open_snapshot_dialog(self) -> None:
-        """打开定点截图弹窗 (Task 6 实现)。
+        """打开定点截图弹窗 (模态)。
 
-        截图目录**按需创建** —— 弹窗里点「开始截图」时才建。
+        截图目录**按需创建** —— 弹窗里点「开始截图」时才建, 而且**只**
+        走 `ensure_snapshot_dir()` 这一个口子 (弹窗自己不 os.makedirs):
+        「扫描/浏览阶段绝不建目录」这条规矩由那个口子兜着。
 
-        TODO(Task 6): 弹窗的「开始截图」按钮**必须**调
-        `self.ensure_snapshot_dir()` 建目录 (不能自己 os.makedirs) ——
-        「扫描/浏览阶段绝不建目录」这条规矩由那个口子兜着,
-        qt-main 里「截图目录只由 ensure_snapshot_dir() 建」那条断言就是
-        给 Task 6 立的规矩 (Task 6 要是绕过这个口子, 那条断言会红)。
+        弹窗里也有自己的「截图地址」输入框 (可以改成别的目录), 传进去的
+        是主窗口当前的默认值。
         """
+        dialog = SnapshotDialog(self, self.video_results, self.snapshot_dest)
+        dialog.exec()
 
     # ---- 移动文件 ----
 

@@ -1,0 +1,589 @@
+"""Qt 定点截图弹窗 + 放大窗口 的行为断言。
+
+对照 docs/产品文档.md §3.5 / §4.3 / §6 与
+docs/superpowers/plans/2026-10-27-pyside6-qtableview.md 的 Task 6。
+
+跑法:
+    QT_QPA_PLATFORM=offscreen python docs/superpowers/specs/2026-10-27-qt-snapshot-assertions.py
+退出码 0 = 全部通过；非 0 = 有失败。
+"""
+import ast
+import os
+import shutil
+import sys
+import tempfile
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
+
+_tmpdirs: list[str] = []
+
+
+def mkdtemp(prefix: str = 'vdcheck_') -> str:
+    """建临时目录, 记下来, 退出时清掉。
+
+    断言脚本建了一堆 vdcheck_* 目录又不删 —— 用户的 $TMPDIR 会被塞满。
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    _tmpdirs.append(path)
+    return path
+
+
+def cleanup_tmpdirs() -> None:
+    for path in _tmpdirs:
+        shutil.rmtree(path, ignore_errors=True)
+    _tmpdirs.clear()
+
+
+# 没有显示环境时 Qt 用 offscreen 平台 (会打一条字体族警告到 stderr, 不在范围)。
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+from PySide6.QtCore import QBuffer, QEvent, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor, QFontMetrics, QImage, QMouseEvent, QPainter, QPixmap,
+)
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication, QLabel, QMessageBox, QPushButton, QStyleOptionViewItem,
+)
+
+# QApplication 必须**先于** video_qt 建好: ui_font() 惰性求值时会拷贝当前
+# app 的默认字体, app 还不存在时字体族是空的 (family=''), 字宽度量整套
+# 偏掉, QFontMetrics(那个字体) 直接 abort 进程。
+app = QApplication.instance() or QApplication(sys.argv)
+
+import video_qt  # noqa: E402
+from video_core import VideoInfo  # noqa: E402
+
+REQUIRED = ('SnapshotDialog', 'EnlargeDialog', 'SnapshotGridModel',
+            'SnapshotDelegate', 'TimeTokenEdit')
+
+_failures: list[str] = []
+
+# 弹框记录 (模块级 —— _run 与 main 都要用)
+msgbox_log: list[tuple[str, str, str]] = []
+# question 弹框的回答 (默认「否」)
+msgbox_answer: dict[str, int] = {'question': QMessageBox.No}
+# 被 patch 掉的原始对象 —— 用完要还原
+real_extract = video_qt.extract_frame
+real_enlarge = video_qt.EnlargeDialog
+
+
+def stub_msgbox(kind: str):
+    """造一个「记下来但不阻塞」的 QMessageBox 静态方法。
+
+    真实的 QMessageBox 会模态地转事件循环 —— 断言脚本里等它关闭就卡死了。
+    """
+    def _stub(parent, title, text, *args, **kwargs):
+        msgbox_log.append((kind, title, text))
+        if kind == 'question':
+            return msgbox_answer['question']
+        return QMessageBox.Ok
+    return _stub
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    mark = "✓" if condition else "✗"
+    line = f"  {mark} {name}" + (f" — {detail}" if detail else "")
+    print(line)
+    if not condition:
+        _failures.append(line)
+
+
+def section(title: str) -> None:
+    print(f"\n=== {title} ===")
+
+
+def make_info(title='a.mp4', full_path='/x/a.mp4', passing=True,
+              bitrate=32000.0) -> VideoInfo:
+    return VideoInfo(
+        rel_path='./', title=title, resolution='1920x1080',
+        frame_rate='30.00', bitrate_kbps=bitrate, video_codec='h264',
+        audio_codec='aac', audio_channels='2', audio_sample_rate='48.0',
+        duration='00:01:00', file_size='1.0 GB', is_passing=passing,
+        sample_rate_passing=True, bitrate_std=30000.0, sample_rate_std=48.0,
+        full_path=full_path, container_format='mp4',
+        frame_rate_fps=30.0, sample_rate_khz=48.0)
+
+
+def fake_png_bytes(width: int = 640, height: int = 360) -> bytes:
+    """一张纯红的 PNG —— 假装是抽出来的 640px 原图。
+
+    在**主线程**里做好字节, worker 只负责把字节写盘。
+    """
+    img = QImage(width, height, QImage.Format_RGB32)
+    img.fill(QColor('red'))
+    buf = QBuffer()
+    buf.open(QBuffer.WriteOnly)
+    img.save(buf, 'PNG')
+    return bytes(buf.data())
+
+
+def render_cell(model, delegate, row: int, col: int,
+                size=(80, 40)) -> QImage:
+    """把某个 cell 用 delegate 画到一张白底图上, 返回 QImage。"""
+    pm = QPixmap(size[0], size[1])
+    pm.fill(Qt.white)
+    painter = QPainter(pm)
+    opt = QStyleOptionViewItem()
+    opt.rect = pm.rect()
+    delegate.paint(painter, opt, model.index(row, col))
+    painter.end()
+    return pm.toImage()
+
+
+def count_hues(img: QImage) -> tuple[int, int, int]:
+    """数一下图里有多少「蓝味 / 红味 / 中性」的墨迹像素。
+
+    按色相判 (b >> r / r >> b), 不按亮度 —— 抗锯齿会混出一堆中间色,
+    按亮度判会漏掉字芯。白色背景 (255,255,255) 三色都不沾。
+    """
+    blue = red = neutral = 0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.blue() > c.red() + 40 and c.blue() > c.green() + 40:
+                blue += 1
+            elif c.red() > c.green() + 40 and c.red() > c.blue() + 40:
+                red += 1
+            elif abs(c.red() - c.green()) < 30 and abs(c.green() - c.blue()) < 30 \
+                    and c.lightness() < 200:
+                neutral += 1
+    return blue, red, neutral
+
+
+def pump_until(predicate, timeout: float = 20.0) -> bool:
+    """泵事件循环直到 predicate 为真 (worker 在另一个线程里跑)。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    app.processEvents()
+    return bool(predicate())
+
+
+def x_for_char(edit, index: int) -> int:
+    """找出一个 x —— 按下鼠标时光标正好落在第 index 个字符上。
+
+    用 QLineEdit **自己**的命中测试反推 (不自己算像素宽度: 不同平台的
+    QLineEdit 内边距不一样, 算出来会偏)。
+    """
+    for x in range(0, max(edit.width(), 40)):
+        edit.setCursorPosition(0)
+        _press(edit, x)
+        if edit.cursorPosition() == index:
+            return x
+    raise AssertionError(f'找不到落在第 {index} 个字符上的 x')
+
+
+def _press(edit, x: int) -> None:
+    ev = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(x, 8),
+                     Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(edit, ev)
+
+
+def _double_click(edit, x: int) -> None:
+    ev = QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(x, 8),
+                     Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(edit, ev)
+
+
+def module_makedirs_owners() -> set[tuple[str | None, str]]:
+    """整个 video_qt.py 里 os.makedirs / mkdir 的调用点 → (类名, 函数名)。
+
+    **整个模块**扫 —— 只扫 MainWindow 上的方法抓不到弹窗类自己建目录的
+    情况 (那正是要防的)。
+    """
+    with open(video_qt.__file__, encoding='utf-8') as f:
+        tree = ast.parse(f.read())
+    owners: set[tuple[str | None, str]] = set()
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.cls: str | None = None
+            self.func: str | None = None
+
+        def visit_ClassDef(self, node):
+            prev, self.cls = self.cls, node.name
+            self.generic_visit(node)
+            self.cls = prev
+
+        def visit_FunctionDef(self, node):
+            prev, self.func = self.func, node.name
+            self.generic_visit(node)
+            self.func = prev
+
+        def visit_Call(self, node):
+            func = node.func
+            if isinstance(func, ast.Attribute) \
+                    and func.attr in ('makedirs', 'mkdir'):
+                owners.add((self.cls, self.func or '<module>'))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return owners
+
+
+def main() -> int:
+    missing = [name for name in REQUIRED if not hasattr(video_qt, name)]
+    if missing:
+        print(f"✗ video_qt 缺少 Task 6 的实现: {missing}")
+        return 1
+
+    # ---- 把会弹框的静态方法换成「记下来不阻塞」 ----
+    orig_warning = QMessageBox.warning
+    orig_critical = QMessageBox.critical
+    orig_question = QMessageBox.question
+
+    QMessageBox.warning = stub_msgbox('warning')
+    QMessageBox.critical = stub_msgbox('critical')
+    QMessageBox.question = stub_msgbox('question')
+
+    png_bytes = fake_png_bytes()
+
+    def fake_extract(input_path, seconds, output_path):
+        """假的 extract_frame: 写一张 640px 红 PNG 上去, 返回 True。"""
+        with open(output_path, 'wb') as f:
+            f.write(png_bytes)
+        return True
+
+    video_qt.extract_frame = fake_extract
+
+    try:
+        return _run()
+    finally:
+        QMessageBox.warning = orig_warning
+        QMessageBox.critical = orig_critical
+        QMessageBox.question = orig_question
+        video_qt.extract_frame = real_extract
+        video_qt.EnlargeDialog = real_enlarge
+        cleanup_tmpdirs()
+
+
+def _run() -> int:
+    SnapshotDialog = video_qt.SnapshotDialog
+    EnlargeDialog = video_qt.EnlargeDialog
+    SnapshotGridModel = video_qt.SnapshotGridModel
+    SnapshotDelegate = video_qt.SnapshotDelegate
+    TimeTokenEdit = video_qt.TimeTokenEdit
+
+    # ================================================================
+    section("Task 6 的类都在 video_qt 里")
+    check("SnapshotDialog / EnlargeDialog / SnapshotGridModel / "
+          "SnapshotDelegate / TimeTokenEdit 都存在",
+          all(hasattr(video_qt, n) for n in REQUIRED),
+          f"got={[n for n in REQUIRED if not hasattr(video_qt, n)]}")
+
+    # ================================================================
+    section("默认时间点 / 「+」追加 / 无删除按钮")
+    win = video_qt.MainWindow()
+    dlg = SnapshotDialog(win, [make_info()], '/tmp/does/not/exist/snapshot')
+    tokens = [e.text() for e in dlg._tp_entries]
+    check("默认两个时间点 00:00:07:24 / 00:00:08:00",
+          tokens == ['00:00:07:24', '00:00:08:00'], f"got={tokens}")
+    dlg._add_time_token_entry('00:00:00:00')
+    tokens = [e.text() for e in dlg._tp_entries]
+    check("「+」追加的是 00:00:00:00",
+          len(tokens) == 3 and tokens[2] == '00:00:00:00', f"got={tokens}")
+    btn_texts = [b.text() for b in dlg.findChildren(QPushButton)]
+    check("**没有删除按钮** (清空输入框即删除)",
+          not any('删除' in t or '移除' in t or '-' == t for t in btn_texts),
+          f"got={btn_texts}")
+    check("只有一个「+」按钮",
+          btn_texts.count('+') == 1, f"got={btn_texts}")
+
+    # ================================================================
+    section("截图地址: 默认 / 「浏览」套一层 snapshot / 不建目录")
+    src_dir = mkdtemp(prefix='vdcheck_qt_snapsrc_')
+    win2 = video_qt.MainWindow()
+    win2._sync_derived_paths(src_dir)
+    dlg2 = SnapshotDialog(win2, [make_info()], win2.snapshot_dest)
+    check("截图地址默认值 = <源>/snapshot",
+          dlg2.output_edit.text() == video_qt.snapshot_dest_for(src_dir),
+          f"got={dlg2.output_edit.text()!r}")
+    check("**默认地址这一步不建目录**",
+          not os.path.isdir(dlg2.output_edit.text()),
+          f"path={dlg2.output_edit.text()!r}")
+    picked = mkdtemp(prefix='vdcheck_qt_snappick_')
+    dlg2._ask_directory = lambda title: picked
+    dlg2._browse_output_dir()
+    check("「浏览」选的是**父目录** → 套一层 snapshot",
+          dlg2.output_edit.text() == video_qt.snapshot_dest_for(picked),
+          f"got={dlg2.output_edit.text()!r}")
+    check("**「浏览」不建目录**",
+          not os.path.isdir(dlg2.output_edit.text()),
+          f"path={dlg2.output_edit.text()!r}")
+
+    # ================================================================
+    section("初始两列 → 起跑后按 N 个时间点重建列 / 表头文字")
+    model = SnapshotGridModel([make_info()])
+    check("初始只有序号 + 标题两列", model.columnCount() == 2,
+          f"got={model.columnCount()}")
+    check("表头: 序号 / 标题",
+          model.headerData(0, Qt.Horizontal) == '序号'
+          and model.headerData(1, Qt.Horizontal) == '标题',
+          f"got={model.headerData(0, Qt.Horizontal)!r}/"
+          f"{model.headerData(1, Qt.Horizontal)!r}")
+    model.set_time_tokens(['00:00:07:24', '00:00:08:00'])
+    check("起跑后按 2 个时间点重建 → 4 列", model.columnCount() == 4,
+          f"got={model.columnCount()}")
+    check("表头文字 T1: 00-00-07-24",
+          model.headerData(2, Qt.Horizontal) == 'T1: 00-00-07-24',
+          f"got={model.headerData(2, Qt.Horizontal)!r}")
+    check("表头文字 T2: 00-00-08-00",
+          model.headerData(3, Qt.Horizontal) == 'T2: 00-00-08-00',
+          f"got={model.headerData(3, Qt.Horizontal)!r}")
+
+    # ================================================================
+    section("单元格三态 (像素级): 灰 … / 蓝 … / 红 × / 画图")
+    delegate = SnapshotDelegate()
+    model.set_time_tokens(['00:00:07:24'])
+    blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2))
+    check("起跑前是灰色 … (中性, 不蓝不红)",
+          neutral > 0 and blue == 0 and red == 0,
+          f"blue={blue} red={red} neutral={neutral}")
+    model.mark_loading(0, 2)
+    blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2))
+    check("加载中是蓝色 …", blue > 0 and red == 0, f"blue={blue} red={red}")
+    model.mark_failed(0, 2)
+    blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2))
+    check("失败是红色 ×", red > 0 and blue == 0, f"blue={blue} red={red}")
+    # 成功 → 委托把 QPixmap 画出来了 (缩略图缓存放在 delegate 里)
+    thumb = QPixmap(640, 360)
+    thumb.fill(QColor('red'))
+    ok = delegate.set_thumbnail(0, 2, _write_png(mkdtemp(prefix='vdcheck_qt_thumb_'),
+                                                  'thumb.png'))
+    model.mark_done(0, 2, '/tmp/x.png')
+    blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2, (120, 80)))
+    check("成功 → 委托把 QPixmap 画出来了", ok and red > 0, f"red={red}")
+
+    # ================================================================
+    section("标题格不达标时整格红字 (与主表格「只红失败列」刻意不同)")
+    m2 = SnapshotGridModel([make_info('bad.mp4', '/x/bad.mp4', passing=False,
+                                      bitrate=1000.0),
+                             make_info('good.mp4', '/x/good.mp4', passing=True,
+                                      bitrate=50000.0)])
+    m2.set_time_tokens(['00:00:07:24'])
+
+    def fg_at(m, row, col):
+        brush = m.data(m.index(row, col), Qt.ForegroundRole)
+        return brush.color().name() if brush else None
+
+    check("不达标行的标题格是红色",
+          fg_at(m2, 0, 1) == '#dc143c', f"got={fg_at(m2, 0, 1)}")
+    check("达标行的标题格是绿色",
+          fg_at(m2, 1, 1) == '#228b22', f"got={fg_at(m2, 1, 1)}")
+    check("不达标行的**序号格也红** (整行跟着走)",
+          fg_at(m2, 0, 0) == '#dc143c', f"got={fg_at(m2, 0, 0)}")
+    # 对照: 主表格的序号列**永不染色** (§6 #15) —— 两边刻意不同
+    win3 = video_qt.MainWindow()
+    win3._add_result(make_info('bad.mp4', '/x/bad.mp4', passing=False,
+                               bitrate=1000.0))
+    main_idx = win3.model.data(win3.model.index(0, 0), Qt.ForegroundRole)
+    check("对照: 主表格的序号列**不染色** (§6 #15)",
+          main_idx is None,
+          f"got={main_idx.color().name() if main_idx else None}")
+
+    # ================================================================
+    section("标题格按 250px 截断 + ToolTipRole 给完整路径")
+    long_title = 'deep/' + 'x' * 120 + '/movie.mp4'
+    m3 = SnapshotGridModel([make_info(long_title, '/x/' + long_title)])
+    m3.set_time_tokens(['00:00:07:24'])
+    shown = m3.data(m3.index(0, 1), Qt.DisplayRole)
+    tip = m3.data(m3.index(0, 1), Qt.ToolTipRole)
+    check("标题格被截断了 (以三个 ASCII 点结尾)", shown.endswith('...'),
+          f"got={shown!r}")
+    check("截断后宽度不超 250px",
+          QFontMetrics(video_qt.ui_font()).horizontalAdvance(shown) <= 250,
+          f"got={shown!r}")
+    check("ToolTipRole 给的是**完整路径**",
+          tip == video_qt.format_title(m3._files[0]), f"got={tip!r}")
+    m4 = SnapshotGridModel([make_info('a.mp4', '/x/a.mp4')])
+    m4.set_time_tokens(['00:00:07:24'])
+    check("没被截断 → 不给 tooltip",
+          m4.data(m4.index(0, 1), Qt.ToolTipRole) is None,
+          f"got={m4.data(m4.index(0, 1), Qt.ToolTipRole)!r}")
+
+    # ================================================================
+    section("开始截图: 输出文件名 + 只留 320px 缩略图")
+    out_root = mkdtemp(prefix='vdcheck_qt_snapout_')
+    out_dir = os.path.join(out_root, 'snapshot')
+    win4 = video_qt.MainWindow()
+    win4.snapshot_dest = out_dir
+    files = [make_info('a.mp4', '/x/a.mp4')]
+    dlg3 = SnapshotDialog(win4, files, out_dir)
+
+    ensure_calls: list = []
+    real_ensure = video_qt.MainWindow.ensure_snapshot_dir
+
+    def spy_ensure(self, path=None):
+        ensure_calls.append(path)
+        return real_ensure(self, path)
+
+    video_qt.MainWindow.ensure_snapshot_dir = spy_ensure
+    try:
+        dlg3._on_action_btn()
+        finished = pump_until(lambda: dlg3._state != 'running', timeout=20)
+    finally:
+        video_qt.MainWindow.ensure_snapshot_dir = real_ensure
+
+    check("抽帧跑完了", finished, f"state={dlg3._state}")
+    check("「开始截图」调的是 ensure_snapshot_dir (不是自己 os.makedirs)",
+          ensure_calls == [out_dir], f"got={ensure_calls}")
+    check("截图目录建出来了", os.path.isdir(out_dir), f"path={out_dir!r}")
+    expected_name = 'a_t1_00-00-07-24.png'
+    check("输出文件名 {base}_t{c+1}_{00-00-07-24}.png",
+          os.path.exists(os.path.join(out_dir, expected_name)),
+          f"got={sorted(os.listdir(out_dir)) if os.path.isdir(out_dir) else None}")
+    check("状态行: 抽帧完成: 2/2 (2 成功, 0 失败)",
+          dlg3.status_label.text() == '抽帧完成: 2/2 (2 成功, 0 失败)',
+          f"got={dlg3.status_label.text()!r}")
+    check("抽帧完按钮回到「开始截图」",
+          dlg3.action_btn.text() == '开始截图',
+          f"got={dlg3.action_btn.text()!r}")
+    state = dlg3.model.cell_state(0, 2)
+    check("成功的 cell 状态是 done 且带磁盘路径",
+          state is not None and state.status == 'done'
+          and state.image_path is not None,
+          f"got={state}")
+    thumb = dlg3.delegate.thumbnail(0, 2)
+    check("内存里只留 **320px** 的缩略图",
+          thumb is not None and thumb.width() == 320,
+          f"got={thumb.width() if thumb else None}")
+    disk = QImage(state.image_path)
+    check("磁盘上存的是 **640px** 原图", disk.width() == 640,
+          f"got={disk.width()}")
+    big = EnlargeDialog(dlg3, image_path=state.image_path, title='a.mp4 @ T1')
+    check("放大窗口从磁盘重新加载 → 640px (不复用内存里那张 320px)",
+          big._image.width() == 640, f"got={big._image.width()}")
+
+    # ================================================================
+    section("点缩略图 → 放大窗口 (标题 {文件名} @ T{c+1})")
+    created: list = []
+
+    class FakeEnlarge:
+        def __init__(self, parent, image_path, title):
+            created.append((image_path, title))
+
+        def show(self):
+            pass
+
+    video_qt.EnlargeDialog = FakeEnlarge
+    try:
+        dlg3._on_cell_clicked(dlg3.model.index(0, 2))
+    finally:
+        video_qt.EnlargeDialog = real_enlarge
+    check("点缩略图 → 弹放大窗口 (路径 + 标题)",
+          created and created[0][0] == state.image_path
+          and created[0][1] == 'a.mp4 @ T1',
+          f"got={created}")
+
+    # ================================================================
+    section("抽帧中点关闭 → 二次确认「抽帧还在进行中, 确定要关闭吗?」")
+    dlg4 = SnapshotDialog(win4, files, out_dir)
+    dlg4._state = 'running'
+    msgbox_log.clear()
+    msgbox_answer['question'] = QMessageBox.No
+    dlg4.close()
+    question_texts = [t for kind, _title, t in msgbox_log if kind == 'question']
+    check("二次确认的文案**逐字**一致 (半角逗号 + 空格 + 半角问号)",
+          question_texts == ['抽帧还在进行中, 确定要关闭吗?'],
+          f"got={question_texts}")
+    check("回答「否」→ 不关窗, 也不取消抽帧",
+          not dlg4._closed and not dlg4._cancel.is_set(),
+          f"closed={dlg4._closed} cancel={dlg4._cancel.is_set()}")
+    msgbox_answer['question'] = QMessageBox.Yes
+    dlg4.close()
+    check("回答「是」→ 取消抽帧并关窗",
+          dlg4._closed and dlg4._cancel.is_set(),
+          f"closed={dlg4._closed} cancel={dlg4._cancel.is_set()}")
+    msgbox_answer['question'] = QMessageBox.No
+
+    # ================================================================
+    section("时间点输入框: 双击只选所在的那一段")
+    edit = TimeTokenEdit('00:00:07:24')
+    edit.setFixedWidth(200)
+    edit.show()
+    app.processEvents()
+    for idx, want, label in ((0, '00', 'HH'), (3, '00', 'MM'),
+                             (6, '07', 'SS'), (9, '24', 'frame')):
+        x = x_for_char(edit, idx)
+        _double_click(edit, x)
+        check(f"双击第 {idx} 个字符 → 只选 {label} 段 ({want!r})",
+              edit.selectedText() == want, f"got={edit.selectedText()!r}")
+
+    # ================================================================
+    section("横向可滚: 5 个时间点时列总宽超出视口")
+    dlg5 = SnapshotDialog(win4, files, out_dir)
+    dlg5.model.set_time_tokens(['00:00:01:00'] * 5)
+    dlg5._sync_columns()
+    dlg5.resize(1200, 700)
+    dlg5.show()
+    app.processEvents()
+    hsb = dlg5.view.horizontalScrollBar()
+    total_w = (video_qt.SNAPSHOT_IDX_W + video_qt.SNAPSHOT_TITLE_W
+               + 5 * video_qt.SNAPSHOT_CELL_W)
+    check("5 个时间点时列总宽超出视口",
+          total_w > dlg5.view.viewport().width(),
+          f"total={total_w} viewport={dlg5.view.viewport().width()}")
+    check("横向滚动条有范围 (可以滚)", hsb.maximum() > 0, f"max={hsb.maximum()}")
+    hsb.setValue(hsb.maximum())
+    app.processEvents()
+    check("能横向滚到最右", hsb.value() == hsb.maximum(),
+          f"value={hsb.value()} max={hsb.maximum()}")
+    check("滚到最右时最后一列露出来了",
+          dlg5.view.columnViewportPosition(6)
+          + dlg5.view.columnWidth(6) <= dlg5.view.viewport().width() + 1,
+          f"pos={dlg5.view.columnViewportPosition(6)}")
+
+    # ================================================================
+    section("表头与数据列对齐 (表头文字来自模型)")
+    header = dlg5.view.horizontalHeader()
+    check("表头的 model 就是网格 model", header.model() is dlg5.model)
+    check("表头文字来自 model.headerData()",
+          header.model().headerData(2, Qt.Horizontal) == 'T1: 00-00-01-00',
+          f"got={header.model().headerData(2, Qt.Horizontal)!r}")
+    worst = max(abs(header.sectionViewportPosition(c)
+                     - dlg5.view.columnViewportPosition(c))
+                for c in range(dlg5.model.columnCount()))
+    check("表头 x 与数据列 x 对齐 (误差 0px)", worst == 0, f"Δmax={worst}")
+
+    # 注: 旧 Tk 版把表头做成 _inner 的子 widget, 纵向滚动时**跟着内容滚走**
+    # (不钉住)。Qt 的表头本来就是独立控件, 天然钉在顶部 —— 这个差异是
+    # 「构造方式不同」带来的, 不作为行为保留 (产品文档 §6 没这条)。
+
+    # ================================================================
+    section("空文件列表不崩")
+    dlg6 = SnapshotDialog(win4, [], out_dir)
+    check("0 个文件 → 模型 0 行", dlg6.model.rowCount() == 0,
+          f"got={dlg6.model.rowCount()}")
+    dlg6._on_action_btn()
+    finished = pump_until(lambda: dlg6._state != 'running', timeout=10)
+    check("0 个文件也能跑完 (不崩)", finished, f"state={dlg6._state}")
+
+    # ================================================================
+    section("建目录只有两个口子 (整个模块扫)")
+    owners = module_makedirs_owners()
+    check("只有 ensure_snapshot_dir 与 _move_files 会建目录",
+          sorted(f for _cls, f in owners) == ['_move_files', 'ensure_snapshot_dir'],
+          f"got={sorted(owners)}")
+
+    print()
+    if _failures:
+        print(f"✗ {len(_failures)} 条断言失败")
+        return 1
+    print("✓ 全部通过")
+    return 0
+
+
+def _write_png(directory: str, name: str) -> str:
+    path = os.path.join(directory, name)
+    with open(path, 'wb') as f:
+        f.write(fake_png_bytes())
+    return path
+
+
+if __name__ == '__main__':
+    sys.exit(main())
