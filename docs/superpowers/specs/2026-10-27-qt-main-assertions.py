@@ -611,6 +611,12 @@ def _run() -> int:
     winC = MainWindow()
     winC._add_result(make_info('bad.mp4', '/x/bad.mp4', passing=False,
                                bitrate=1000.0))
+    # 达标行**也要在** —— 序号列的染色 bug 恰恰出在**达标行**:
+    # _cell_fg 对达标行**无条件**返回 FG_PASS, 序号列要是漏在 _cell_fg
+    # 里就会被染绿 (而不达标行看不出来 —— 那边只有 title/result 等少数
+    # 列被染红, 序号列恰好不红)。只测不达标行 = 这条 bug 完全测不出来。
+    winC._add_result(make_info('good.mp4', '/x/good.mp4', passing=True,
+                               bitrate=50000.0))
     app.processEvents()
 
     def fg_at(row, col):
@@ -623,6 +629,13 @@ def _run() -> int:
           fg_at(0, 2) is None, f"got={fg_at(0, 2)}")
     check("序号列也**不写死颜色** (规格 §3.3「永不染色」, 不是「永远黑色」)",
           fg_at(0, 0) is None, f"got={fg_at(0, 0)}")
+    # ↓ 达标行 (row 1)。上一轮只测了不达标行, 达标行的序号列从没被验过 ——
+    # 而上一轮出问题的正是**达标行** (序号被染绿)。
+    check("**达标行**的序号列**也是 None** (既不绿也不红)",
+          fg_at(1, 0) is None, f"got={fg_at(1, 0)}")
+    check("对照: 达标行的数据列**确实是绿的** (说明这行真的达标, "
+          "上面那条不是「整行都没色」)",
+          fg_at(1, 1) == '#228b22', f"got={fg_at(1, 1)}")
 
     # ================================================================
     section("列宽两个方向的接线")
@@ -746,11 +759,22 @@ def _run() -> int:
               len(video_qt._ORPHANED_THREADS) == n_before,
               f"before={n_before} after={len(video_qt._ORPHANED_THREADS)}")
     finally:
-        # 收尾: 等那些孤儿线程结束再清列表 —— 解释器退出时析构一个还在跑
-        # 的 QThread 会 abort (退出码 134)
+        # 收尾: 等那些孤儿线程结束。**引用不能无条件清** ——
+        # clear() = 丢掉 QThread 的 Python 引用 = 析构那个线程; 它要是
+        # 还在跑 → QThread: Destroyed while thread is still running →
+        # qFatal → **整个脚本以 134 死掉, 连失败清单都出不来**。
+        # wait() 的返回值必须看: 5s 内没停的线程**绝不能**从列表里摘掉。
+        still_running = []
         for thread in list(video_qt._ORPHANED_THREADS):
-            thread.wait(5000)
-        video_qt._ORPHANED_THREADS.clear()
+            if not thread.wait(5000):
+                still_running.append(thread)
+        if still_running:
+            # 还在跑 → 引用留着 (宁可解释器收尾时炸, 也不能在**断言
+            # 脚本运行中**主动析构一个活着的线程)。
+            print(f"  ! {len(still_running)} 个孤儿线程 5s 内没停 "
+                  f"(引用保留, 不清)")
+        else:
+            video_qt._ORPHANED_THREADS.clear()
         app.processEvents()
 
     print()

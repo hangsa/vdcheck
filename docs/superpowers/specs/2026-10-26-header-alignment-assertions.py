@@ -36,8 +36,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QApplication, QTableView
 
-# QApplication 必须先于 video_qt 建好: video_qt 的 UI_FONT = QFont() 会拷贝
-# **当前 app 的默认字体**, app 还不存在时字体族留空 → 字宽度量跟真机对不上。
+# QApplication 必须先于 video_qt 建好: video_qt 的 ui_font() 是**惰性**的
+# (不是模块常量 UI_FONT —— 那是 PEP 562 的 __getattr__ 代理), 第一次求值
+# 时会拷贝**当前 app 的默认字体**; app 还不存在时字体族留空 →
+# 字宽度量跟真机对不上。
 app = QApplication.instance() or QApplication(sys.argv)
 
 from video_core import VideoInfo

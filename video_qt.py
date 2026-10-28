@@ -175,12 +175,17 @@ class VideoTableModel(QAbstractTableModel):
                 return str(row + 1)
             return self._truncated(section, info)
         if role == Qt.ForegroundRole:
+            if col.key is None:
+                # 序号列: **永不染色** (规格 §3.3 / §6 #15)。
+                # 注意不能把它丢给 _cell_fg —— 那个函数对**达标行**无条件返回
+                # FG_PASS, 序号列会被染绿 (同一列在达标行绿、不达标行默认色,
+                # 行内自己都不一致)。
+                return None
             fg = _cell_fg(info, col.key)
             if fg is None:
                 # 该格**不着色** → 返回 None 让 Qt 用调色板默认色。
                 # 写死黑色的话深色主题下就是黑字黑底 (规格 §3.3 写的是
-                # 「其余保持默认色」)。序号列也一样 —— 它是「永不染色」,
-                # 不是「永远是黑色」。
+                # 「其余保持默认色」)。
                 return None
             return QBrush(QColor(fg))
         if role == Qt.TextAlignmentRole:
@@ -370,6 +375,11 @@ class ScanStats:
 
 # 关窗口时没等完的扫描线程。绝不能析构一个还在跑的 QThread (会 abort),
 # 所以摘出 parent 关系存在这里, 由 main() 在退出前等它自然结束。
+#
+# **这张表是单一事实来源**: MainWindow._orphan_threads 是它的**同一个列表
+# 对象** (类属性), 登记 (_stop_scan) 与收尾 (_shutdown_scan_threads) 走
+# 的是同一张表。类属性那份是为了扛住「解释器收尾时模块全局被清」——
+# 详见 MainWindow._orphan_threads 的注释。
 _ORPHANED_THREADS: list[QThread] = []
 
 
@@ -449,6 +459,14 @@ class MainWindow(QMainWindow):
     """
 
     status_changed = Signal(str)
+
+    # 孤儿线程登记表 —— 与模块级 _ORPHANED_THREADS **同一个列表对象**。
+    #
+    # 为什么要挂两份: 解释器收尾时模块全局可能被清成 None, 那时 __del__
+    # 里再往模块全局 append 会 AttributeError 被 except 吞掉 → 线程的
+    # Python 引用丢了 → 析构一个**还在跑的** QThread → qFatal → abort
+    # (退出码 134)。类对象由实例引用着, 收尾时一定还活着 → 这里拿得到。
+    _orphan_threads = _ORPHANED_THREADS
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1108,7 +1126,7 @@ class MainWindow(QMainWindow):
         self._stop_scan()
         super().closeEvent(event)
 
-    def _stop_scan(self, timeout_ms: int = 5000) -> None:
+    def _stop_scan(self, timeout_ms: int = 0) -> None:
         """停掉扫描线程 (取消 + 等它结束)。
 
         **不用 QThread.terminate()** —— 目标平台是 Windows, terminate 一个
@@ -1116,12 +1134,16 @@ class MainWindow(QMainWindow):
         变成孤儿)。取消标志让 worker 在**当前文件**跑完后退出循环;
         ffprobe 自带 30s 超时, 等它自然结束是安全的。
 
+        timeout_ms 默认 **0** —— 不等: 窗口立刻就能关掉 (等 5s 的话窗口
+        还在屏幕上冻着, 那是最难受的)。worker 在下一个文件边界自己退出,
+        线程被摘出去交给 main() 收尾。
+
         等不出来 (比如 ffprobe 卡在网络盘上) 就不等了, 但**绝不能**析构一个
         还在跑的 QThread (那会 abort) —— 把它从窗口的 child 关系里摘出来,
         由 main() 在退出前等它收尾。
 
         先把 `self._thread` 清掉: 否则关窗口 (closeEvent) 与 app 退出
-        (aboutToQuit) 会把**同一个**线程各停一次 —— 5s + 5s 的 GUI 冻结,
+        (aboutToQuit) 会把**同一个**线程各停一次 —— GUI 冻结两遍,
         main() 还会对它等两遍。
         """
         self._cancel.set()
@@ -1129,10 +1151,48 @@ class MainWindow(QMainWindow):
         if thread is None:
             return
         self._thread = None          # ← 别让第二次调用再停同一个线程
+        self._disconnect_worker()    # ← worker 可能活得比窗口久
         thread.quit()
         if not thread.wait(timeout_ms):
-            thread.setParent(None)
-            _ORPHANED_THREADS.append(thread)
+            thread.setParent(None)   # 先摘 parent (顺序重要)
+            # 登记进孤儿表 —— **引用绝不能丢**: 引用一丢, 那个还在跑的
+            # QThread 就没人持有 → 被析构 → qFatal("QThread: Destroyed
+            # while thread is still running") → abort (退出码 134)。
+            #
+            # 用**类属性** (MainWindow._orphan_threads) 而不是模块全局:
+            # 解释器收尾时模块的 __dict__ 会被清, 模块全局可能变成 None
+            # → 那时 `_ORPHANED_THREADS.append(...)` 抛 AttributeError →
+            # 被 except 吞掉 → **引用就丢了** (正是这个坑)。类对象由
+            # 实例引用着, 收尾时一定还活着 → 这里拿得到。
+            self._orphan_threads.append(thread)
+
+    def _disconnect_worker(self) -> None:
+        """断开 worker → 窗口的信号连接。
+
+        窗口没了之后 worker 还活着的话, 它发来的信号会打到已经销毁的控件上
+        (PySide6 抛 RuntimeError; 出货构建的 windowed 模式 stderr 是 None →
+        静默)。干脆断掉 —— 窗口都要关了, 状态栏最后那行字无所谓。
+
+        **整个函数不许抛** —— 它被 _stop_scan 调用, 而 _stop_scan 的最后
+        一步是「把线程登记进孤儿表」(绝不能被跳过)。解释器收尾时 worker 的
+        C++ 对象可能已经被析构, 连 `worker.progress` 这个属性访问都可能
+        抛 RuntimeError → 所以连属性访问都在 try 里。
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        try:
+            pairs = ((worker.progress, self._on_progress),
+                     (worker.result_ready, self._on_result),
+                     (worker.finished, self._scan_complete),
+                     (worker.cancelled, self._scan_complete))
+        except Exception:
+            return                       # worker 的 C++ 侧已经没了
+        for signal, slot in pairs:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
 
     def __del__(self) -> None:
         """窗口被回收时把扫描线程停掉。
@@ -1143,6 +1203,12 @@ class MainWindow(QMainWindow):
 
         注意: 兜底只负责「别让线程被连带析构」, **不负责等它结束** ——
         退出路径上的等待统一由 main() 做 (见 _shutdown_scan_threads)。
+
+        登记孤儿线程用的是**类属性** MainWindow._orphan_threads, 不是模块
+        全局 _ORPHANED_THREADS —— 解释器收尾时模块全局可能已被清掉,
+        那时 append 会抛 AttributeError 被吞掉 → **线程的引用就丢了**
+        (丢掉引用 = 那个还在跑的 QThread 被析构 = abort)。类对象由实例
+        引用着, __del__ 跑的时候一定还在。
         """
         try:
             self._stop_scan(timeout_ms=2000)
@@ -1150,20 +1216,30 @@ class MainWindow(QMainWindow):
             pass
 
 
-def _shutdown_scan_threads(timeout_ms: int = 5000) -> bool:
-    """等所有被孤儿化的扫描线程结束。
+def _shutdown_scan_threads(timeout_ms: int = 5000) -> None:
+    """等所有被孤儿化的扫描线程结束 (尽量等, 不保证等得到)。
 
-    返回 True = 全都停了; False = 还有线程在跑 (调用方必须用 `os._exit`
-    收尾, 绝不能让它被析构)。
+    **故意不返回值。** 唯一调用方是 main(), 而 main() 无论如何都要
+    `os._exit(0)` —— 返回 True 还是 False, 动作一模一样, 返回值就是死 API。
+    更糟的是它读起来像「True = 可以正常返回」, 而那恰恰是最危险的解读:
+    正常返回会走解释器收尾 → 析构 QApplication / QThread → 撞上
+    "QThread: Destroyed while thread is still running" → abort (退出码 134)。
+    NEW-1/NEW-5 刚把这条坑填掉, 别再留一个看着能分支的返回值。
+
+    需要知道「线程停了吗」就直接查: `any(t.isRunning() for t in
+    _ORPHANED_THREADS)`。
 
     **列表里的引用不清** —— 清了就等于析构那个 QThread, 而它可能还在跑:
     QThread 的析构里会 qFatal("QThread: Destroyed while thread is still
     running") → 进程 abort (退出码 134)。引用要一直留着, 直到进程用
     os._exit 跳过所有析构。
+
+    遍历的是 **MainWindow._orphan_threads** (与模块级 _ORPHANED_THREADS
+    同一个列表对象) —— 单一事实来源: 登记 (_stop_scan) 和收尾 (这里)
+    走的是同一张表, 不会出现「登记进 A 表、收尾等 B 表」的空等。
     """
-    for thread in list(_ORPHANED_THREADS):
+    for thread in list(MainWindow._orphan_threads):
         thread.wait(timeout_ms)
-    return not any(thread.isRunning() for thread in _ORPHANED_THREADS)
 
 
 def main() -> None:
@@ -1186,11 +1262,15 @@ def main() -> None:
     #      C++ 侧析构一个还在跑的线程 → abort
     #   ② main() 返回后 Python 跑析构 → 同样的事
     #
-    # 所以: 先等一会儿 (让 worker 把当前那个文件跑完, ffprobe 子进程
-    # 能正常收尾), 然后**用 os._exit 跳过 C++ 析构**。
-    # 宁可少跑一遍 atexit / Python 的清理, 也不能让进程以 134 退出。
-    _shutdown_scan_threads(timeout_ms=5000)
-    sys.stdout.flush()
-    sys.stderr.flush()
+    # 所以最后一步是 **os._exit(0)** —— 它跳过所有 C++ 析构 (也跳过
+    # atexit 与 Python 的清理)。宁可少跑一遍清理, 也不能让进程以 134 退出。
+    #
+    # 注意**不要**在这里 flush stdout/stderr: 出货构建是 windowed
+    # (PyInstaller console=False), 那边 sys.stdout / sys.stderr 是 **None**
+    # (不是 NullWriter) → `sys.stdout.flush()` 抛 AttributeError → 这一行
+    # 就到不了 os._exit → 解释器正常收尾 → 那个还在跑的 QThread 被析构 →
+    # 又 abort 134, 而且 stderr 也是 None → traceback 静默丢弃。
+    # os._exit 本来也不做 Python 层的 flush, 所以直接不 flush。
+    _shutdown_scan_threads(timeout_ms=2000)
     os._exit(0)
 
