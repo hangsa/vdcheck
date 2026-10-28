@@ -5,10 +5,22 @@ echo   视频码率检查器 - 构建脚本
 echo ========================================
 echo.
 
-:: 检查 Python
+:: 检查 Python 是否存在
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未找到 Python，请先安装 Python 3.8+
+    echo [错误] 未找到 Python，请先安装 Python 3.10+
+    pause
+    exit /b 1
+)
+
+:: 检查 Python 版本 —— **真的比版本**, 不是只看有没有 python。
+:: 源码用了 X | None 联合类型注解 (PEP 604), 实际需要 3.10+。
+:: (">=" 写在双引号里, cmd 不会把它当重定向符)
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo [错误] 需要 Python 3.10 或更高版本
+    echo     当前版本:
+    python --version 2>&1
     pause
     exit /b 1
 )
@@ -39,7 +51,7 @@ if not exist ffprobe\ffprobe.exe (
 
 :: 安装依赖
 echo [2/4] 安装依赖...
-pip install tkinterdnd2 pyinstaller -q
+pip install PySide6 pyinstaller -q
 if errorlevel 1 (
     echo [错误] 依赖安装失败
     pause

@@ -29,6 +29,12 @@ VIDEO_EXTENSIONS = {
 FG_PASS = '#228B22'   # 绿字 (达标)
 FG_FAIL = '#DC143C'   # 红字 (不达标)
 
+# 阈值默认值。原先 video_qt.py 与 video_checker.py (Tk 版) **各有一份
+# 字面量** —— 改一处忘一处就会静默不一致。Tk 版删掉后, core 是唯一定义处,
+# 界面层一律从这里 import。
+DEFAULT_BITRATE_KBPS = 30000
+DEFAULT_SAMPLE_RATE_KHZ = 48
+
 
 @lru_cache(maxsize=1)
 def get_ffprobe_path() -> str:

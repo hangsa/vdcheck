@@ -30,10 +30,11 @@ from PySide6.QtWidgets import (
 )
 
 from video_core import (
-    EXTRACT_THUMB_W, VIDEO_EXTENSIONS, VideoInfo, _cell_fg,
-    _extract_sort_key, _header_text_with_arrow, _next_sort_state, extract_frame,
-    format_title, parse_threshold, parse_time_token, parse_video_info,
-    run_ffprobe, scan_video_files, time_token_to_string, truncate_text,
+    DEFAULT_BITRATE_KBPS, DEFAULT_SAMPLE_RATE_KHZ, EXTRACT_THUMB_W,
+    VIDEO_EXTENSIONS, VideoInfo, _cell_fg, _extract_sort_key,
+    _header_text_with_arrow, _next_sort_state, extract_frame, format_title,
+    parse_threshold, parse_time_token, parse_video_info, run_ffprobe,
+    scan_video_files, time_token_to_string, truncate_text,
 )
 
 # 着色常量**只从 video_core 取** —— 界面层不持有自己的颜色常量
@@ -43,11 +44,8 @@ from video_core import (
 import video_core  # noqa: E402
 
 
-# 阈值默认值。这两个常量现在住在 video_checker.py (Tk 版); Qt 层自带一份,
-# 免得反过来依赖 Tk 入口 —— **Task 7 删 Tk 时并回 video_core.py**
-# (否则同一个字面量会有两份, 改一处忘一处)。
-DEFAULT_BITRATE_KBPS = 30000
-DEFAULT_SAMPLE_RATE_KHZ = 48
+# 阈值默认值住在 video_core —— 界面层**不持有自己的字面量**,
+# 与颜色的规矩一样 (见上面的 import 块)。
 
 _ui_font: QFont | None = None
 
@@ -1214,7 +1212,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('视频检测v3.3')
+        # 版本号随 GUI 层一起抬到 v4.0 (GUI 层从 Tkinter 换成 PySide6)
+        self.setWindowTitle('视频检测v4.0')
         self.resize(1280, 700)
         self.setMinimumSize(1000, 500)
 
