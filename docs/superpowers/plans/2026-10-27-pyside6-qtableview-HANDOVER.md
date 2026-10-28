@@ -9,9 +9,9 @@
 
 ## 0. 一句话状态
 
-表格的 **Qt 表格模型**与 **Qt 主窗口**已实现并通过审查；**定点截图弹窗**（Task 6）与
-**入口切换 + 打包**（Task 7）未开始。**下一步：给 Task 5 的返工轮补一次 scoped 复审**，
-然后进 Task 6。
+表格的 **Qt 表格模型**与 **Qt 主窗口**已实现并通过审查；**定点截图弹窗**（Task 6）
+**实施中**；**入口切换 + 打包**（Task 7）未开始。**下一步：等 Task 6 的实施者交报告，
+然后走任务审查 → 返工轮 → scoped 复审。**
 
 ---
 
@@ -22,8 +22,8 @@
 | 主 checkout | `/Users/hail/Codes/vdcheck`（**仍是 Tk 版，可正常使用**；分支 `main`，HEAD `2849dfe`） |
 | 重构 worktree | `/Users/hail/Codes/vdcheck/.claude/worktrees/refactor-qtableview` |
 | 分支 | `refactor/qtableview`（**未推送**） |
-| HEAD | `9256e56` |
-| 提交数 | 19（`1d16bc7..HEAD`） |
+| HEAD | `ddd2f67` |
+| 提交数 | 24（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
 | 产品文档 | `docs/产品文档.md`（**框架无关的行为规格 = 验收基准**） |
@@ -61,6 +61,12 @@
      —— `qt-main` 里已有一条断言守着，但**那条断言有缺口**（扫源码文本、只扫
      `MainWindow` 上直接定义的函数，弹窗类自己调 `os.makedirs` 抓不到）→
      **Task 6 要把它加强**
+- **第三个洞（2026-10-28 新发现，不在 brief 里）**：计划自己的依赖表
+  （`2026-10-27-pyside6-qtableview.md:935`）把 `2026-10-23-ui-density-assertions.py`
+  的**弹窗部分**（Tk `SnapshotProgressDialog`）划归 **Task 6**，但自动生成的
+  brief 只抽计划里 `### Task 6` 那段文字 → 没带上。处置见 ledger 的 Ruling 21：
+  删掉 ui-density 里 8 个 Tk 弹窗小节，对应语义补进新的 qt-snapshot 脚本；
+  顺带删掉 qt-main 里那条有缺口的弱断言。
 - 弹窗网格用 `QTableView` + 自定义 delegate 画 QPixmap（**零子窗口**）
 - **标题格不达标时整格红字**（与主表格「只红失败列」**刻意不同**）
 - 放大窗口**从磁盘重新加载** 640px 原图（不复用内存里那张 320px）
@@ -137,8 +143,9 @@
 1. 读这一份（不用读整个会话）
 2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `9256e56`
 3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do python "$f" >/dev/null || echo "FAIL $f"; done`
-4. 补 Task 5 的 scoped 复审（§3.1）→ 过了就 `Task 5: complete` 写进 ledger
-5. 派 Task 6（§3.2）→ 任务审查 → 返工轮 → scoped 复审
+4. ~~补 Task 5 的 scoped 复审~~ → **已完成**（`d46d051` 后 sonnet 复审判
+   All findings addressed ✅，ledger 里有 `Task 5: complete`）
+5. **Task 6 实施中**（BASE `d46d051`）→ 任务审查 → 返工轮 → scoped 复审
 6. 派 Task 7（§3.3）→ 任务审查 → 返工轮 → scoped 复审
 7. **最终整体审查**（最贵的模型，审整条分支），带 ledger 里的 deferred minors 清单
 8. Windows 实测（§7）
