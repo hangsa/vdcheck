@@ -3,15 +3,15 @@
 > **这份文件是给「下次接手的人」看的**，包含不读代码就不知道的东西。
 > 读完这一份就能从断点继续，不用把整个会话重塞进上下文。
 >
-> 最后更新: 2026-10-28
+> 最后更新: 2026-10-29
 
 ---
 
 ## 0. 一句话状态
 
-表格的 **Qt 表格模型**与 **Qt 主窗口**已实现并通过审查；**定点截图弹窗**（Task 6）
-**实施中**；**入口切换 + 打包**（Task 7）未开始。**下一步：等 Task 6 的实施者交报告，
-然后走任务审查 → 返工轮 → scoped 复审。**
+表格的 **Qt 表格模型**、**Qt 主窗口**、**定点截图弹窗**（Task 6）都已实现并通过审查；
+**入口切换 + 打包**（Task 7）未开始。**下一步：派 Task 7（上下文已备好在
+`.superpowers/sdd/2026-10-27-pyside6-qtableview/task-7-context.md`）。**
 
 ---
 
@@ -22,8 +22,8 @@
 | 主 checkout | `/Users/hail/Codes/vdcheck`（**仍是 Tk 版，可正常使用**；分支 `main`，HEAD `2849dfe`） |
 | 重构 worktree | `/Users/hail/Codes/vdcheck/.claude/worktrees/refactor-qtableview` |
 | 分支 | `refactor/qtableview`（**未推送**） |
-| HEAD | `ddd2f67` |
-| 提交数 | 24（`1d16bc7..HEAD`） |
+| HEAD | `19f4a93` |
+| 提交数 | 27（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
 | 产品文档 | `docs/产品文档.md`（**框架无关的行为规格 = 验收基准**） |
@@ -42,49 +42,45 @@
 | P3 Qt 表格模型 | ✅ | `b175b07` | 三轮返工后 Approved，51 条断言 |
 | P4 表格断言改测 Qt | ✅ | `29e2aeb` | 返工后 Approved |
 | P5 Qt 主窗口 | ✅ | `d46d051` | **三轮返工**后 Approved，qt-main 126 条 / qt-table 116 条 |
-| P6 Qt 定点截图弹窗 | 🔶 **进行中** | | |
-| P7 入口切换 + 打包 | ⬜ | | |
+| P6 Qt 定点截图弹窗 | ✅ | `19f4a93` | 审查 + 1 轮返工 + scoped 复审后通过，qt-snapshot 76 条 |
+| P7 入口切换 + 打包 | ⬜ **下一步** | | |
 
-**当前 13 个断言脚本全绿。** `video_checker.py` 保持 CRLF（0 裸 LF）。
+**当前 14 个断言脚本全绿。** `video_checker.py` 保持 CRLF（0 裸 LF）。
 
 ---
 
 ## 3. 断点：下一步做什么
 
-### 3.1 当前：Task 6（Qt 定点截图弹窗 + 放大窗口）**进行中**
+### 3.1 Task 6（Qt 定点截图弹窗 + 放大窗口）—— ✅ **已完成**
 
-- BASE `d46d051`，实施中
-- 计划要点在 `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` 的 Task 6
-- **它要接上 Task 5 留的两个洞**：
-  1. `video_qt.py` 的 `open_snapshot_dialog()` 是空壳（带 `TODO(Task 6)`）
-  2. 弹窗的「开始截图」**必须调 `ensure_snapshot_dir()`**，不能自己 `os.makedirs`
-     —— `qt-main` 里已有一条断言守着，但**那条断言有缺口**（扫源码文本、只扫
-     `MainWindow` 上直接定义的函数，弹窗类自己调 `os.makedirs` 抓不到）→
-     **Task 6 要把它加强**
-- **第三个洞（2026-10-28 新发现，不在 brief 里）**：计划自己的依赖表
-  （`2026-10-27-pyside6-qtableview.md:935`）把 `2026-10-23-ui-density-assertions.py`
-  的**弹窗部分**（Tk `SnapshotProgressDialog`）划归 **Task 6**，但自动生成的
-  brief 只抽计划里 `### Task 6` 那段文字 → 没带上。处置见 ledger 的 Ruling 21：
-  删掉 ui-density 里 8 个 Tk 弹窗小节，对应语义补进新的 qt-snapshot 脚本；
-  顺带删掉 qt-main 里那条有缺口的弱断言。
+- commits `d46d051..19f4a93`；**审查 + 1 轮返工 + scoped 复审全过**（9 条 findings 全关）
+- 实现：`SnapshotDialog` / `EnlargeDialog` / `SnapshotGridModel` / `SnapshotDelegate` /
+  `TimeTokenEdit` / `CellState` + `_snapshot_worker`（`video_qt.py`）
+- 断言：`2026-10-27-qt-snapshot-assertions.py`，**76 条 / 19 节**
 - 弹窗网格用 `QTableView` + 自定义 delegate 画 QPixmap（**零子窗口**）
 - **标题格不达标时整格红字**（与主表格「只红失败列」**刻意不同**）
 - 放大窗口**从磁盘重新加载** 640px 原图（不复用内存里那张 320px）
-- 抽帧中点 X → 二次确认；**不 kill 已启动的 ffmpeg**
-- 完成后：任务审查 → 返工轮 → scoped 复审
+- 抽帧中点关闭 → 二次确认；**不 kill 已启动的 ffmpeg**
+- **实施过程中被 429 打断过一次**（原实施者不可恢复，换了新 agent 接手）；
+  完整经过见 ledger 的「Task 6 返工轮 1/5」与「Task 6 任务审查（第 1 轮）」
 
-### 3.2 然后进 Task 7（入口切换 + 打包）
+### 3.2 **当前：Task 7（入口切换 + 打包）—— 下一步**
 
+- **控制者已经备好的上下文**: `.superpowers/sdd/2026-10-27-pyside6-qtableview/task-7-context.md`
+  （依赖盘点的实测结果 + Ruling 24 的 excludes 依据 + build.bat 的改法 + CLAUDE.md 改哪些）
 - `video_checker.py` 换成 Qt 入口（重导出 core 的名字给断言脚本 + 转发 `video_qt.main()`）
 - **删掉 Tk GUI**（`VideoGridView` / `Tooltip` / `EnlargeDialog` / `SnapshotProgressDialog` /
-  `VideoCheckerApp` + tkinter/tkinterdnd2 的 import）
+  `VideoCheckerApp` + tkinter/tkinterdnd2 的 import）—— **就地删**，Tk GUI 一直在
+  `video_checker.py` 里，计划里提的 `video_checker_tk.py` **从来没建过**
 - `video_checker.spec`：去掉 tkinterdnd2 的 datas/hiddenimports；加 PySide6 用不到的模块的
-  `excludes`（**排除前逐个确认没用到** —— `QtNetwork` 大概率被 `QtWidgets` 依赖，排掉会构建失败）
+  `excludes` —— **`QtNetwork` 实测**不是 `QtWidgets` 的依赖（Ruling 24），可以排；
+  但排除清单**不能照抄**，排一个就要在 Windows 上跑一次 exe 确认
 - `build.bat`：Python 「3.8+」→ **「3.10+」** 并加真正的版本比较；依赖换 `PySide6`
 - 更新 `CLAUDE.md`
 - **产品文档 §9 的脚本表**还列着已删的 `2026-09-29-dnd-parsing` → 改掉
-- **`video_qt.py` 自带的 `DEFAULT_BITRATE_KBPS` / `DEFAULT_SAMPLE_RATE_KHZ` 要并回 `video_core.py`**
-  （否则两份字面量；`video_qt.py` 的注释里已经写明这一步）
+- **`DEFAULT_BITRATE_KBPS` / `DEFAULT_SAMPLE_RATE_KHZ` 现在有**两份**字面量**
+  （`video_qt.py` + `video_checker.py`，`video_core.py` 里没有）→ 并回 core，
+  core 成为唯一定义处
 - Windows 实测（见下）
 
 ---
@@ -141,12 +137,13 @@
 ## 6. 下次开工的检查清单
 
 1. 读这一份（不用读整个会话）
-2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `9256e56`
-3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do python "$f" >/dev/null || echo "FAIL $f"; done`
-4. ~~补 Task 5 的 scoped 复审~~ → **已完成**（`d46d051` 后 sonnet 复审判
-   All findings addressed ✅，ledger 里有 `Task 5: complete`）
-5. **Task 6 实施中**（BASE `d46d051`）→ 任务审查 → 返工轮 → scoped 复审
-6. 派 Task 7（§3.3）→ 任务审查 → 返工轮 → scoped 复审
+2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `19f4a93`
+3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $f"; done`
+   （Qt 脚本在本机需要 `QT_QPA_PLATFORM=offscreen`）
+4. ~~补 Task 5 的 scoped 复审~~ → **已完成**（ledger 里有 `Task 5: complete`）
+5. ~~Task 6 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**（ledger 里有
+   `Task 6: complete (commits d46d051..19f4a93, review clean, 1 deferred minor)`）
+6. **派 Task 7**（§3.2）→ 任务审查 → 返工轮 → scoped 复审
 7. **最终整体审查**（最贵的模型，审整条分支），带 ledger 里的 deferred minors 清单
 8. Windows 实测（§7）
 
