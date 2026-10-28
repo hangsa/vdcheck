@@ -19,7 +19,7 @@ from PySide6.QtCore import (
     QTimer, Signal, Slot,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QFontMetrics, QImage, QKeySequence, QPixmap,
+    QBrush, QColor, QFont, QFontMetrics, QKeySequence, QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -81,6 +81,26 @@ def ui_font() -> QFont:
         _ui_font = font
         return font
     return _ui_font
+
+
+_snapshot_fail_font: QFont | None = None
+
+
+def snapshot_fail_font() -> QFont:
+    """失败字形 '×' 的字体: **14pt 粗体**。
+
+    与 Tk 原版一致 (video_checker.py: font=('TkDefaultFont', 14, 'bold')) ——
+    「失败」这个状态要一眼看得见, 9pt 常规体不够显眼。
+
+    惰性求值 (跟 ui_font() 一样): 字体度量要 QGuiApplication 在场。
+    """
+    global _snapshot_fail_font
+    if _snapshot_fail_font is None:
+        font = QFont(ui_font())
+        font.setPointSize(14)
+        font.setBold(True)
+        _snapshot_fail_font = font
+    return _snapshot_fail_font
 
 
 def __getattr__(name: str):
@@ -379,7 +399,10 @@ SNAPSHOT_TITLE_W = 250
 # 序号列宽 (固定, 不随时间点数量变化)
 SNAPSHOT_IDX_W = 45
 
-# 自定义 role: 把单元格的抽帧状态递给 delegate (画面由 delegate 画)
+# 自定义 role: 把单元格的抽帧状态递给 delegate (画面由 delegate 画)。
+# delegate **只认 role** —— `SnapshotDelegate.paint` 走 `index.data(...)`,
+# 不直接问 model.cell_state(); 否则这个 role 就是死的 (模型发了 dataChanged
+# 信号, 画笔却压根不看它)。
 SNAPSHOT_STATE_ROLE = int(Qt.UserRole) + 1
 
 
@@ -426,6 +449,11 @@ class SnapshotGridModel(QAbstractTableModel):
         if role == SNAPSHOT_STATE_ROLE:
             # 时间点列: 画面由 delegate 画, 这里只把状态递过去
             return self._cells.get((row, col)) if self.is_time_column(col) else None
+        if role == Qt.TextAlignmentRole:
+            # **只有标题列左对齐, 其余全部居中** (产品文档 §6 #14)。
+            # 不显式给这个 role 的话 QTableView 默认全左对齐 —— 与 Tk 原版
+            # (序号 label anchor='center', 标题 label anchor='w') 不一致。
+            return _ALIGN_FLAGS['w'] if col == 1 else _ALIGN_FLAGS['center']
         if col == 0:
             if role == Qt.DisplayRole:
                 return str(row + 1)
@@ -520,7 +548,11 @@ class SnapshotDelegate(QStyledItemDelegate):
     三态 (加上起跑前的 idle):
       加载中 → 蓝色 '…'
       成功   → 320px 缩略图 (QPixmap)
-      失败   → 红色 '×'
+      失败   → 红色 '×' (**14pt 粗体**, 与 Tk 原版一致)
+
+    状态**只从 model 的 SNAPSHOT_STATE_ROLE 取** —— delegate 不直接问
+    model.cell_state(), 否则那个自定义 role 就没人读 (模型发了 dataChanged
+    信号, 画笔却压根不看它)。
 
     缩略图缓存在 delegate 里 —— **只留 320px 那一份**, 640px 原图
     用完即弃 (产品文档 §6 #25/#26)。
@@ -565,7 +597,7 @@ class SnapshotDelegate(QStyledItemDelegate):
             # 序号 / 标题两列: 默认画法 (文字与颜色由 model 给)
             super().paint(painter, option, index)
             return
-        state = model.cell_state(index.row(), index.column())
+        state = index.data(SNAPSHOT_STATE_ROLE)
         painter.save()
         painter.fillRect(option.rect, option.palette.base())
         if state is not None and state.status == 'done':
@@ -575,6 +607,11 @@ class SnapshotDelegate(QStyledItemDelegate):
                 painter.restore()
                 return
         text, color = self._glyph(state)
+        if state is not None and state.status == 'failed':
+            # 失败 '×' 用 **14pt 粗体** —— 与 Tk 原版一致
+            # (video_checker.py: font=('TkDefaultFont', 14, 'bold'))。
+            # 失败这个状态得一眼看得见, 9pt 常规体不够显眼。
+            painter.setFont(snapshot_fail_font())
         painter.setPen(color)
         painter.drawText(option.rect, Qt.AlignCenter, text)
         painter.restore()
@@ -656,11 +693,14 @@ class EnlargeDialog(QDialog):
             'QDialog { background-color: #202020; }'
             'QLabel { color: #cccccc; }')
         root = QVBoxLayout(self)
-        # 原图: 重新从磁盘读 (网格里只留了 320px 的缩略图)
-        self._image = QImage(image_path)
+        # 原图: 重新从磁盘读 (网格里只留了 320px 的缩略图)。
+        # **内存里只留这一份** —— 之前是 QImage + QPixmap.fromImage(QImage),
+        # 640×360 的图存了两份 (~1.8MB); Tk 原版只留一份 PhotoImage
+        # (产品文档 §6 #25: 为省内存)。
+        self._pixmap = QPixmap(image_path)
         label = QLabel()
-        if not self._image.isNull():
-            label.setPixmap(QPixmap.fromImage(self._image))
+        if not self._pixmap.isNull():
+            label.setPixmap(self._pixmap)
         label.setAlignment(Qt.AlignCenter)
         root.addWidget(label)
         path_label = QLabel(image_path)
@@ -734,6 +774,7 @@ class SnapshotDialog(QDialog):
         self._cells_processed = 0
         self._total = len(self._files) * len(self._tokens)
         self._closed = False
+        self._close_confirmed = False   # 关窗二次确认: 确认过一次就记住
         self._cancel = threading.Event()
         self._worker_thread = None
         self._result_queue: queue.Queue = queue.Queue()
@@ -985,24 +1026,64 @@ class SnapshotDialog(QDialog):
                       title=f"{info.title} @ T{c + 1}").show()
 
     # ---- 关闭 ----
+    #
+    # 关闭有**两条路**:
+    #   窗口 X → `closeEvent` (QWidget.close 发 QCloseEvent)
+    #   Esc 键 → `reject()`   (QDialog.keyPressEvent 直接调 reject)
+    # 两条路都得走同一个二次确认 —— 抽帧还在跑的时候把窗关了却没确认,
+    # 后台会继续往 snapshot 目录里写帧, 用户还永远看不到「抽帧完成」。
+    #
+    # `reject()` **不能**写成 `self.close()`: QDialog::closeEvent 内部会调
+    # reject(), 那样会无限递归。
 
-    def closeEvent(self, event) -> None:
-        """抽帧中点关闭 → 二次确认。
+    def _confirm_close(self) -> bool:
+        """抽帧中关闭 → 二次确认。返回 True = 允许关闭。
 
-        确认后**只置取消标志**, 不 kill 已启动的 ffmpeg 进程
-        (产品文档 §6 #27)。
+        **确认过一次就记住** —— closeEvent 与 reject() 都会调到这里
+        (窗口 X 那条路上 QDialog::closeEvent 会再调一次 reject()),
+        不能弹两次框。回答「否」时不记 —— 下次关还要再问一次。
         """
+        if self._close_confirmed:
+            return True
         if self._state == 'running':
             answer = QMessageBox.question(
                 self, '确认关闭', '抽帧还在进行中, 确定要关闭吗?',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
-                event.ignore()
-                return
+                return False
+        self._close_confirmed = True
+        return True
+
+    def _finish_close(self) -> None:
+        """确认过了 → 收尾。
+
+        **只置取消标志**, 不 kill 已启动的 ffmpeg 进程
+        (产品文档 §6 #27)。
+        """
+        if self._state == 'running':
             self._cancel.set()
         self._closed = True
         self._poll_timer.stop()
+
+    def closeEvent(self, event) -> None:
+        """窗口 X → 抽帧中二次确认。"""
+        if not self._confirm_close():
+            event.ignore()
+            return
+        self._finish_close()
+        # QDialog::closeEvent 内部会调 reject() —— 那边已经确认过了
+        # (_close_confirmed), 不会再弹一次框。
         super().closeEvent(event)
+
+    def reject(self) -> None:
+        """Esc 键 → 跟窗口 X 一样: 二次确认 + 取消抽帧。
+
+        回答「否」→ **什么都不做** (窗还在, 抽帧还在跑)。
+        """
+        if not self._confirm_close():
+            return
+        self._finish_close()
+        super().reject()
 
 
 # ---- 派生路径的两个小助手 ----

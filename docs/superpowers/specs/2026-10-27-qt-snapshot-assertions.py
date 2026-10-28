@@ -41,10 +41,12 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QBuffer, QEvent, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFontMetrics, QImage, QMouseEvent, QPainter, QPixmap,
+    QColor, QFont, QFontMetrics, QImage, QKeyEvent, QMouseEvent, QPainter,
+    QPixmap,
 )
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QLabel, QMessageBox, QPushButton, QStyleOptionViewItem,
+    QTableView,
 )
 
 # QApplication 必须**先于** video_qt 建好: ui_font() 惰性求值时会拷贝当前
@@ -150,6 +152,41 @@ def count_hues(img: QImage) -> tuple[int, int, int]:
                     and c.lightness() < 200:
                 neutral += 1
     return blue, red, neutral
+
+
+def red_ink_bbox(img: QImage) -> tuple[int, int, int, int]:
+    """红墨迹的外接矩形 (x, y, w, h)。没有红墨迹时返回 (0, 0, 0, 0)。"""
+    xs, ys = [], []
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.red() > c.green() + 40 and c.red() > c.blue() + 40:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return (0, 0, 0, 0)
+    return (min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+
+
+def render_glyph(text: str, font, color=QColor('red'), size=(80, 40)) -> QImage:
+    """对照组: 用**指定的字体**画一个字, 返回图。
+
+    用来跟 delegate 画出来的失败 '×' 比 —— 断言它确实是 14pt 粗体。
+    """
+    pm = QPixmap(size[0], size[1])
+    pm.fill(Qt.white)
+    painter = QPainter(pm)
+    painter.setFont(font)
+    painter.setPen(color)
+    painter.drawText(pm.rect(), Qt.AlignCenter, text)
+    painter.end()
+    return pm.toImage()
+
+
+def _img_attrs(obj) -> list[str]:
+    """对象上所有「装着一张图」的属性名 (QPixmap / QImage)。"""
+    return sorted(name for name, val in vars(obj).items()
+                  if isinstance(val, (QPixmap, QImage)))
 
 
 def pump_until(predicate, timeout: float = 20.0) -> bool:
@@ -350,6 +387,26 @@ def _run() -> int:
     model.mark_failed(0, 2)
     blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2))
     check("失败是红色 ×", red > 0 and blue == 0, f"blue={blue} red={red}")
+    # 失败 '×' 必须是 **14pt 粗体** —— Tk 原版是
+    # font=('TkDefaultFont', 14, 'bold'), 9pt 常规体不够显眼。
+    # 跟两个对照组比: 9pt 常规 (要更高) / 14pt 常规 (要更粗 → 墨更多)。
+    fail_img = render_cell(model, delegate, 0, 2)
+    fail_box = red_ink_bbox(fail_img)
+    ctrl9 = QFont(video_qt.ui_font())
+    ctrl14 = QFont(video_qt.ui_font())
+    ctrl14.setPointSize(14)
+    box9 = red_ink_bbox(render_glyph('×', ctrl9))
+    check("失败 '×' 比 9pt 常规体**更高** (字号确实变大了)",
+          fail_box[3] > box9[3],
+          f"delegate_h={fail_box[3]} 9pt_h={box9[3]}")
+    _b, _r, _n = count_hues(render_glyph('×', ctrl14))
+    check("失败 '×' 比 14pt **常规**体墨更多 (确实是粗体)",
+          red > _r,
+          f"delegate_red={red} 14pt_regular_red={_r}")
+    fail_font = video_qt.snapshot_fail_font()
+    check("失败字形的字体规格 = 14pt 粗体 (与 Tk 原版一致)",
+          fail_font.pointSize() == 14 and fail_font.bold(),
+          f"got={fail_font.pointSize()}pt bold={fail_font.bold()}")
     # 成功 → 委托把 QPixmap 画出来了 (缩略图缓存放在 delegate 里)
     thumb = QPixmap(640, 360)
     thumb.fill(QColor('red'))
@@ -358,6 +415,42 @@ def _run() -> int:
     model.mark_done(0, 2, '/tmp/x.png')
     blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2, (120, 80)))
     check("成功 → 委托把 QPixmap 画出来了", ok and red > 0, f"red={red}")
+
+    # ================================================================
+    section("状态从 role 走到画面 (dataChanged → 重绘)")
+    # SNAPSHOT_STATE_ROLE 不能是死的: delegate 必须**从 role 取状态**。
+    # 把 model.cell_state() 打瞎 —— delegate 若绕过 role 直接问 model,
+    # 就画不出蓝色。
+    m6 = SnapshotGridModel([make_info()])
+    m6.set_time_tokens(['00:00:07:24'])
+    m6.mark_loading(0, 2)
+    d6 = SnapshotDelegate()
+    m6.cell_state = lambda row, col: None
+    try:
+        blue6, red6, _ = count_hues(render_cell(m6, d6, 0, 2))
+    finally:
+        del m6.cell_state
+    check("delegate 从 **role** 拿状态 (不是直接问 model.cell_state())",
+          blue6 > 0 and red6 == 0, f"blue={blue6} red={red6}")
+
+    # 端到端: model 改状态 → dataChanged → 视图重绘 → 画面真的变了
+    m7 = SnapshotGridModel([make_info()])
+    m7.set_time_tokens(['00:00:07:24'])
+    view6 = QTableView()
+    view6.setModel(m7)
+    view6.setItemDelegate(SnapshotDelegate())
+    view6.setShowGrid(False)
+    view6.resize(900, 400)
+    view6.show()
+    app.processEvents()
+    blue_before = count_hues(view6.viewport().grab().toImage())[0]
+    check("起跑前视口里没有蓝色 (还没加载)", blue_before == 0,
+          f"blue={blue_before}")
+    m7.mark_loading(0, 2)
+    app.processEvents()
+    blue_after = count_hues(view6.viewport().grab().toImage())[0]
+    check("dataChanged 之后**画面真的重绘了** (蓝色 …)",
+          blue_after > 0, f"blue={blue_after}")
 
     # ================================================================
     section("标题格不达标时整格红字 (与主表格「只红失败列」刻意不同)")
@@ -385,6 +478,24 @@ def _run() -> int:
     check("对照: 主表格的序号列**不染色** (§6 #15)",
           main_idx is None,
           f"got={main_idx.color().name() if main_idx else None}")
+
+    # ================================================================
+    section("对齐: 序号列居中 / 标题列左对齐 (§6 #14)")
+    m5 = SnapshotGridModel([make_info()])
+    m5.set_time_tokens(['00:00:07:24'])
+    check("序号列居中",
+          m5.data(m5.index(0, 0), Qt.TextAlignmentRole) == int(Qt.AlignCenter),
+          f"got={m5.data(m5.index(0, 0), Qt.TextAlignmentRole)}")
+    check("标题列左对齐 + 垂直居中",
+          m5.data(m5.index(0, 1), Qt.TextAlignmentRole)
+          == int(Qt.AlignLeft | Qt.AlignVCenter),
+          f"got={m5.data(m5.index(0, 1), Qt.TextAlignmentRole)}")
+    win_align = video_qt.MainWindow()
+    win_align._add_result(make_info())
+    main_align = win_align.model.data(win_align.model.index(0, 0),
+                                      Qt.TextAlignmentRole)
+    check("对照: 主表格的序号列也居中 (两边一致)",
+          main_align == int(Qt.AlignCenter), f"got={main_align}")
 
     # ================================================================
     section("标题格按 250px 截断 + ToolTipRole 给完整路径")
@@ -457,7 +568,48 @@ def _run() -> int:
           f"got={disk.width()}")
     big = EnlargeDialog(dlg3, image_path=state.image_path, title='a.mp4 @ T1')
     check("放大窗口从磁盘重新加载 → 640px (不复用内存里那张 320px)",
-          big._image.width() == 640, f"got={big._image.width()}")
+          big._pixmap.width() == 640, f"got={big._pixmap.width()}")
+    check("放大窗口**内存里只留一份 640px 图** (没有 QImage + QPixmap 两份)",
+          _img_attrs(big) == ['_pixmap'],
+          f"got={_img_attrs(big)}")
+
+    # ================================================================
+    section("失败计数端到端: extract_frame 返回 False")
+    # 上面那条端到端跑的是 0 失败 —— `_failed_count` 与状态行里的
+    # 「(成功, 失败)」根本没被走到。这里补一个**真的失败**的用例。
+    fail_root = mkdtemp(prefix='vdcheck_qt_snapfail_')
+    fail_dir = os.path.join(fail_root, 'snapshot')
+    dlg_fail = SnapshotDialog(win4, files, fail_dir)
+
+    def fake_extract_fail(input_path, seconds, output_path):
+        """第二个时间点抽不出来 (返回 False), 第一个正常。"""
+        if '_t2_' in os.path.basename(output_path):
+            return False
+        with open(output_path, 'wb') as f:
+            f.write(fake_png_bytes())
+        return True
+
+    saved_extract = video_qt.extract_frame
+    video_qt.extract_frame = fake_extract_fail
+    try:
+        dlg_fail._on_action_btn()
+        finished = pump_until(lambda: dlg_fail._state != 'running', timeout=20)
+    finally:
+        video_qt.extract_frame = saved_extract
+    check("有失败时也跑完了", finished, f"state={dlg_fail._state}")
+    check("_failed_count == 1", dlg_fail._failed_count == 1,
+          f"got={dlg_fail._failed_count}")
+    check("状态行: 抽帧完成: 2/2 (1 成功, 1 失败)",
+          dlg_fail.status_label.text() == '抽帧完成: 2/2 (1 成功, 1 失败)',
+          f"got={dlg_fail.status_label.text()!r}")
+    check("失败的 cell 状态是 failed",
+          dlg_fail.model.cell_state(0, 3) is not None
+          and dlg_fail.model.cell_state(0, 3).status == 'failed',
+          f"got={dlg_fail.model.cell_state(0, 3)}")
+    check("成功的 cell 状态是 done",
+          dlg_fail.model.cell_state(0, 2) is not None
+          and dlg_fail.model.cell_state(0, 2).status == 'done',
+          f"got={dlg_fail.model.cell_state(0, 2)}")
 
     # ================================================================
     section("点缩略图 → 放大窗口 (标题 {文件名} @ T{c+1})")
@@ -499,6 +651,55 @@ def _run() -> int:
     check("回答「是」→ 取消抽帧并关窗",
           dlg4._closed and dlg4._cancel.is_set(),
           f"closed={dlg4._closed} cancel={dlg4._cancel.is_set()}")
+    msgbox_answer['question'] = QMessageBox.No
+
+    # ================================================================
+    section("Esc 键也走二次确认 (不能绕过 closeEvent)")
+    # QDialog 的 Esc 走 reject() → done() → hide(), **不经过 closeEvent** ——
+    # 只覆写 closeEvent 的话 Esc 会凭空把弹窗关掉, 不确认也不取消抽帧。
+    dlg_esc = SnapshotDialog(win4, files, out_dir)
+    dlg_esc._state = 'running'
+    dlg_esc.show()
+    app.processEvents()
+    msgbox_log.clear()
+    msgbox_answer['question'] = QMessageBox.No
+    esc = QKeyEvent(QEvent.Type.KeyPress, Qt.Key_Escape, Qt.NoModifier)
+    QApplication.sendEvent(dlg_esc, esc)
+    question_texts = [t for kind, _title, t in msgbox_log if kind == 'question']
+    check("Esc 键也弹二次确认 (逐字一致)",
+          question_texts == ['抽帧还在进行中, 确定要关闭吗?'],
+          f"got={question_texts}")
+    check("Esc 回答「否」→ 不关窗, 也不取消抽帧",
+          not dlg_esc._closed and not dlg_esc._cancel.is_set()
+          and dlg_esc.isVisible(),
+          f"closed={dlg_esc._closed} cancel={dlg_esc._cancel.is_set()} "
+          f"visible={dlg_esc.isVisible()}")
+    msgbox_answer['question'] = QMessageBox.Yes
+    QApplication.sendEvent(dlg_esc, esc)
+    check("Esc 回答「是」→ 取消抽帧并关窗",
+          dlg_esc._closed and dlg_esc._cancel.is_set()
+          and not dlg_esc.isVisible(),
+          f"closed={dlg_esc._closed} cancel={dlg_esc._cancel.is_set()} "
+          f"visible={dlg_esc.isVisible()}")
+    msgbox_answer['question'] = QMessageBox.No
+
+    # ---- 窗口 X 与 Esc 共用同一个确认框, 不能弹两次 ----
+    # **必须先 show()**: 窗口 X 那条路上 QDialog::closeEvent 内部会再调一次
+    # reject() —— 只有对话框**可见**时 Qt 才会走那一步 (隐藏时 close() 只发
+    # QCloseEvent, 不调 reject())。生产里弹窗是 exec() 打开的, 一直可见。
+    dlg_x = SnapshotDialog(win4, files, out_dir)
+    dlg_x._state = 'running'
+    dlg_x.show()
+    app.processEvents()
+    msgbox_log.clear()
+    msgbox_answer['question'] = QMessageBox.Yes
+    dlg_x.close()
+    n_questions = len([1 for kind, _t, _x in msgbox_log if kind == 'question'])
+    check("窗口 X 只弹**一次**二次确认 (closeEvent → reject 不重复弹)",
+          n_questions == 1, f"got={n_questions}")
+    check("窗口 X 回答「是」→ 取消抽帧并关窗",
+          dlg_x._closed and dlg_x._cancel.is_set(),
+          f"closed={dlg_x._closed} cancel={dlg_x._cancel.is_set()}")
     msgbox_answer['question'] = QMessageBox.No
 
     # ================================================================
@@ -545,10 +746,28 @@ def _run() -> int:
     check("表头文字来自 model.headerData()",
           header.model().headerData(2, Qt.Horizontal) == 'T1: 00-00-01-00',
           f"got={header.model().headerData(2, Qt.Horizontal)!r}")
-    worst = max(abs(header.sectionViewportPosition(c)
-                     - dlg5.view.columnViewportPosition(c))
-                for c in range(dlg5.model.columnCount()))
-    check("表头 x 与数据列 x 对齐 (误差 0px)", worst == 0, f"Δmax={worst}")
+    check("表头列数 == 模型列数",
+          header.count() == dlg5.model.columnCount(),
+          f"header={header.count()} model={dlg5.model.columnCount()}")
+    hdr_texts = [dlg5.model.headerData(c, Qt.Horizontal)
+                 for c in range(dlg5.model.columnCount())]
+    check("每个表头 section 的文字都与 model.headerData() 一致",
+          all(header.model().headerData(c, Qt.Horizontal) == t
+              for c, t in enumerate(hdr_texts)),
+          f"got={hdr_texts}")
+    # 旧断言比的是 header.sectionViewportPosition(c) vs
+    # view.columnViewportPosition(c) —— 后者**就是**前者的定义 (Qt 里
+    # QTableView::columnViewportPosition 直接转调 horizontalHeader()),
+    # 差值按构造恒为 0, 永远不可能失败。改成**能被弄坏**的不变式:
+    # 列宽是应用自己定的 (45 / 250 / 328), 弄坏了就会红。
+    widths = [dlg5.view.columnWidth(c)
+              for c in range(dlg5.model.columnCount())]
+    check("列宽: 序号 45 / 标题 250 / 每个时间点 328",
+          dlg5.view.columnWidth(0) == video_qt.SNAPSHOT_IDX_W
+          and dlg5.view.columnWidth(1) == video_qt.SNAPSHOT_TITLE_W
+          and all(dlg5.view.columnWidth(c + 2) == video_qt.SNAPSHOT_CELL_W
+                  for c in range(len(dlg5.model.time_tokens))),
+          f"got={widths}")
 
     # 注: 旧 Tk 版把表头做成 _inner 的子 widget, 纵向滚动时**跟着内容滚走**
     # (不钉住)。Qt 的表头本来就是独立控件, 天然钉在顶部 —— 这个差异是

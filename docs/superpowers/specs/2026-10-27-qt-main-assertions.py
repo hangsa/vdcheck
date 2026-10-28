@@ -587,7 +587,7 @@ def _run() -> int:
           not os.path.isdir(snap_dir), f"path={snap_dir!r}")
     # 「定点截图」按钮自己**不建**目录 —— 建目录是弹窗里「开始截图」那一步
     winS._show_info = lambda text: None
-    winS.open_snapshot_dialog = lambda: None      # Task 6 之前没有弹窗
+    winS.open_snapshot_dialog = lambda: None      # 桩掉弹窗: 免得测试里弹模态 exec()
     winS._on_snapshot_btn_click()
     check("点「定点截图」不建目录 (归弹窗里的「开始截图」建)",
           not os.path.isdir(snap_dir), f"path={snap_dir!r}")

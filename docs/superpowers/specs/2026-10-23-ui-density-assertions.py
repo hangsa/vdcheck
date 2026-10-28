@@ -13,7 +13,7 @@
 
 **定点截图弹窗的小节也迁走了** (2026-10-27, 同一个 Tk → Qt 重构):
 横向滚动 / 表头与数据列对齐 / 空文件列表 / 标题限宽 / 缩略图只留 320px /
-滚轮绑定 —— 前六项对应的语义见
+滚轮绑定 —— 前五项对应的语义见
 `docs/superpowers/specs/2026-10-27-qt-snapshot-assertions.py`;
 **滚轮绑定那节直接删掉, 不补 Qt 版** —— 逐 widget 绑 `<MouseWheel>` 是
 Tk 事件派发机制的产物, `QTableView` 原生支持滚轮, 不需要逐 widget 绑。
