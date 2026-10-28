@@ -41,8 +41,8 @@
 | P2 修 3 个既有缺陷 | ✅ | `d14406d` | 审查 Approved |
 | P3 Qt 表格模型 | ✅ | `b175b07` | 三轮返工后 Approved，51 条断言 |
 | P4 表格断言改测 Qt | ✅ | `29e2aeb` | 返工后 Approved |
-| P5 Qt 主窗口 | 🔶 **待复审** | `9256e56` | 实现 + 返工轮都完成，**scoped 复审被我停了** |
-| P6 Qt 定点截图弹窗 | ⬜ | | |
+| P5 Qt 主窗口 | ✅ | `d46d051` | **三轮返工**后 Approved，qt-main 126 条 / qt-table 116 条 |
+| P6 Qt 定点截图弹窗 | 🔶 **进行中** | | |
 | P7 入口切换 + 打包 | ⬜ | | |
 
 **当前 13 个断言脚本全绿。** `video_checker.py` 保持 CRLF（0 裸 LF）。
@@ -51,53 +51,23 @@
 
 ## 3. 断点：下一步做什么
 
-### 3.1 先补 Task 5 的 scoped 复审（必做）
+### 3.1 当前：Task 6（Qt 定点截图弹窗 + 放大窗口）**进行中**
 
-Task 5 的返工轮 commit `9256e56` **已经实现完**，但它的 scoped 复审被我暂停了。
-
-- 实施者报告：`.superpowers/sdd/2026-10-27-pyside6-qtableview/task-5-report.md`（返工报告在文件末尾）
-- diff 包：`.superpowers/sdd/2026-10-27-pyside6-qtableview/review-e506f09..9256e56.diff`
-- Base `e506f09` → Head `9256e56`
-
-复审要点（上一轮审查提的，实施者声称都修了）：
-
-| # | 发现 | 实施者的修法 |
-|---|---|---|
-| **Important 1** | `closeEvent` 用 `QThread.terminate()` 杀线程 → **Windows 上 `TerminateThread`，线程持 GIL 时挂死整个进程**；ffprobe 变孤儿 | 去掉 terminate：`_stop_scan()` = cancel + quit + `wait(5s)`；等不出来就 `setParent(None)` 存进 `_ORPHANED_THREADS` 由 `main()` 收尾；另加 `__del__` 与 `aboutToQuit` 兜底 |
-| **Important 2** | `dnd-parsing-assertions.py` import `_parse_drop_data`（tkinterdnd2 私有格式）→ Task 7 必断 | 删脚本；覆盖换成 Qt 侧「含空格路径不被切错」（RED：改回按空格切 → 立刻红） |
-| **Important 3** | `ensure_snapshot_dir()` 是死代码；断言名从「点『开始截图』才建」悄悄变成「真要用时才建」 | 断言改名成真正在验的东西；新增 3 条具名断言（按钮不建目录 / helper 建目录 / 只有这两个口子会建目录）+ TODO 指明 Task 6 接线 |
-| Minor 5 | 非失败列写死成黑色（规格是「默认色」，深色主题下黑字黑底） | 改成返回 `None` 不设 brush |
-| Minor 6 | `from video_qt import UI_FONT` 仍是 import 顺序的坑（`__getattr__` 只保护属性访问；from-import 绑快照；app 前 import → family='' → `QFontMetrics` **abort exit 134**） | 代码里再无 from-import 拿 `UI_FONT`（改用 `ui_font()`）；`ui_font()` 在 app 不存在时**明确报错**；commit message 已更正上一条「import 顺序不再有讲究」的说法 |
-| Minor 9 | `apply_app_font` 只在 `main()` 调 → `MainWindow` 自己不设字体 → 模型用 9pt 量宽、视图用 app 默认字体渲染 → 预截断文字溢出列宽 | 已处理 |
-| Minor 10 | 一条不可能失败的断言（表头截断，85px 与任意宽度结果相同） | 已改成窄列 |
-| Minor 11 | 「移动全部」的 fixture 全是 `is_passing=True`，与「移动达标」无法区分 | 已加 `is_passing=False` 的 fixture |
-| Minor 13 | 每次扫描泄漏一个 QThread | 已修（30 轮扫描后 0 残留） |
-| Minor 14 | offscreen 字体族警告来自**我们自己的路径**（`QFontMetrics(QFont())` 触发的 'Sans Serif' 不存在）→ **测试环境字宽与生产不一致** | 报告里写清（不改生产代码） |
-
-**复审要额外核的**：
-- `_ORPHANED_THREADS` 这个全局列表在 `main()` 收尾时怎么处理？解释器退出时还没结束的线程会怎样？`__del__` 的兜底真的可靠吗？
-- `ui_font()` 在 app 不存在时「明确报错」—— 什么方式？谁接住？会不会在 import `video_qt` 那一刻就炸？
-- Minor 5 改成「返回 None 不设 brush」—— Qt 的 `data()` 返回 None 时 delegate 用什么色？**深色主题下真的用调色板默认色吗**（这正是修复的目的）
-- 新断言有没有恒真的（抽查 1~2 条，自己破坏验一下）
-- **Task 7 的前置条件**：现在还有哪个脚本 import 了 Task 7 将要删掉的东西？
-
-### 3.2 然后进 Task 6（Qt 定点截图弹窗 + 放大窗口）
-
-计划里 Task 6 的要点（`docs/superpowers/plans/2026-10-27-pyside6-qtableview.md`）：
-
-- `QTableView` + `SnapshotGridModel` + `SnapshotDelegate`（**委托画 QPixmap**，不用 QLabel → 零子窗口）
-- 单元格三态：加载中 `…` 蓝 / 成功画图 / 失败 `×` 红
+- BASE `d46d051`，实施中
+- 计划要点在 `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` 的 Task 6
+- **它要接上 Task 5 留的两个洞**：
+  1. `video_qt.py` 的 `open_snapshot_dialog()` 是空壳（带 `TODO(Task 6)`）
+  2. 弹窗的「开始截图」**必须调 `ensure_snapshot_dir()`**，不能自己 `os.makedirs`
+     —— `qt-main` 里已有一条断言守着，但**那条断言有缺口**（扫源码文本、只扫
+     `MainWindow` 上直接定义的函数，弹窗类自己调 `os.makedirs` 抓不到）→
+     **Task 6 要把它加强**
+- 弹窗网格用 `QTableView` + 自定义 delegate 画 QPixmap（**零子窗口**）
 - **标题格不达标时整格红字**（与主表格「只红失败列」**刻意不同**）
-- 标题格按 250px 截断 + `Qt.ToolTipRole` 给完整路径
-- 缩略图 320px；放大窗口**从磁盘重新加载** 640px 原图
-- 时间点输入：`QLineEdit` 子类按 x 坐标只选所在段
-- 抽帧中点关闭 → 二次确认；**不 kill 已启动的 ffmpeg**
-- **必须接上 Task 5 留的 `ensure_snapshot_dir()`**（Task 5 留了 TODO 注释指明这一步）——
-  **这是 Task 5 断言里等着 Task 6 填的洞**
-- 默认时间点 `00:00:07:24` / `00:00:08:00`；`+` 追加 `00:00:00:00`；**无删除按钮**
-- 输出文件名 `{base}_t{c+1}_{00-00-07-24}.png`
+- 放大窗口**从磁盘重新加载** 640px 原图（不复用内存里那张 320px）
+- 抽帧中点 X → 二次确认；**不 kill 已启动的 ffmpeg**
+- 完成后：任务审查 → 返工轮 → scoped 复审
 
-### 3.3 最后 Task 7（入口切换 + 打包）
+### 3.2 然后进 Task 7（入口切换 + 打包）
 
 - `video_checker.py` 换成 Qt 入口（重导出 core 的名字给断言脚本 + 转发 `video_qt.main()`）
 - **删掉 Tk GUI**（`VideoGridView` / `Tooltip` / `EnlargeDialog` / `SnapshotProgressDialog` /
@@ -133,6 +103,8 @@ Task 5 的返工轮 commit `9256e56` **已经实现完**，但它的 scoped 复�
 | 12 | `_parse_drop_data` 与它的脚本**一并删** | 它解析 tkinterdnd2 的私有格式 `{f1} {f2}`，Qt 侧走 `mimeData().urls()`（含空格路径天然正确） |
 | 13 | 移动顺序 / 派生路径的斜杠不对称等 39 条「刻意保留」**一条都不能动** | 产品文档 §6 是验收清单 |
 | 14 | 表头的「总宽 1130px」算式在产品文档里**是错的**（列宽之和 1040），实现按列宽表走 | 文档笔误，不是实现的错 |
+| 15 | **退出路径的病根是「解释器收尾时析构还在跑的 QThread」**，承重的是 `main()` 的 `os._exit(0)` | 清引用只是触发器之一。**且** `sys.stdout`/`sys.stderr` 在打包版（`console=False`）里是 `None` → 原来那两行 flush 会抛 AttributeError → `os._exit(0)` 到不了 → **出货 exe 里 exit 134 且静默** |
+| 16 | **序号列「永不染色」是刻意保留的不变量，不是「可以记一笔的行为差异」** | 产品文档 §6 #15 明写「永不染色」。**代码对齐规格，产品文档不加条目** |
 
 ---
 
@@ -198,3 +170,8 @@ ledger（`.superpowers/sdd/.../progress.md`）里有完整清单，大意：
 - 实施者报告里的探针 transcript 混了两个状态（结论正确，transcript 误导）；一处行号错
 - 产品文档 §4.2 的「总宽 1130px」算式错（列宽之和是 1040）
 - 实施者报告里「断言数」把结尾的「✓ 全部通过」也算进去了（差值正确，口径自洽）
+- `video_qt.py` 里 4 处新注释/文档建立在一个**不存在的 Python 机制**上（「解释器收尾时模块全局被清成 None → append 抛 AttributeError」）—— 实测 3.14 上模块全局**不会**被清，且真被清也是 NameError 不是 AttributeError。注释层面，不影响行为
+- 实施者报告 §6 声称「无 `__pycache__`、无未跟踪文件」不成立（worktree 根有 3 个 `.pyc`，被忽略所以工作区看着干净）
+- 孤儿线程登记表**从不清理** —— 取消/重启轮次下完结的线程会累积（有界，长会话下无上限）
+- `os._exit(0)` 跳过 Python 层 stdout flush —— 将来退出路径上若加 `print()` 会被静默丢弃（今天没有）
+- `2026-10-23-ui-density-assertions.py` 还 import `SnapshotProgressDialog`（Tk 类）→ **Task 7 删 Tk GUI 时会断**，Task 6 负责改这一节
