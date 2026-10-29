@@ -255,7 +255,7 @@ def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
     输出格式选 PNG 而非 JPEG: Tk 的 PhotoImage 原生只支持 GIF/PGM/PPM/PNG,
     不能读 JPEG, 用 PNG 才能让弹窗直接显示。
     640x360 PNG 单帧 100-300 KB, 500 帧约 50-150 MB, 可接受。
-    ffmpeg 不可用 / 文件损坏 / 超时 均返回 False。
+    ffmpeg 不可用 / 文件损坏 / 超时均返回 False。
     """
     try:
         ffmpeg = get_ffmpeg_path()

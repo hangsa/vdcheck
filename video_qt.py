@@ -12,6 +12,7 @@ import queue
 import shutil
 import sys
 import threading
+import traceback
 from dataclasses import dataclass
 
 from PySide6.QtCore import (
@@ -1597,8 +1598,21 @@ class MainWindow(QMainWindow):
         self.scan_btn.setEnabled(True)
         self.video_results.clear()
         self.model.clear()
-        # 新一轮扫描: 计数从头来 (漏了这一步 _passed_count 会带着上一轮的
-        # 达标数累加, 状态栏出现「达标 188 · 不达标 -178」这种数)
+        # 新一轮扫描: 计数从头来。
+        #
+        # 更正 (2026-10-29): 旧注释写的是「漏了这一步 _passed_count 会带着
+        # 上一轮的达标数累加, 状态栏出现「达标 188 · 不达标 -178」这种数」
+        # —— **这个前提是错的**, 别照着它去理解代码:
+        #   状态栏的「达标 N」**不是**一个跨轮次累加的运行计数器 —— 它是每轮
+        #   扫描结束时由 _scan_complete **从 video_results 重新算**出来的
+        #   (sum(1 for v in video_results if v.is_passing)), 算完还顺手回写
+        #   self._passed_count。所以「扫第二轮会累加上一轮的达标数」这件事
+        #   **根本不会发生** —— passed 是从 video_results 派生的, 而
+        #   video_results 每轮都被 clear() 过, 所以 passed ≤ total 恒成立,
+        #   「达标 188 · 不达标 -178」这种数**不可能出现**。
+        #   → 这句 = 0 因此**不是 load-bearing** 的, 它只是双保险 (让扫描
+        #   过程中 _add_result 的自增也不带着上一轮的值), 删掉它也不会让
+        #   状态栏的计数出错。
         self._passed_count = 0
 
         self._thread = QThread(self)
@@ -2062,7 +2076,7 @@ def main() -> None:
     # os._exit 本来也不做 Python 层的 flush, 所以直接不 flush。
     #
     # try/finally 是**第二道保险**: 它把**整个**「进入事件循环 → 等待扫描
-    # 线程结束」这段都圈进去, 保证里面任何一处抛异常, os._exit(0) 都仍然
+    # 线程结束」这段都圈进去, 保证里面任何一处抛异常, os._exit 都仍然
     # 一定执行:
     #   ① app.exec() 本身抛 (例如事件处理器里的异常一路冒到事件循环) ——
     #      不兜住的话解释器正常收尾 → 还在跑的 QThread 被析构 → qFatal →
@@ -2070,13 +2084,41 @@ def main() -> None:
     #   ② _shutdown_scan_threads 里的 thread.wait() 在极端情况下会抛
     #      (比如那个 QThread 的 C++ 对象已经被 deleteLater 掉,
     #      libshiboken 抛 RuntimeError: Internal C++ object already deleted)。
-    # 那个异常一旦逃出 main(), os._exit(0) 就到不了 → 解释器正常
+    # 那个异常一旦逃出 main(), os._exit 就到不了 → 解释器正常
     # 收尾 → 还在跑的 QThread 被析构 → qFatal → abort (退出码 134) ——
-    # 正是这条路径要根治的故障。所以**无论等待过程抛不抛, os._exit(0) 必须
+    # 正是这条路径要根治的故障。所以**无论等待过程抛不抛, os._exit 必须
     # 一定执行**。
+    #
+    # 正常路径与异常路径要**区分开**:
+    #   正常 → finally: os._exit(0)
+    #   异常 → except: 尽量落 traceback, 然后 os._exit(1)
+    # 否则致命错误和正常退出长得一模一样 (退出码 0, 没有 traceback), 线上
+    # 出事根本没法查。两条路都满足同一个硬约束: **进程绝不跑 Python 层
+    # 析构** → 那个还在跑的 QThread 永远不会被析构 → 不会有 134。
     try:
         app.exec()
         _shutdown_scan_threads(timeout_ms=2000)
+    except BaseException:
+        # **先判空, 再打印**: 出货构建是 windowed (PyInstaller
+        # console=False), 那边 sys.stderr 是 **None** (不是 NullWriter) ——
+        # traceback.print_exc() 往 None 上写会自己抛 AttributeError → 那个
+        # 异常逃出 main() → 解释器正常收尾 → 还在跑的 QThread 被析构 →
+        # qFatal → abort 134, 正是这条路径要根治的故障。
+        # 所以: 取一次 sys.stderr 存局部 (别让 print_exc 自己再去读全局),
+        # 判 None, 再用 try 包一层 —— 打印失败也不能挡路, 最后无论如何
+        # os._exit(1)。windowed 构建拿不到 traceback, 但至少**退出码 1**,
+        # 足以让「干净退出」和「炸了退出」分得开。
+        stderr = sys.stderr
+        if stderr is not None:
+            try:
+                traceback.print_exc(file=stderr)
+                stderr.flush()
+            except BaseException:
+                # 打印/flush 失败不许把路挡住 (例如 stderr 是个半死的句柄)
+                pass
+        # os._exit 是**立刻**终止进程的 (C 层 _exit, 不做栈展开), 所以
+        # 下面的 finally 不会再执行 —— 退出码 1 是最终结果。
+        os._exit(1)
     finally:
         os._exit(0)
 
