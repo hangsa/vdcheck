@@ -190,12 +190,13 @@ VIDEO_COLUMNS: list[ColumnSpec] = [
     # 'matroska / h264 / ...' (mkv 常见, 不能截)。极长的
     # ('matroska / h264 / pcm_s16le') 仍会截, 那时悬停给全文。
     ColumnSpec('spec', '规格', 160),
-    # 「色彩」列: 颜色基准 / 颜色映射函数, 两段用 ' / ' 分隔。
-    # 142px = 'bt2020 / smpte2084' 的实测宽 (128px) + 10px 余量。
-    # 加这列后列宽总和 1327px → 窗口默认宽改成 1440 才装得下 (见 resize)。
-    ColumnSpec('color', '色彩', 142),
     ColumnSpec('audio_channels', '声道数', 55),
     ColumnSpec('audio_sample_rate', '采样率(kHz)', 120, 'center', True),
+    # 「色彩」列: 颜色基准 / 颜色映射函数, 两段用 ' / ' 分隔。
+    # 142px = 'bt2020 / smpte2084' 的实测宽 (128px) + 10px 余量。
+    # 加这列后列宽总和 1347px → 窗口默认宽改成 1440 才装得下 (见 resize)。
+    # 位置: 用户要求放在「采样率」之后、「时长」之前 (2026-10-29)。
+    ColumnSpec('color', '色彩', 142),
     ColumnSpec('duration', '时长', 75),
     ColumnSpec('file_size', '文件大小', 75),
     ColumnSpec('result', '结果', 75, 'center', True),

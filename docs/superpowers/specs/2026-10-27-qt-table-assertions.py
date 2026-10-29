@@ -92,11 +92,13 @@ def main():
     keys = [c.key for c in VIDEO_COLUMNS[1:]]
     check("数据列 key 与产品文档一致",
           keys == ['title', 'resolution', 'frame_rate', 'bitrate', 'spec',
-                   'color', 'audio_channels', 'audio_sample_rate', 'duration',
-                   'file_size', 'result'], f"got={keys}")
-    check("「色彩」列紧跟在「规格」列之后",
-          keys.index('color') == keys.index('spec') + 1,
-          f"spec@{keys.index('spec')} color@{keys.index('color')}")
+                   'audio_channels', 'audio_sample_rate', 'color',
+                   'duration', 'file_size', 'result'], f"got={keys}")
+    check("「色彩」列在「采样率」之后、「时长」之前 (用户 2026-10-29 定的位置)",
+          keys.index('color') == keys.index('audio_sample_rate') + 1
+          and keys.index('color') == keys.index('duration') - 1,
+          f"sample_rate@{keys.index('audio_sample_rate')} "
+          f"color@{keys.index('color')} duration@{keys.index('duration')}")
     check("只有 title 左对齐, 其余居中",
           [c.align for c in VIDEO_COLUMNS[1:]]
           == ['w'] + ['center'] * 10,
@@ -368,7 +370,7 @@ def main():
     # 在达标行上才真正吃劲 —— _cell_fg 对达标行**无条件**返回 FG_PASS,
     # 序号列要是漏在 _cell_fg 里就会被染绿, 而不达标行那边序号列恰好
     # 不红 → 只测不达标行根本发现不了。
-    # (「达标行全绿」那条只扫 range(1, 11), 故意跳过了第 0 列 —— 所以
+    # (「达标行全绿」那条只扫 range(1, ncols), 故意跳过了第 0 列 —— 所以
     #  达标行的序号列在这条断言里从来没被验过。)
     check("**达标行**的序号列**也不着色** (既不绿也不红)",
           fg_at(0, 0) is None, f"got={fg_at(0, 0)}")
