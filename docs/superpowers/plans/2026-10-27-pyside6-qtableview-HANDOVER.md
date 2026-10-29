@@ -10,8 +10,8 @@
 ## 0. 一句话状态
 
 表格的 **Qt 表格模型**、**Qt 主窗口**、**定点截图弹窗**（Task 6）、**入口切换 + 打包**
-（Task 7）都已实现并通过审查。**下一步：最终整体审查（已派发）→ 一次统一修复波 →
-Windows 实测。**
+（Task 7）都已实现并通过审查；**最终整体审查**（opus）已过，3 个 Important + 11 个
+Minor 已修完并经 scoped 复审。**下一步：Windows 实测（§7）→ 合并到 `main`。**
 
 ---
 
@@ -22,8 +22,8 @@ Windows 实测。**
 | 主 checkout | `/Users/hail/Codes/vdcheck`（**仍是 Tk 版，可正常使用**；分支 `main`，HEAD `2849dfe`） |
 | 重构 worktree | `/Users/hail/Codes/vdcheck/.claude/worktrees/refactor-qtableview` |
 | 分支 | `refactor/qtableview`（**未推送**） |
-| HEAD | `19f4a93` |
-| 提交数 | 27（`1d16bc7..HEAD`） |
+| HEAD | `bcb316c` |
+| 提交数 | 36（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
 | 产品文档 | `docs/产品文档.md`（**框架无关的行为规格 = 验收基准**） |
@@ -77,14 +77,20 @@ Windows 实测。**
 - **产品文档 §6 的 39 行 byte-for-byte 未动**；在表格**下方**加了「Tk 版对照」注记
   （#31/#35/#36/#38/#39 → 各自的 Qt 对应）
 
-### 3.3 **当前：最终整体审查**
+### 3.3 **当前：Windows 实测（§7）**
 
-- 审查包 `review-2849dfe..eb229c7.diff`（654 KB / 30 commits），**opus**
-- **待裁决清单**: `.superpowers/sdd/2026-10-27-pyside6-qtableview/final-review-open-items.md`
-  （A 明确缺陷 / B 死代码与文档一致性 / C 行为与资源 / D Windows 发布门禁 /
-  E 已裁决不许再翻的 7 条）
-- 审查回来后: **一次**统一修复波 → 一次 scoped 复审 → 裁决残余 → Windows 实测
-- **Windows 实测 8 项**见 §7（其中最小化→任务栏恢复的黑屏是整个重构的靶子）
+- 最终整体审查（opus，654 KB diff）结论: **Ready to merge? With fixes** ——
+  Critical 0 / Important 3 / Minor 15 → **一次统一修复波**（`b6b4af1`）+
+  **两个极小的收尾轮**（`76b297f` / `bcb316c`），每一轮都过了 scoped 复审，
+  **最终无开放 finding**
+- 修了什么: 退出路径的守卫漏洞（`try/finally` + 异常路径 `os._exit(1)`）、
+  **changelog**（新建 `CHANGELOG.md`）、**回归套件去掉 tkinter 依赖**、
+  产品文档 §4.1 的 Tk 悬空引用、恒真断言、断言名写反、死代码、
+  **基于不存在的 Python 机制**的注释、`run_ffprobe`/`extract_frame` 不可达的
+  `AttributeError` 分支、tooltip 样式表、「扫两遍计数不累加」的**行为**测试
+- **剩下一件事**: **Windows 实测 8+4 项**（§7）—— 其中 **最小化→任务栏恢复不黑屏**
+  是整个重构的靶子, macOS 复现不了
+- 之后: 合并到 `main`（`main` 现在还是 Tk 版 v3.3）
 
 ---
 
@@ -140,14 +146,15 @@ Windows 实测。**
 ## 6. 下次开工的检查清单
 
 1. 读这一份（不用读整个会话）
-2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `eb229c7`
+2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `bcb316c`
 3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $f"; done`
    （Qt 脚本在本机需要 `QT_QPA_PLATFORM=offscreen`）
 4. ~~补 Task 5 的 scoped 复审~~ → **已完成**
 5. ~~Task 6 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**
 6. ~~Task 7 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**
-7. **最终整体审查**（opus，已派发）→ **一次**统一修复波 → 一次 scoped 复审
-8. Windows 实测（§7）—— **靶子是最小化→恢复的黑屏，macOS 复现不了**
+7. ~~最终整体审查 → 统一修复波 → scoped 复审 → 两个收尾轮~~ → **已完成，无开放 finding**
+8. **Windows 实测**（§7）—— **靶子是最小化→恢复的黑屏，macOS 复现不了**
+9. 合并到 `main`（`main` 现在仍是 Tk 版 v3.3；本分支是 Qt 版 v4.0）
 
 ---
 
