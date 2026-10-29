@@ -84,7 +84,7 @@ Three modules, ~2.6k lines total:
 - `setShowGrid(False)`, `setSortingEnabled(False)` (Qt's own sort indicator is not used — the arrow is a **suffix of the header text**, see `_header_text_with_arrow`).
 
 **App** — `MainWindow(QMainWindow)`:
-- Row 1: path entry + 浏览 + 子文件夹 checkbox + 开始检测 button (toggles to 检测中 / 正在停止... when scanning; clicking while scanning cancels via `cancel_event`)
+- Row 1: path entry + 浏览 + 子文件夹 checkbox + 开始检测 button (toggles to 检测中 / 正在停止... when scanning; clicking while scanning cancels via `self._cancel`)
 - Row 2: 码率标准 + 采样率标准 inputs + 定点截图 button, with 清除记录 pinned to the right via a 272px trailing spacing (visual alignment with Row 1's path entry right edge)
 - Center: `QTableView` with the 11 columns above
 - Bottom: 迁移地址 + 浏览 + 移动达标文件 + 移动全部文件
@@ -98,7 +98,7 @@ Three modules, ~2.6k lines total:
 - directory scan — `base_path = directory` (relative paths anchored to the picked folder)
 - drag-dropped files — `base_path = os.path.dirname(files[0])` so the first file shows `./<title>` in the title column
 
-The `cancel_event: threading.Event` is checked at the top of each per-file loop; the status bar then reports "已停止检测（已完成 N/M）" with the counts appended. Cancellation never calls `QThread.terminate()` (on Windows that hangs the whole process). If the thread has not finished when the window closes, it is **orphaned** into `MainWindow._orphan_threads` — a **class attribute** pointing at the same list as the module-level `_ORPHANED_THREADS`, so the reference survives interpreter teardown (a dropped reference = a running `QThread` destroyed = `abort`, exit code 134). `main()` waits for those threads and then calls `os._exit(0)` — never `flush()` stdout/stderr, because in a windowed build both are `None` and a flush would raise before the `os._exit`.
+The `self._cancel: threading.Event` is checked at the top of each per-file loop; the status bar then reports "已停止检测（已完成 N/M）" with the counts appended. Cancellation never calls `QThread.terminate()` (on Windows that hangs the whole process). If the thread has not finished when the window closes, it is **orphaned** into `MainWindow._orphan_threads` — a **class attribute** pointing at the same list as the module-level `_ORPHANED_THREADS`, so the registration stays reachable from `__del__` while the interpreter tears down (the class object is referenced by the class itself; CPython ≥ 3.4 does **not** clear module globals at teardown). A dropped reference = a running `QThread` destroyed = `abort`, exit code 134. `main()` waits for those threads inside a `try/finally` and calls `os._exit(0)` in the `finally` — never `flush()` stdout/stderr, because in a windowed build both are `None` and a flush would raise before the `os._exit`. `_on_thread_finished` deliberately **skips `deleteLater()`** for threads already in the orphan registry: a deleted C++ object makes the exit path's `thread.wait()` raise `RuntimeError`, which would skip the `os._exit`.
 
 **Fonts** — `ui_font()` is **lazy** and must be called only after a `QApplication` exists (`QFontMetrics` without a `QGuiApplication` aborts the process with exit code 134). `apply_app_font(app)` is called from `MainWindow.__init__` as well as from `main()`, so anyone constructing `MainWindow()` directly gets the same 9pt font.
 

@@ -749,12 +749,10 @@ def _run() -> int:
     check("表头列数 == 模型列数",
           header.count() == dlg5.model.columnCount(),
           f"header={header.count()} model={dlg5.model.columnCount()}")
-    hdr_texts = [dlg5.model.headerData(c, Qt.Horizontal)
-                 for c in range(dlg5.model.columnCount())]
-    check("每个表头 section 的文字都与 model.headerData() 一致",
-          all(header.model().headerData(c, Qt.Horizontal) == t
-              for c, t in enumerate(hdr_texts)),
-          f"got={hdr_texts}")
+    # (2026-10-27 删: 「每个表头 section 的文字都与 model.headerData() 一致」
+    #  —— 上面那条已经确立了 header.model() is dlg5.model, 那条断言于是
+    #  退化成 x == x, **恒真**。这一小节真正有牙的是下面两条: 表头文字的
+    #  字面量与列宽。)
     # 旧断言比的是 header.sectionViewportPosition(c) vs
     # view.columnViewportPosition(c) —— 后者**就是**前者的定义 (Qt 里
     # QTableView::columnViewportPosition 直接转调 horizontalHeader()),

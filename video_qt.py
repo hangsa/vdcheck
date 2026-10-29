@@ -15,7 +15,7 @@ import threading
 from dataclasses import dataclass
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QEvent, QModelIndex, QObject, QRect, Qt, QThread,
+    QAbstractTableModel, QEvent, QModelIndex, QObject, Qt, QThread,
     QTimer, Signal, Slot,
 )
 from PySide6.QtGui import (
@@ -129,6 +129,24 @@ def apply_app_font(app: QApplication) -> None:
     两者不一致的话, 预截断好的文字会**溢出列宽** (Qt 的 elide 是关的)。
     """
     app.setFont(ui_font())
+
+
+# Tooltip 外观 —— 设计文档 §5.6 明写的那一条。Qt 的 tooltip 是**原生浮窗**
+# (QToolTip 是个独立 widget), 它的外观只能由 app 的样式表决定。
+# 这条规则只命中 QToolTip, 不带任何别的选择器 → 其它控件的绘制不受影响。
+TOOLTIP_STYLESHEET = (
+    'QToolTip { background-color: #ffffe0; color: black; '
+    'border: 1px solid black; }'
+)
+
+
+def apply_app_tooltip_style(app: QApplication) -> None:
+    """给原生 tooltip 套上 Tk 版那张浅黄底黑边的样式 (设计文档 §5.6)。
+
+    Tk 版是自绘的 Tooltip Toplevel, 外观自己画的; Qt 版换成原生浮窗后,
+    外观由这条样式表决定 —— 两边看着是同一种「浅黄底 + 黑边」。
+    """
+    app.setStyleSheet(TOOLTIP_STYLESHEET)
 
 
 # 单元格对齐只有两种 (产品文档 §4.2): title 列左对齐, 其余全部居中。
@@ -1120,8 +1138,14 @@ class ScanStats:
 #
 # **这张表是单一事实来源**: MainWindow._orphan_threads 是它的**同一个列表
 # 对象** (类属性), 登记 (_stop_scan) 与收尾 (_shutdown_scan_threads) 走
-# 的是同一张表。类属性那份是为了扛住「解释器收尾时模块全局被清」——
-# 详见 MainWindow._orphan_threads 的注释。
+# 的是同一张表。
+#
+# 为什么用**类属性**而不是直接用模块全局: CPython ≥ 3.4 的解释器收尾
+# **不会**把模块全局清成 None (那是 Python 2 的行为), 所以「全局变 None
+# → append 抛 AttributeError」这条理由**不成立**。真正的理由是: 类对象
+# 由实例 (以及类本身) 引用着, 收尾时一定还活着 —— `__del__` 可能在一个
+# 对象已经半死的时候跑, 那时走类属性比走模块全局少一层间接, 也少一个
+# 「模块字典已经被清」的可能性。详见 MainWindow._orphan_threads 的注释。
 _ORPHANED_THREADS: list[QThread] = []
 
 
@@ -1204,10 +1228,15 @@ class MainWindow(QMainWindow):
 
     # 孤儿线程登记表 —— 与模块级 _ORPHANED_THREADS **同一个列表对象**。
     #
-    # 为什么要挂两份: 解释器收尾时模块全局可能被清成 None, 那时 __del__
-    # 里再往模块全局 append 会 AttributeError 被 except 吞掉 → 线程的
-    # Python 引用丢了 → 析构一个**还在跑的** QThread → qFatal → abort
-    # (退出码 134)。类对象由实例引用着, 收尾时一定还活着 → 这里拿得到。
+    # 为什么要挂两份 (类属性 + 模块全局): 登记 (_stop_scan) 与收尾
+    # (_shutdown_scan_threads) 必须走**同一张表**, 两边各写一份迟早走神。
+    # 用**类属性**做这份表的第二个入口, 是因为类对象由实例 (以及类本身)
+    # 引用着, 解释器收尾时一定还活着 —— `__del__` 可能在一个对象已经半死
+    # 的时候跑, 那时走类属性比走模块全局少一层间接。
+    #
+    # (注: CPython ≥ 3.4 **不会**在收尾时把模块全局清成 None —— 「全局变
+    # None → append 抛 AttributeError」是 Python 2 时代的老传闻, 不成立。
+    # 手法本身是无害的保险, 但别基于那个错前提做决定。)
     _orphan_threads = _ORPHANED_THREADS
 
     def __init__(self, parent=None):
@@ -1224,6 +1253,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             apply_app_font(app)
+            apply_app_tooltip_style(app)
             # app 退出 (app.quit()) 时也要把扫描线程停掉 —— 不然 QThread
             # 会在运行中被析构, 进程直接 abort。
             app.aboutToQuit.connect(self._stop_scan)
@@ -1648,13 +1678,24 @@ class MainWindow(QMainWindow):
           - 是被 _stop_scan 孤儿化的那一轮 (self._thread 已经清空) → 也清
           - 是上一轮的 (用户又点了一次「开始检测」, self._thread 已经是新的)
             → **不能**碰当前这一轮的引用
+
+        但**孤儿表里的线程不 deleteLater** (见下面)。
         """
         thread = self.sender()
         if thread is self._thread or self._thread is None:
             self._thread = None
             self._worker = None
-        if thread is not None:
-            thread.deleteLater()
+        if thread is None:
+            return
+        # **孤儿表里的线程不 deleteLater** —— 它的 C++ 对象一旦被删,
+        # 退出路径上的 thread.wait() 就会抛
+        #   RuntimeError: libshiboken: Internal C++ object (Worker) already deleted.
+        # 那个异常若逃出 main(), os._exit(0) 就到不了 → 解释器正常收尾 →
+        # 还在跑的 QThread 被析构 → qFatal → abort (退出码 134) ——
+        # 正是这条路径要防的故障。孤儿线程的引用必须一直留到进程退出。
+        if thread in self._orphan_threads:
+            return
+        thread.deleteLater()
 
     def _on_header_clicked(self, section: int) -> None:
         """表头点击 → 三态循环 → 就地排序。
@@ -1907,10 +1948,10 @@ class MainWindow(QMainWindow):
             # while thread is still running") → abort (退出码 134)。
             #
             # 用**类属性** (MainWindow._orphan_threads) 而不是模块全局:
-            # 解释器收尾时模块的 __dict__ 会被清, 模块全局可能变成 None
-            # → 那时 `_ORPHANED_THREADS.append(...)` 抛 AttributeError →
-            # 被 except 吞掉 → **引用就丢了** (正是这个坑)。类对象由
-            # 实例引用着, 收尾时一定还活着 → 这里拿得到。
+            # 类对象由实例 (以及类本身) 引用着, 解释器收尾时一定还活着 ——
+            # 而 __del__ 恰恰是在收尾时被调用的, 那时对象可能已经半死。
+            # (CPython ≥ 3.4 不会把模块全局清成 None, 「append 抛
+            # AttributeError」那条老理由不成立; 这里只是少一层间接。)
             self._orphan_threads.append(thread)
 
     def _disconnect_worker(self) -> None:
@@ -1952,10 +1993,11 @@ class MainWindow(QMainWindow):
         退出路径上的等待统一由 main() 做 (见 _shutdown_scan_threads)。
 
         登记孤儿线程用的是**类属性** MainWindow._orphan_threads, 不是模块
-        全局 _ORPHANED_THREADS —— 解释器收尾时模块全局可能已被清掉,
-        那时 append 会抛 AttributeError 被吞掉 → **线程的引用就丢了**
-        (丢掉引用 = 那个还在跑的 QThread 被析构 = abort)。类对象由实例
-        引用着, __del__ 跑的时候一定还在。
+        全局 _ORPHANED_THREADS —— 类对象由实例 (以及类本身) 引用着,
+        解释器收尾时一定还活着; 而 __del__ 恰恰是在收尾时被调用的, 那时
+        对象可能已经半死, 走类属性比走模块全局少一层间接。
+        (CPython ≥ 3.4 不会把模块全局清成 None —— 「append 抛
+        AttributeError」那条老理由不成立, 别基于它做决定。)
         """
         try:
             self._stop_scan(timeout_ms=2000)
@@ -1996,6 +2038,7 @@ def main() -> None:
     """
     app = QApplication.instance() or QApplication(sys.argv)
     apply_app_font(app)
+    apply_app_tooltip_style(app)
     window = MainWindow()
     window.show()
     app.exec()
@@ -2005,8 +2048,8 @@ def main() -> None:
     #   QThread: Destroyed while thread is still running → std::terminate
     #   → 退出码 134 (SIGABRT)
     # 两条路都会撞上:
-    #   ① 解释器退出 → 模块全局被清 → 那个 QThread 的包装被回收 →
-    #      C++ 侧析构一个还在跑的线程 → abort
+    #   ① 解释器退出 → 那个 QThread 的 Python 包装被回收 → C++ 侧析构
+    #      一个还在跑的线程 → abort
     #   ② main() 返回后 Python 跑析构 → 同样的事
     #
     # 所以最后一步是 **os._exit(0)** —— 它跳过所有 C++ 析构 (也跳过
@@ -2018,6 +2061,16 @@ def main() -> None:
     # 就到不了 os._exit → 解释器正常收尾 → 那个还在跑的 QThread 被析构 →
     # 又 abort 134, 而且 stderr 也是 None → traceback 静默丢弃。
     # os._exit 本来也不做 Python 层的 flush, 所以直接不 flush。
-    _shutdown_scan_threads(timeout_ms=2000)
-    os._exit(0)
+    #
+    # try/finally 是**第二道保险**: _shutdown_scan_threads 里的 thread.wait()
+    # 在极端情况下会抛 (比如那个 QThread 的 C++ 对象已经被 deleteLater 掉,
+    # libshiboken 抛 RuntimeError: Internal C++ object already deleted)。
+    # 那个异常一旦逃出 main(), 下面这行 os._exit(0) 就到不了 → 解释器正常
+    # 收尾 → 还在跑的 QThread 被析构 → qFatal → abort (退出码 134) ——
+    # 正是这条路径要根治的故障。所以**无论等待过程抛不抛, os._exit(0) 必须
+    # 一定执行**。
+    try:
+        _shutdown_scan_threads(timeout_ms=2000)
+    finally:
+        os._exit(0)
 

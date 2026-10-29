@@ -119,7 +119,7 @@ def build(columns):
 def main() -> int:
     from video_qt import VIDEO_COLUMNS, ui_font
 
-    model, view, hdr, state = build(VIDEO_COLUMNS)
+    model, view, hdr, _state = build(VIDEO_COLUMNS)
     for i in range(60):
         model.append_result(make_info(f'v{i}.mp4', is_passing=(i % 3 == 0),
                                       bitrate=60000.0 - i * 500))
@@ -182,7 +182,7 @@ def main() -> int:
     # 走 view→model 那条线 (模拟用户拖表头)
     view.setColumnWidth(1, 600)
     app.processEvents()
-    check("拖宽后视图的列宽跟着模型走 (view→model 接线生效)",
+    check("拖宽后**模型的**列宽跟着**视图**走 (view→model 接线生效)",
           model._widths[1] == 600, f"got={model._widths[1]}")
     check("拖宽后有横向可滚范围",
           view.horizontalScrollBar().maximum() > 0,
@@ -207,6 +207,10 @@ def main() -> int:
     model.headerDataChanged.connect(lambda *a: hdr_events.append(a))
     model.set_column_width(4, 300)          # 码率列: 表头文字最长的一列
     app.processEvents()
+    check("模型改列宽 → 发了 headerDataChanged (视图靠它重画表头)",
+          any(a[0] == Qt.Horizontal and a[1] <= 4 <= a[2]
+              for a in hdr_events),
+          f"got={hdr_events}")
     check("模型列宽改了 → 视图的 section 宽度跟着改 (model→view 接线)",
           hdr.sectionSize(4) == 300, f"got={hdr.sectionSize(4)}")
     check("模型列宽 == 视图列宽 (逐列)",

@@ -233,7 +233,12 @@ def run_ffprobe(file_path: str) -> dict | None:
         if result.returncode != 0:
             return None
         return json.loads(result.stdout.decode('utf-8', errors='replace'))
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, AttributeError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        # **不要**在这里加 AttributeError: 这一支当初只可能来自未加平台
+        # 守卫的 subprocess.STARTUPINFO, 守卫(见上)已经把它堵上了 →
+        # 现在它只能吞掉 try 块**内部**抛的 AttributeError (比如 kwargs
+        # 打错), 把真 bug 静默变成「解析失败」→ 文件被静默跳过, 没有任何
+        # 诊断信息。宁可让它响着崩。
         return None
 
 

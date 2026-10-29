@@ -3,7 +3,8 @@
 验证：
 - format_title 全部 rel_path 形态 (含跨盘符绝对路径 / UNC);
 - truncate_text 像素级截断 (ASCII / CJK / 边界);
-- 状态栏文案 (一行合并 + 计数归零 + 中途停止)。
+- 状态栏文案 (一行合并 + 计数归零 + 中途停止);
+- 扫第二轮计数不累加 (行为测试)。
 
 **表格相关的小节已迁走** (2026-10-27, Tk → Qt 重构):
 `_format_cell` (title/spec)、表头带单位、10 列集合、`_truncate_text` 委托、
@@ -25,6 +26,11 @@ Tk 事件派发机制的产物, `QTableView` 原生支持滚轮, 不需要逐 wi
   display, 640px 原图出作用域即回收; Qt 版同样只留 320px, 放大窗口从磁盘
   重新加载 640px 原图。
 
+**不再依赖 tkinter** (2026-10-27): 原来这里 `import tkinter` + `tk.Tk()` 只
+为了给 `truncate_text` 一个 font-measure 回调。现在整个项目已经是 Qt-only,
+`video_core.truncate_text` 的 `measure: Callable[[str], int]` 接缝就是为这个
+准备的 —— 换成 `QFontMetrics(ui_font()).horizontalAdvance`, 断言原样成立。
+
 运行: python docs/superpowers/specs/2026-10-23-ui-density-assertions.py
 退出码 0 = 全部通过；非 0 = 有失败。
 """
@@ -33,6 +39,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
@@ -59,14 +66,22 @@ def cleanup_tmpdirs() -> None:
 
 atexit.register(cleanup_tmpdirs)
 
-import tkinter as tk
-from tkinter import font as tkfont
-
-from video_checker import VideoInfo, format_title, truncate_text
-
-# Qt 版主窗口那几节要 QApplication (QFontMetrics 没有 QGuiApplication 会
-# 直接 abort 进程)。没有显示环境时 Qt 用 offscreen 平台; Tk 那边不受影响。
+# 没有显示环境时 Qt 用 offscreen 平台 (会打一条字体族警告到 stderr, 不在范围)。
+# 必须在建 QApplication **之前**设好。
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+from PySide6.QtGui import QFontMetrics  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from video_checker import VideoInfo, format_title, truncate_text  # noqa: E402
+
+# QApplication 必须**先于** video_qt 建好: ui_font() 惰性求值时会拷贝当前
+# app 的默认字体, app 还不存在时字体族是空的 (family=''), 字宽度量整套
+# 偏掉, QFontMetrics(那个字体) 直接 abort 进程。
+qt_app = QApplication.instance() or QApplication(sys.argv)
+
+import video_qt  # noqa: E402
+from video_qt import MainWindow, ui_font  # noqa: E402
 
 
 _failures: list[str] = []
@@ -98,32 +113,29 @@ def make_info(title='a.mp4', rel_path='./', **kw) -> VideoInfo:
     return VideoInfo(**base)
 
 
-def source_text() -> str:
-    """读整个 video_checker.py 源码 (原样, 不做行尾转换)。"""
-    path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), 'video_checker.py')
-    # newline='' 必须: 源码的行尾不能被 Python 转换, 下标/正则才对得上源文件
-    return open(path, encoding='utf-8', newline='').read()
+def fake_ffprobe_json() -> dict:
+    """一段合法的 ffprobe JSON (不真的调 ffprobe)。"""
+    return {
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264",
+             "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+             "bit_rate": "32000000"},
+            {"codec_type": "audio", "codec_name": "aac",
+             "channels": 2, "sample_rate": "48000"},
+        ],
+        "format": {"duration": "120.0", "size": "100000000",
+                   "format_name": "mp4"},
+    }
 
 
-def method_body(method: str) -> str:
-    """截出某个方法的源码 (从 'def <method>(self' 到下一个同缩进的 def)。"""
-    src = source_text()
-    start = src.index(f"    def {method}(self")
-    rest = src[start + 1:]
-    end = rest.index("\n    def ")
-    return src[start:start + 1 + end]
-
-
-def qt_method_body(method: str) -> str:
-    """截出 video_qt.py 里某个方法的源码。"""
-    path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), 'video_qt.py')
-    src = open(path, encoding='utf-8', newline='').read()
-    start = src.index(f"    def {method}(self")
-    rest = src[start + 1:]
-    end = rest.index("\n    def ")
-    return src[start:start + 1 + end]
+def wait_scan(win: MainWindow, timeout: float = 15.0) -> bool:
+    """等一轮扫描结束 (worker 在另一个线程里跑)。"""
+    end = time.time() + timeout
+    while win.scanning and time.time() < end:
+        qt_app.processEvents()
+        time.sleep(0.005)
+    qt_app.processEvents()
+    return not win.scanning
 
 
 def main() -> None:
@@ -141,40 +153,39 @@ def main() -> None:
         got = format_title(make_info(title=title, rel_path=rel))
         check(f"rel_path={rel!r} → {want!r}", got == want, f"got={got!r}")
 
-    root = tk.Tk()
-    root.withdraw()
-    font = tkfont.Font(root=root, font=('TkDefaultFont', 9))
+    # 字体度量: **Qt 版** —— QFontMetrics(ui_font()).horizontalAdvance 顶上
+    # Tk 版的 tkfont.Font.measure。断言都是相对宽度的, 换掉度量来源后
+    # 断言原样成立 (而且这个项目已经不该再需要 tkinter)。
+    metrics = QFontMetrics(ui_font())
+    measure = metrics.horizontalAdvance
 
     section("truncate_text — 像素级截断")
     short = 'ab.mp4'
-    check("短文本原样返回", truncate_text(short, 250, font.measure) == short,
-          f"got={truncate_text(short, 250, font.measure)!r}")
+    check("短文本原样返回", truncate_text(short, 250, measure) == short,
+          f"got={truncate_text(short, 250, measure)!r}")
 
     long_ascii = 'a' * 200
-    got = truncate_text(long_ascii, 100, font.measure)
+    got = truncate_text(long_ascii, 100, measure)
     check("超长 ASCII 被截断", len(got) < len(long_ascii), f"len={len(got)}")
     check("截断结果以 ... 结尾", got.endswith('...'), f"got={got[-10:]!r}")
-    check("截断结果不超列宽", font.measure(got) <= 100 - 10,
-          f"w={font.measure(got)}")
+    check("截断结果不超列宽", measure(got) <= 100 - 10,
+          f"w={measure(got)}")
 
     long_cjk = '中文标题' * 40
-    got = truncate_text(long_cjk, 100, font.measure)
-    check("超长 CJK 被截断", font.measure(got) <= 100 - 10,
-          f"w={font.measure(got)}")
+    got = truncate_text(long_cjk, 100, measure)
+    check("超长 CJK 被截断", measure(got) <= 100 - 10,
+          f"w={measure(got)}")
 
-    got = truncate_text('anything', 5, font.measure)
+    got = truncate_text('anything', 5, measure)
     check("列宽 < 10 → 返回 '...'", got == '...', f"got={got!r}")
 
-    got = truncate_text('', 250, font.measure)
+    got = truncate_text('', 250, measure)
     check("空串原样返回", got == '', f"got={got!r}")
 
     section("状态栏合并成一行 (状态 + 统计)")
     # 原断言 (Tk 版): 建一个 VideoCheckerApp, 看状态栏那一行字。
     # Qt 版对应: video_qt.MainWindow —— 状态栏是 QStatusBar, 文案走
-    # currentMessage()。QApplication 必须**先于** video_qt 建好。
-    from PySide6.QtWidgets import QApplication
-    qt_app = QApplication.instance() or QApplication(sys.argv)
-    from video_qt import MainWindow
+    # currentMessage()。
     app = MainWindow()
     app.show()
     qt_app.processEvents()
@@ -233,22 +244,61 @@ def main() -> None:
 
     # brief 漏掉的路径: 开始检测 / 拖拽也 clear 了 video_results,
     # 但必须同时重置 _passed_count —— 扫第二轮会累加上一轮的达标数,
-    # 状态栏出现「达标 188 · 不达标 -178」。真跑这两个方法要起线程调
-    # ffprobe, 太重; 退一步锚源码。
-    # Qt 版把「清空结果 + 计数归零」收敛在 _begin_scan 里 (点按钮与拖拽
-    # 共用这一条路径), 所以: ① _begin_scan 里 clear() 之后必须紧跟计数
-    # 归零; ② 两条入口都得走 _begin_scan —— 少一条就可能漏掉归零。
-    body = qt_method_body('_begin_scan')
-    at = body.index('self.video_results.clear()')
-    window = body[at:at + 320]
-    ok = ('self._passed_count = 0' in window)
-    # check() 无条件打印 detail, 通过时别塞一句像报错的文案
-    check("_begin_scan 清空结果时同步重置计数", ok,
-          "" if ok else "clear() 之后的窗口里没找到 _passed_count = 0")
-    for meth in ('_start_scan', '_on_file_drop'):
-        ok = ('_begin_scan(' in qt_method_body(meth))
-        check(f"{meth} 走 _begin_scan (计数归零不会漏)", ok,
-              "" if ok else f"{meth} 里没找到 _begin_scan(")
+    # 状态栏出现「达标 188 · 不达标 -178」。
+    #
+    # 2026-10-27: 这条**原来**是用**源码文本**锚的 (「clear() 之后 320 个
+    # 字符内必须出现 `self._passed_count = 0`」+「两条入口都得走
+    # _begin_scan」)。源码文本断言有个致命的毛病: 任何无害重构都会打断
+    # 它, 而它守的又是一个**真行为** —— 从来没有脚本**端到端**测过。
+    # 现在换成**行为**测试: 真扫一遍 → 再扫一遍 → 断言「共 N」不累加。
+    # 两条入口 (点「开始检测」/ 拖拽) 各测一遍 —— 少一条就可能漏掉归零。
+    section("扫第二轮: 达标计数不累加 (行为测试)")
+    scan_src = mkdtemp(prefix='vdcheck_ui_scan_')
+    scan_file = os.path.join(scan_src, 'a.mp4')
+    open(scan_file, 'w').close()
+    real_run_ffprobe = video_qt.run_ffprobe
+    video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
+    try:
+        win_scan = MainWindow()
+        win_scan.path_edit.setText(scan_src)
+        win_scan._start_scan()
+        check("第一轮扫完了", wait_scan(win_scan))
+        check("第一轮: 共 1 · 达标 1 · 不达标 0",
+              win_scan.status_bar.currentMessage()
+              == '检测完成：共 1 · 达标 1 · 不达标 0',
+              f"got={win_scan.status_bar.currentMessage()!r}")
+        # **再扫一遍** —— 计数必须从头来, 不能带着上一轮的达标数累加
+        # (漏了归零就会变成「共 1 · 达标 2 · 不达标 -1」)
+        win_scan._start_scan()
+        check("第二轮扫完了", wait_scan(win_scan))
+        check("第二轮: 计数**不累加** (仍是共 1 · 达标 1)",
+              win_scan.status_bar.currentMessage()
+              == '检测完成：共 1 · 达标 1 · 不达标 0',
+              f"got={win_scan.status_bar.currentMessage()!r}")
+        check("第二轮: 表格里也只有 1 行 (结果列表也清了)",
+              win_scan.model.rowCount() == 1,
+              f"got={win_scan.model.rowCount()}")
+
+        # 拖拽那条入口 (Qt 版里点按钮与拖拽收敛到同一条 _begin_scan 路径,
+        # 但两条入口各自都得验 —— 少一条就可能漏掉归零)
+        win_drop = MainWindow()
+        win_drop._on_file_drop([scan_file])
+        check("拖拽第一轮扫完了", wait_scan(win_drop))
+        check("拖拽第一轮: 共 1 · 达标 1 · 不达标 0",
+              win_drop.status_bar.currentMessage()
+              == '检测完成：共 1 · 达标 1 · 不达标 0',
+              f"got={win_drop.status_bar.currentMessage()!r}")
+        win_drop._on_file_drop([scan_file])
+        check("拖拽第二轮扫完了", wait_scan(win_drop))
+        check("拖拽第二轮: 计数**不累加** (仍是共 1 · 达标 1)",
+              win_drop.status_bar.currentMessage()
+              == '检测完成：共 1 · 达标 1 · 不达标 0',
+              f"got={win_drop.status_bar.currentMessage()!r}")
+        check("拖拽第二轮: 表格里也只有 1 行",
+              win_drop.model.rowCount() == 1,
+              f"got={win_drop.model.rowCount()}")
+    finally:
+        video_qt.run_ffprobe = real_run_ffprobe
 
     # 原先这里还有两节 Tooltip 断言 (「只在截断时显示」/「<Leave> 延迟关闭 +
     # 窗口复用」) —— 它们测的是 Tk 版自绘的 Tooltip 类 (延迟关闭 / 窗口复用 /
@@ -263,8 +313,6 @@ def main() -> None:
     #   「表头点击的边界」                        —— clear() 之后 tooltip 也不留陈旧值
     # 没有等价物的部分 (Tk Tooltip 的窗口复用 / 延迟关闭 / 不抢焦点):
     #   Qt 的 tooltip 窗口由 Qt 自己管, 没有「复用」这个概念 —— 报告 §4.1 已列明。
-
-    root.destroy()
 
     print(f"\n{'FAIL' if _failures else 'PASS'}: {len(_failures)} failure(s)")
     sys.exit(1 if _failures else 0)
