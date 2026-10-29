@@ -111,6 +111,17 @@
 并修掉了。§7 的清单**保留作参考**（将来在 Windows 上重新打包时可以用），但它
 **不再阻塞任何东西**。
 
+### 3.6 `archive/row-canvas` 分支 —— ✅ **已删除**（2026-10-29）
+
+- 那是 **Tk 版**的 canvas 重绘实验分支（`VideoGridView` 那套），Qt 版走
+  `QTableView` + delegate，架构上**不再需要**它 → 用户要求删掉。
+- **没合并进 `main`**：tip `274c3dc`，16 个只属于该分支的提交。
+- 唯一有价值的东西 —— `2026-10-27-python-compat-assertions.py`（扫「注解前向引用」
+  那个脚本）**先抢救进 `main`**（扫描目标改成 `video_core.py` / `video_qt.py`，
+  Tk 版删掉后注解搬到了这两处）→ 删分支**没丢东西**。
+- 远端分支早已不在 origin 上（现在只剩 `main` / `noprobe`）；本地用 `git branch -D`
+  删掉。提交对象在 GitHub 上还能按 SHA `274c3dc` 找回来一段时间。
+
 ---
 
 ## 4. 关键裁决（**不读代码就不知道的东西**）
