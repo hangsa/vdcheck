@@ -163,21 +163,43 @@ Windows 实测。**
 | 6 | 悬停被截断的长路径 → 弹完整值 | |
 | 7 | 点「开始截图」→ 目录**这时**才建 | Task 6 接上 `ensure_snapshot_dir()` |
 | 8 | 关窗口时若正在扫描 → 进程正常退出、不挂死 | Task 5 返工修的 `terminate()` 问题 |
+| 9 | **exe 冒烟**：`build.bat` 跑通 → `dist\视频码率检查器.exe` 能启动 → 扫一个目录 | 排错的 modules 排除错了，症状就是**exe 启动即崩**。先怀疑 `video_checker.spec` 的 `PYSIDE6_EXCLUDES` |
+| 10 | **加一个控制台版冒烟**（`console=True`）或查 exe 的退出码 | 最终审查新增项：出货版是 `console=False` → `stderr` 是 `None` → **启动崩溃没有任何 traceback 也没有日志**，症状与「什么都没发生」无法区分。**排错时先做这一步** |
+| 11 | `build.bat` 的版本检查在 cmd.exe 下实跑 | 从没在 cmd 下执行过。已知：旧版也是 LF-only 且出货过能跑的 exe，新版只加了版本检查与换 pip 包，且**无 UTF-8 BOM**（BOM 才会让 cmd 第一行就崩） |
+| 12 | 记录 exe 体积（与 Tk 版对比） | |
+
+> **第 10 项为什么重要**：出货 exe 是 windowed 模式，**崩溃是完全静默的**。
+> 上面第 9 项如果只是「双击没反应」，你无从判断是启动崩了还是根本没启动。
+> 先用一个 `console=True` 的构建把 traceback 拿到手。
 
 ---
 
-## 8. 已知的、留给最终审查的 Minor
+## 8. 最终审查的处置结果（2026-10-29，opus）
 
-ledger（`.superpowers/sdd/.../progress.md`）里有完整清单，大意：
+ledger（`.superpowers/sdd/.../progress.md`）里有完整清单与逐条裁决。
+最终审查结论：**Critical 0 / Important 3 / Minor 15**，"Ready to merge? **With fixes**"。
+**一次修复波**做掉 3 Important + 11 Minor（清单在
+`.superpowers/sdd/.../final-review-1.md`）。
 
-- `header-alignment` 脚本里 `hdr_events` 收集了载荷但从未被断言；`state` 也从未使用（死代码）
-- 同文件一条断言名写反（名字说「视图跟着模型走」，条件断言的是「模型跟着视图走」）→
-  **缓解**：计划里 Task 5 的措辞是对的
-- 实施者报告里的探针 transcript 混了两个状态（结论正确，transcript 误导）；一处行号错
-- 产品文档 §4.2 的「总宽 1130px」算式错（列宽之和是 1040）
-- 实施者报告里「断言数」把结尾的「✓ 全部通过」也算进去了（差值正确，口径自洽）
-- `video_qt.py` 里 4 处新注释/文档建立在一个**不存在的 Python 机制**上（「解释器收尾时模块全局被清成 None → append 抛 AttributeError」）—— 实测 3.14 上模块全局**不会**被清，且真被清也是 NameError 不是 AttributeError。注释层面，不影响行为
-- 实施者报告 §6 声称「无 `__pycache__`、无未跟踪文件」不成立（worktree 根有 3 个 `.pyc`，被忽略所以工作区看着干净）
-- 孤儿线程登记表**从不清理** —— 取消/重启轮次下完结的线程会累积（有界，长会话下无上限）
-- `os._exit(0)` 跳过 Python 层 stdout flush —— 将来退出路径上若加 `print()` 会被静默丢弃（今天没有）
-- `2026-10-23-ui-density-assertions.py` 还 import `SnapshotProgressDialog`（Tk 类）→ **Task 7 删 Tk GUI 时会断**，Task 6 负责改这一节
+**已在本波修掉**：退出路径的守卫漏洞（`try/finally` + 孤儿线程跳过 `deleteLater()`）、
+**changelog**（新建 `CHANGELOG.md`）、**回归套件去掉 tkinter 依赖**、
+产品文档 §4.1 的 Tk 悬空引用、恒真的表头断言、断言名写反、`hdr_events` 死代码、
+`QRect` 死 import、5 处**基于不存在的 Python 机制**的注释、`run_ffprobe` 不可达的
+`AttributeError` 分支、tooltip 样式表的明确决定、`ui-density` 的两个死 helper、
+「扫两遍计数不累加」的行为测试（替掉源码文本断言）、`CLAUDE.md` 的 `cancel_event` 漂移。
+
+**审查者判「not reproducible / 已解决」的**：qt-table 脚本的未用 import（零个未用）；
+「20px 列宽」那条迁移后保住了原语义。
+
+**留给将来（本波明确不做）**：
+- `parse_threshold` 传非 str 会抛（公开 API 契约，无活调用方）
+- 截图文件名只用 title → 不同文件夹同名视频**互相覆盖**（**既有**行为，与被删的 Tk 版
+  逐字节相同 → 要改就是行为变更，该单开一条并配 changelog）
+- macOS 上拖放把路径框写成反斜杠 → 自己再拒绝自己（**既有**行为，但本分支让源码在
+  macOS 上能跑了 → **新可达的毛边**；值得加 `sys.platform` 守卫，**只**管路径框，
+  **不动**派生路径 —— §6 #3 冻结了那个不对称）
+- 拖放断言用 `.replace('\\','/')` 归一化，察觉不到上一条
+- 孤儿线程登记表从不清理（实际有界 —— 关窗即结束 app）
+- `os._exit(0)` 跳过 Python 层 stdout flush（今天没有 `print()`；**修退出路径时
+  绝对不许加 flush** —— 打包版 stdout 是 `None`，flush 会抛并跳过 `os._exit(0)`）
+- `build.bat` 是 LF-only（既有状态，出货过能跑的 exe；无 UTF-8 BOM）
