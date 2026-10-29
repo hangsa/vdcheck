@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QApplication
 # 语义 (import 那一刻求值一次, 之后 app 建好了也不刷新)。
 app = QApplication.instance() or QApplication(sys.argv)
 
-from video_qt import ui_font
+from video_qt import VIDEO_COLUMNS, ui_font
 
 _failures = []
 
@@ -38,6 +38,18 @@ def check(name, condition, detail=""):
 
 def section(title):
     print(f"\n=== {title} ===")
+
+
+def col_of(key: str) -> int:
+    """按 key 找列号。
+
+    **不写死下标** —— 加一列 (比如「色彩」) 就会让一堆写死 5 / 7 / 10 的断言
+    集体错位, 而且错位后的断言往往还「看起来合理」, 很难发现。统一按 key 找。
+    """
+    for i, c in enumerate(VIDEO_COLUMNS):
+        if c.key == key:
+            return i
+    raise AssertionError(f'VIDEO_COLUMNS 里没有 key={key!r}')
 
 
 def no_raise(fn):
@@ -68,10 +80,11 @@ def main():
             is_passing=passing, sample_rate_passing=not low_sr,
             bitrate_std=30000.0, sample_rate_std=48.0,
             full_path=f'/x/{title}', container_format='mp4',
-            frame_rate_fps=30.0, sample_rate_khz=48.0)
+            frame_rate_fps=30.0, sample_rate_khz=48.0,
+            color_primaries='bt2020', color_transfer='smpte2084')
 
     section("列集合")
-    check("11 列 (序号 + 10 数据列)", len(VIDEO_COLUMNS) == 11,
+    check("12 列 (序号 + 11 数据列)", len(VIDEO_COLUMNS) == 12,
           f"got={len(VIDEO_COLUMNS)}")
     check("第 0 列是序号列 (key=None)", VIDEO_COLUMNS[0].key is None)
     check("序号列宽 45", VIDEO_COLUMNS[0].width == 45)
@@ -79,11 +92,14 @@ def main():
     keys = [c.key for c in VIDEO_COLUMNS[1:]]
     check("数据列 key 与产品文档一致",
           keys == ['title', 'resolution', 'frame_rate', 'bitrate', 'spec',
-                   'audio_channels', 'audio_sample_rate', 'duration',
+                   'color', 'audio_channels', 'audio_sample_rate', 'duration',
                    'file_size', 'result'], f"got={keys}")
+    check("「色彩」列紧跟在「规格」列之后",
+          keys.index('color') == keys.index('spec') + 1,
+          f"spec@{keys.index('spec')} color@{keys.index('color')}")
     check("只有 title 左对齐, 其余居中",
           [c.align for c in VIDEO_COLUMNS[1:]]
-          == ['w'] + ['center'] * 9,
+          == ['w'] + ['center'] * 10,
           f"got={[c.align for c in VIDEO_COLUMNS[1:]]}")
     check("可排序列 4 个",
           sorted(c.key for c in VIDEO_COLUMNS if c.sortable)
@@ -93,6 +109,10 @@ def main():
         check(f"数据列里没有 {removed} (合进了 spec 列)",
               removed not in keys, f"got={keys}")
     check("数据列含 spec", 'spec' in keys, f"got={keys}")
+    check("数据列含 color", 'color' in keys, f"got={keys}")
+    check("「色彩」列不可排序 (跟「规格」一样, 颜色信息不参与排序)",
+          not [c for c in VIDEO_COLUMNS if c.key == 'color' and c.sortable],
+          f"got={[c.sortable for c in VIDEO_COLUMNS if c.key == 'color']}")
 
     section("表头文字带单位")
     # 不写死「显示出来的那串字符」—— 列宽不够时表头会被截断, 换平台/字体
@@ -100,8 +120,9 @@ def main():
     #   ① 列规格里的表头带单位 (稳定, 不受截断影响)
     #   ② 显示出来的表头是那段文字本身, 或者是它的截断前缀
     mh = VideoTableModel(VIDEO_COLUMNS)
-    for want, section_no in (('帧率(fps)', 3), ('码率(kbps)', 4),
-                             ('采样率(kHz)', 7)):
+    for want, _key in (('帧率(fps)', 'frame_rate'), ('码率(kbps)', 'bitrate'),
+                       ('采样率(kHz)', 'audio_sample_rate')):
+        section_no = col_of(_key)
         spec_text = VIDEO_COLUMNS[section_no].header
         check(f"第 {section_no} 列的列规格带单位 {want!r}", spec_text == want,
               f"got={spec_text!r}")
@@ -170,20 +191,20 @@ def main():
         mu.append_result(inf)
     app.processEvents()
     check("帧率格显示 '30.00' (不带 fps 单位)",
-          mu.data(mu.index(0, 3), Qt.DisplayRole) == '30.00',
-          f"got={mu.data(mu.index(0, 3), Qt.DisplayRole)!r}")
+          mu.data(mu.index(0, col_of('frame_rate')), Qt.DisplayRole) == '30.00',
+          f"got={mu.data(mu.index(0, col_of('frame_rate')), Qt.DisplayRole)!r}")
     check("码率格显示 '32000' (不带 kbps 单位)",
-          mu.data(mu.index(0, 4), Qt.DisplayRole) == '32000',
-          f"got={mu.data(mu.index(0, 4), Qt.DisplayRole)!r}")
+          mu.data(mu.index(0, col_of('bitrate')), Qt.DisplayRole) == '32000',
+          f"got={mu.data(mu.index(0, col_of('bitrate')), Qt.DisplayRole)!r}")
     check("采样率格显示 '48.0' (不带 kHz 单位)",
-          mu.data(mu.index(1, 7), Qt.DisplayRole) == '48.0',
-          f"got={mu.data(mu.index(1, 7), Qt.DisplayRole)!r}")
+          mu.data(mu.index(1, col_of('audio_sample_rate')), Qt.DisplayRole) == '48.0',
+          f"got={mu.data(mu.index(1, col_of('audio_sample_rate')), Qt.DisplayRole)!r}")
     check("无音频流时采样率格显示 'N/A'",
-          mu.data(mu.index(0, 7), Qt.DisplayRole) == 'N/A',
-          f"got={mu.data(mu.index(0, 7), Qt.DisplayRole)!r}")
+          mu.data(mu.index(0, col_of('audio_sample_rate')), Qt.DisplayRole) == 'N/A',
+          f"got={mu.data(mu.index(0, col_of('audio_sample_rate')), Qt.DisplayRole)!r}")
     check("未知帧率显示 'N/A'",
-          mu.data(mu.index(2, 3), Qt.DisplayRole) == 'N/A',
-          f"got={mu.data(mu.index(2, 3), Qt.DisplayRole)!r}")
+          mu.data(mu.index(2, col_of('frame_rate')), Qt.DisplayRole) == 'N/A',
+          f"got={mu.data(mu.index(2, col_of('frame_rate')), Qt.DisplayRole)!r}")
 
     section("title 列委托 format_title")
     from video_core import format_title
@@ -212,13 +233,13 @@ def main():
     section("spec 列格式")
     spec_cases = [
         (dict(container_format='mp4', video_codec='h264', audio_codec='aac'),
-         'mp4/h264/aac'),
+         'mp4 / h264 / aac'),
         (dict(container_format='matroska', video_codec='h264', audio_codec='aac'),
-         'matroska/h264/aac'),
+         'matroska / h264 / aac'),
         (dict(container_format='mp4', video_codec='h264', audio_codec='N/A'),
-         'mp4/h264/N/A'),
+         'mp4 / h264 / N/A'),
         (dict(container_format='mp4', video_codec='N/A', audio_codec='N/A'),
-         'mp4/N/A/N/A'),
+         'mp4 / N/A / N/A'),
     ]
     ms = VideoTableModel(VIDEO_COLUMNS)
     for kw, _want in spec_cases:
@@ -228,8 +249,93 @@ def main():
         ms.append_result(inf)
     app.processEvents()
     for r, (kw, want) in enumerate(spec_cases):
-        got = ms.data(ms.index(r, 5), Qt.DisplayRole)
+        got = ms.data(ms.index(r, col_of('spec')), Qt.DisplayRole)
         check(f"spec{kw} → {want!r}", got == want, f"got={got!r}")
+
+    section("规格列: 分隔符前后各一个空格")
+    # 用户 2026-10-29 提的: 'mp4/h264/aac' → 'mp4 / h264 / aac'
+    msp = VideoTableModel(VIDEO_COLUMNS)
+    for inf in (mk('spec.mp4'),):
+        msp.append_result(inf)
+    app.processEvents()
+    got_spec = msp.data(msp.index(0, col_of('spec')), Qt.DisplayRole)
+    check("规格列显示 'mp4 / h264 / aac' (分隔符前后有空格)",
+          got_spec == 'mp4 / h264 / aac', f"got={got_spec!r}")
+    check("规格列的分隔符是 ' / ' 而不是裸的 '/'",
+          ' / ' in got_spec and '/' not in got_spec.replace(' / ', ''),
+          f"got={got_spec!r}")
+
+    section("色彩列: 颜色基准 / 颜色映射函数")
+    mcol = VideoTableModel(VIDEO_COLUMNS)
+    mcol.append_result(mk('hdr.mp4'))
+    app.processEvents()
+    got_col = mcol.data(mcol.index(0, col_of('color')), Qt.DisplayRole)
+    check("色彩列显示 'bt2020 / smpte2084'",
+          got_col == 'bt2020 / smpte2084', f"got={got_col!r}")
+    check("色彩列也是 ' / ' 分隔 (跟规格列一致)",
+          ' / ' in got_col, f"got={got_col!r}")
+    # ffprobe 原样: 'unknown' 就显示 'unknown', 不加工成 'N/A'
+    mun = VideoTableModel(VIDEO_COLUMNS)
+    inf_u = mk('sdr.mp4')
+    inf_u.color_primaries = 'unknown'
+    inf_u.color_transfer = 'unknown'
+    mun.append_result(inf_u)
+    app.processEvents()
+    got_u = mun.data(mun.index(0, col_of('color')), Qt.DisplayRole)
+    check("ffprobe 报 'unknown' 就原样显示 'unknown / unknown' (不加工)",
+          got_u == 'unknown / unknown', f"got={got_u!r}")
+    # 缺字段 → 'N/A'
+    mna = VideoTableModel(VIDEO_COLUMNS)
+    inf_n = mk('na.mp4')
+    inf_n.color_primaries = 'N/A'
+    inf_n.color_transfer = 'N/A'
+    mna.append_result(inf_n)
+    app.processEvents()
+    got_n = mna.data(mna.index(0, col_of('color')), Qt.DisplayRole)
+    check("没有色彩信息时显示 'N/A / N/A'",
+          got_n == 'N/A / N/A', f"got={got_n!r}")
+
+    section("VideoInfo 的色彩字段 + parse_video_info 提取")
+    from video_core import VideoInfo, parse_video_info
+    vi = VideoInfo(rel_path='./', title='t.mp4', resolution='1920x1080',
+                   frame_rate='30.00', bitrate_kbps=32000.0,
+                   video_codec='h264', audio_codec='aac', audio_channels='2',
+                   audio_sample_rate='48.0', duration='00:01:00',
+                   file_size='1.0 GB', is_passing=True,
+                   sample_rate_passing=True, bitrate_std=30000.0,
+                   sample_rate_std=48.0, full_path='/x/t.mp4')
+    check("VideoInfo 默认 color_primaries='N/A'",
+          vi.color_primaries == 'N/A', f"got={vi.color_primaries!r}")
+    check("VideoInfo 默认 color_transfer='N/A'",
+          vi.color_transfer == 'N/A', f"got={vi.color_transfer!r}")
+
+    def _fmt_color(**kw):
+        d = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
+                          "r_frame_rate": "30/1"}], "format": {"format_name": "mp4"}}
+        d["streams"][0].update(kw)
+        return d
+
+    info_c = parse_video_info(
+        _fmt_color(codec_name='h264', color_primaries='bt2020',
+                   color_transfer='smpte2084'),
+        '/x/v.mp4', '/x', 30000.0, 48.0)
+    check("parse_video_info 取到 color_primaries",
+          info_c.color_primaries == 'bt2020', f"got={info_c.color_primaries!r}")
+    check("parse_video_info 取到 color_transfer",
+          info_c.color_transfer == 'smpte2084', f"got={info_c.color_transfer!r}")
+    info_u = parse_video_info(
+        _fmt_color(codec_name='h264', color_primaries='unknown',
+                   color_transfer='unknown'),
+        '/x/v.mp4', '/x', 30000.0, 48.0)
+    check("ffprobe 报 'unknown' → 原样存 'unknown'",
+          info_u.color_primaries == 'unknown'
+          and info_u.color_transfer == 'unknown',
+          f"got={info_u.color_primaries!r}/{info_u.color_transfer!r}")
+    info_n = parse_video_info(
+        _fmt_color(codec_name='h264'), '/x/v.mp4', '/x', 30000.0, 48.0)
+    check("流里没有色彩字段 → 兜底 'N/A'",
+          info_n.color_primaries == 'N/A' and info_n.color_transfer == 'N/A',
+          f"got={info_n.color_primaries!r}/{info_n.color_transfer!r}")
 
     section("着色矩阵")
     m = VideoTableModel(VIDEO_COLUMNS)
@@ -243,14 +349,16 @@ def main():
         brush = m.data(idx, Qt.ForegroundRole)
         return brush.color().name() if brush else None
 
+    ncols = len(VIDEO_COLUMNS)
     check("达标行全绿",
-          all(fg_at(0, c) == '#228b22' for c in range(1, 11)),
-          f"got={[fg_at(0, c) for c in range(1, 11)]}")
-    red_cols = {c: fg_at(1, c) for c in range(1, 11)}
+          all(fg_at(0, c) == '#228b22' for c in range(1, ncols)),
+          f"got={[fg_at(0, c) for c in range(1, ncols)]}")
+    red_cols = {c: fg_at(1, c) for c in range(1, ncols)}
+    _red_expect = sorted(col_of(k) for k in
+                         ('title', 'bitrate', 'audio_sample_rate', 'result'))
     check("不达标行只有 title/result/bitrate/audio_sample_rate 红",
-          [k for k, v in red_cols.items() if v == '#dc143c']
-          == [1, 4, 7, 10],
-          f"got={red_cols}")
+          [k for k, v in red_cols.items() if v == '#dc143c'] == _red_expect,
+          f"got={red_cols} want={_red_expect}")
     # 规格 §3.3 写的是序号列「永不染色」, 不是「永远是黑色」—— 写死黑色
     # 的话深色主题下就是黑字黑底。改成「不着色」: 用调色板默认色,
     # 既不绿也不红 (这才是「永不染色」这条不变量的意思)。
@@ -264,9 +372,10 @@ def main():
     #  达标行的序号列在这条断言里从来没被验过。)
     check("**达标行**的序号列**也不着色** (既不绿也不红)",
           fg_at(0, 0) is None, f"got={fg_at(0, 0)}")
+    _red_expect2 = sorted(col_of(k) for k in ('title', 'bitrate', 'result'))
     check("只码率不达标 → title/result/bitrate 红",
-          [c for c in range(1, 11) if fg_at(2, c) == '#dc143c'] == [1, 4, 10],
-          f"got={[c for c in range(1, 11) if fg_at(2, c) == '#dc143c']}")
+          [c for c in range(1, ncols) if fg_at(2, c) == '#dc143c'] == _red_expect2,
+          f"got={[c for c in range(1, ncols) if fg_at(2, c) == '#dc143c']}")
 
     section("着色常量只有一个来源 (界面层不另抄一份字面量)")
     # 原断言: VideoGridView.FG_PASS 就是 core 的 FG_PASS (Tk 网格类属性
@@ -376,15 +485,16 @@ def main():
     long_info = mk('x' * 200 + '.mp4')
     mt2.append_result(long_info)
     app.processEvents()
-    for col in (1, 5):                      # title / spec
+    for col in (col_of('title'), col_of('spec')):
         want = truncate_text(mt2._full_text(col, long_info),
                              mt2._widths[col], mt2._measure)
         got = mt2.data(mt2.index(0, col), Qt.DisplayRole)
         check(f"第 {col} 列显示的文本 == truncate_text(完整文本, 列宽)",
               got == want, f"got={got!r} want={want!r}")
     check("短文本原样返回 (不截断)",
-          mt2.data(mt2.index(0, 5), Qt.DisplayRole) == 'mp4/h264/aac',
-          f"got={mt2.data(mt2.index(0, 5), Qt.DisplayRole)!r}")
+          mt2.data(mt2.index(0, col_of('spec')), Qt.DisplayRole)
+          == 'mp4 / h264 / aac',
+          f"got={mt2.data(mt2.index(0, col_of('spec')), Qt.DisplayRole)!r}")
 
     section("序号列 = 排序后的新位置")
     m2 = VideoTableModel(VIDEO_COLUMNS)
@@ -486,7 +596,8 @@ def main():
     m10.on_header_clicked(4)         # 降序
     m10.on_header_clicked(4)         # 取消排序 (这一档 _apply_sort 早退)
     check("每次点击都通知表头重写 (含取消排序那一档)",
-          hdr_events == [(Qt.Horizontal, 0, 10)] * 3, f"got={hdr_events}")
+          hdr_events == [(Qt.Horizontal, 0, len(VIDEO_COLUMNS) - 1)] * 3,
+          f"got={hdr_events}")
     check("取消排序后表头无箭头",
           not m10.headerData(4, Qt.Horizontal, Qt.DisplayRole).endswith(('▲', '▼')),
           f"got={m10.headerData(4, Qt.Horizontal, Qt.DisplayRole)!r}")

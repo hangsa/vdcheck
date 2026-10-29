@@ -266,6 +266,24 @@ def _run() -> int:
           f"got={_v.currentIndex().row()},{_v.currentIndex().column()}")
 
     # ================================================================
+    section("窗口几何: 默认 1440x700 (加「色彩」列后 1280 装不下)")
+    _gw = MainWindow()
+    _gw.show()
+    app.processEvents()
+    check("主窗口默认宽 1440 (加色彩列后列宽总和 1352px, 1280 会出横向滚动条)",
+          _gw.width() == 1440, f"got={_gw.width()}")
+    check("主窗口默认高 700", _gw.height() == 700, f"got={_gw.height()}")
+    check("最小尺寸仍是 1000x500",
+          _gw.minimumWidth() == 1000 and _gw.minimumHeight() == 500,
+          f"got={_gw.minimumWidth()}x{_gw.minimumHeight()}")
+    # 列宽总和 vs 可用宽度 —— 1440 的窗口下不该出横向滚动条
+    _cols = sum(_gw.view.columnWidth(c)
+                 for c in range(_gw.view.model().columnCount()))
+    check("列宽总和不超过视口宽 (不出横向滚动条)",
+          _cols <= _gw.view.viewport().width(),
+          f"列宽和={_cols} 视口={_gw.view.viewport().width()}")
+
+    # ================================================================
     section("状态栏文案序列")
     src = mkdtemp(prefix='vdcheck_qt_src_')
     for name in ('a.mp4', 'b.mp4', 'c.mp4'):

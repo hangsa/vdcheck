@@ -185,7 +185,15 @@ VIDEO_COLUMNS: list[ColumnSpec] = [
     ColumnSpec('resolution', '分辨率', 90),
     ColumnSpec('frame_rate', '帧率(fps)', 100, 'center', True),
     ColumnSpec('bitrate', '码率(kbps)', 110, 'center', True),
-    ColumnSpec('spec', '规格', 140),
+    # 160 而不是 140: 分隔符前后加了空格之后串变长了 —— 'matroska / h264 / aac'
+    # 实测 134px, 预算 (160-10)=150 装得下; 140 的预算只有 130 → 会截成
+    # 'matroska / h264 / ...' (mkv 常见, 不能截)。极长的
+    # ('matroska / h264 / pcm_s16le') 仍会截, 那时悬停给全文。
+    ColumnSpec('spec', '规格', 160),
+    # 「色彩」列: 颜色基准 / 颜色映射函数, 两段用 ' / ' 分隔。
+    # 142px = 'bt2020 / smpte2084' 的实测宽 (128px) + 10px 余量。
+    # 加这列后列宽总和 1327px → 窗口默认宽改成 1440 才装得下 (见 resize)。
+    ColumnSpec('color', '色彩', 142),
     ColumnSpec('audio_channels', '声道数', 55),
     ColumnSpec('audio_sample_rate', '采样率(kHz)', 120, 'center', True),
     ColumnSpec('duration', '时长', 75),
@@ -286,8 +294,12 @@ class VideoTableModel(QAbstractTableModel):
         if key == 'title':
             return format_title(info)
         if key == 'spec':
-            return (f"{info.container_format}/{info.video_codec}"
-                    f"/{info.audio_codec}")
+            # 分隔符**前后各留一个空格**: 'mp4 / h264 / aac' (用户 2026-10-29 提的)
+            return (f"{info.container_format} / {info.video_codec}"
+                    f" / {info.audio_codec}")
+        if key == 'color':
+            # 颜色基准 / 颜色映射函数 —— ffprobe 原样, 不加工
+            return f"{info.color_primaries} / {info.color_transfer}" 
         if key == 'result':
             return '达标' if info.is_passing else '不达标'
         return {
@@ -1293,7 +1305,10 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         # 版本号随 GUI 层一起抬到 v4.0 (GUI 层从 Tkinter 换成 PySide6)
         self.setWindowTitle('视频检测v4.0')
-        self.resize(1280, 700)
+        # 1440 而不是 1280: 加了「色彩」列后列宽总和 1327px, 1280 的窗口装不下
+        # → 主表格会出现横向滚动条。1440 装得下 (可用 ~1420px)。
+        # 代价: 1366px 宽的笔记本屏幕放不下 (用户 2026-10-29 知情选定)。
+        self.resize(1440, 700)
         self.setMinimumSize(1000, 500)
 
         # 全 app 统一 10pt —— **在窗口这一层就 apply**, 不只 main() 里做:

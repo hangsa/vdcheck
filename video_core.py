@@ -83,6 +83,12 @@ class VideoInfo:
     sample_rate_std: float      # NEW: 采样率阈值（kHz），扫描时写入
     full_path: str
     container_format: str = 'N/A'  # NEW: 容器格式（如 'mp4'/'matroska'），ffprobe format_name 优先，缺则回退到扩展名
+    # NEW: 色彩信息 —— ffprobe 视频流的 color_primaries (颜色基准) 与
+    # color_transfer (颜色映射/传递函数)。**原样保留 ffprobe 的值**, 不加工
+    # (用户 2026-10-29 明确选的: 「不加工, ffprobe 原样」) —— 所以
+    # ffprobe 报 'unknown' 就显示 'unknown', 只有**键不存在**才是 'N/A'。
+    color_primaries: str = 'N/A'
+    color_transfer: str = 'N/A'
     # 排序用原始数值 (parse_video_info 写入; 默认值仅供测试夹具)
     frame_rate_fps: float = 0.0
     sample_rate_khz: float = 0.0
@@ -363,6 +369,13 @@ def parse_video_info(
     # 视频编码
     video_codec = video_stream.get('codec_name', 'N/A')
 
+    # 色彩信息: 颜色基准 (color_primaries) + 颜色映射函数 (color_transfer)。
+    # **原样取 ffprobe 的值** —— ffprobe 报 'unknown' 就存 'unknown';
+    # 只有键不存在 (老版本 ffmpeg / 某些流) 才兜底成 'N/A'。
+    # 空字符串也当'没有' (`.get(k, 'N/A') or 'N/A'`)。
+    color_primaries = video_stream.get('color_primaries') or 'N/A'
+    color_transfer = video_stream.get('color_transfer') or 'N/A'
+
     # 音频信息
     audio_codec = audio_stream.get('codec_name', 'N/A') if audio_stream else 'N/A'
     audio_channels = str(audio_stream.get('channels', 'N/A')) if audio_stream else 'N/A'
@@ -457,6 +470,8 @@ def parse_video_info(
         sample_rate_std=sample_rate_std,
         full_path=full_path,
         container_format=container_format,  # NEW
+        color_primaries=color_primaries,  # NEW
+        color_transfer=color_transfer,  # NEW
     )
 
 
