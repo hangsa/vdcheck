@@ -9,9 +9,9 @@
 
 ## 0. 一句话状态
 
-表格的 **Qt 表格模型**、**Qt 主窗口**、**定点截图弹窗**（Task 6）都已实现并通过审查；
-**入口切换 + 打包**（Task 7）未开始。**下一步：派 Task 7（上下文已备好在
-`.superpowers/sdd/2026-10-27-pyside6-qtableview/task-7-context.md`）。**
+表格的 **Qt 表格模型**、**Qt 主窗口**、**定点截图弹窗**（Task 6）、**入口切换 + 打包**
+（Task 7）都已实现并通过审查。**下一步：最终整体审查（已派发）→ 一次统一修复波 →
+Windows 实测。**
 
 ---
 
@@ -43,9 +43,10 @@
 | P4 表格断言改测 Qt | ✅ | `29e2aeb` | 返工后 Approved |
 | P5 Qt 主窗口 | ✅ | `d46d051` | **三轮返工**后 Approved，qt-main 126 条 / qt-table 116 条 |
 | P6 Qt 定点截图弹窗 | ✅ | `19f4a93` | 审查 + 1 轮返工 + scoped 复审后通过，qt-snapshot 76 条 |
-| P7 入口切换 + 打包 | ⬜ **下一步** | | |
+| P7 入口切换 + 打包 | ✅ | `eb229c7` | 审查 + 1 轮返工 + scoped 复审后通过 |
 
 **当前 14 个断言脚本全绿。** `video_checker.py` 保持 CRLF（0 裸 LF）。
+**P1–P7 全部完成 —— 只剩最终整体审查 + Windows 实测。**
 
 ---
 
@@ -64,24 +65,26 @@
 - **实施过程中被 429 打断过一次**（原实施者不可恢复，换了新 agent 接手）；
   完整经过见 ledger 的「Task 6 返工轮 1/5」与「Task 6 任务审查（第 1 轮）」
 
-### 3.2 **当前：Task 7（入口切换 + 打包）—— 下一步**
+### 3.2 Task 7（入口切换 + 打包）—— ✅ **已完成**（`3544fb3..eb229c7`）
 
-- **控制者已经备好的上下文**: `.superpowers/sdd/2026-10-27-pyside6-qtableview/task-7-context.md`
-  （依赖盘点的实测结果 + Ruling 24 的 excludes 依据 + build.bat 的改法 + CLAUDE.md 改哪些）
-- `video_checker.py` 换成 Qt 入口（重导出 core 的名字给断言脚本 + 转发 `video_qt.main()`）
-- **删掉 Tk GUI**（`VideoGridView` / `Tooltip` / `EnlargeDialog` / `SnapshotProgressDialog` /
-  `VideoCheckerApp` + tkinter/tkinterdnd2 的 import）—— **就地删**，Tk GUI 一直在
-  `video_checker.py` 里，计划里提的 `video_checker_tk.py` **从来没建过**
-- `video_checker.spec`：去掉 tkinterdnd2 的 datas/hiddenimports；加 PySide6 用不到的模块的
-  `excludes` —— **`QtNetwork` 实测**不是 `QtWidgets` 的依赖（Ruling 24），可以排；
-  但排除清单**不能照抄**，排一个就要在 Windows 上跑一次 exe 确认
-- `build.bat`：Python 「3.8+」→ **「3.10+」** 并加真正的版本比较；依赖换 `PySide6`
-- 更新 `CLAUDE.md`
-- **产品文档 §9 的脚本表**还列着已删的 `2026-09-29-dnd-parsing` → 改掉
-- **`DEFAULT_BITRATE_KBPS` / `DEFAULT_SAMPLE_RATE_KHZ` 现在有**两份**字面量**
-  （`video_qt.py` + `video_checker.py`，`video_core.py` 里没有）→ 并回 core，
-  core 成为唯一定义处
-- Windows 实测（见下）
+- `video_checker.py` 34 行 Qt 入口（重导出 24 个名字，脚本需要的 17 个的超集；
+  `video_qt` 的 import 在 `main()` **里面** → `import video_checker` 不拉 PySide6）
+- Tk GUI **就地删**（2091 → 34 行）；`video_checker_tk.py` 从来没建过
+- `DEFAULT_BITRATE_KBPS` / `DEFAULT_SAMPLE_RATE_KHZ` 并回 `video_core.py`，core 成唯一定义处
+- `video_checker.spec`：去 tkinterdnd2；加 51 个 PySide6 `excludes`
+- `build.bat`：真版本比较（3.10+）；依赖换 `PySide6`
+- `CLAUDE.md` 按 Qt 架构重写；产品文档版本 v3.3 → v4.0、§9 与磁盘 14 对 14
+- **产品文档 §6 的 39 行 byte-for-byte 未动**；在表格**下方**加了「Tk 版对照」注记
+  （#31/#35/#36/#38/#39 → 各自的 Qt 对应）
+
+### 3.3 **当前：最终整体审查**
+
+- 审查包 `review-2849dfe..eb229c7.diff`（654 KB / 30 commits），**opus**
+- **待裁决清单**: `.superpowers/sdd/2026-10-27-pyside6-qtableview/final-review-open-items.md`
+  （A 明确缺陷 / B 死代码与文档一致性 / C 行为与资源 / D Windows 发布门禁 /
+  E 已裁决不许再翻的 7 条）
+- 审查回来后: **一次**统一修复波 → 一次 scoped 复审 → 裁决残余 → Windows 实测
+- **Windows 实测 8 项**见 §7（其中最小化→任务栏恢复的黑屏是整个重构的靶子）
 
 ---
 
@@ -137,15 +140,14 @@
 ## 6. 下次开工的检查清单
 
 1. 读这一份（不用读整个会话）
-2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `19f4a93`
+2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `eb229c7`
 3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $f"; done`
    （Qt 脚本在本机需要 `QT_QPA_PLATFORM=offscreen`）
-4. ~~补 Task 5 的 scoped 复审~~ → **已完成**（ledger 里有 `Task 5: complete`）
-5. ~~Task 6 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**（ledger 里有
-   `Task 6: complete (commits d46d051..19f4a93, review clean, 1 deferred minor)`）
-6. **派 Task 7**（§3.2）→ 任务审查 → 返工轮 → scoped 复审
-7. **最终整体审查**（最贵的模型，审整条分支），带 ledger 里的 deferred minors 清单
-8. Windows 实测（§7）
+4. ~~补 Task 5 的 scoped 复审~~ → **已完成**
+5. ~~Task 6 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**
+6. ~~Task 7 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**
+7. **最终整体审查**（opus，已派发）→ **一次**统一修复波 → 一次 scoped 复审
+8. Windows 实测（§7）—— **靶子是最小化→恢复的黑屏，macOS 复现不了**
 
 ---
 
