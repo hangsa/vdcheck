@@ -2041,7 +2041,6 @@ def main() -> None:
     apply_app_tooltip_style(app)
     window = MainWindow()
     window.show()
-    app.exec()
     # ---- 退出路径 ----
     #
     # 进程退出时**绝不能**有一个还在跑的 QThread 被析构:
@@ -2062,14 +2061,21 @@ def main() -> None:
     # 又 abort 134, 而且 stderr 也是 None → traceback 静默丢弃。
     # os._exit 本来也不做 Python 层的 flush, 所以直接不 flush。
     #
-    # try/finally 是**第二道保险**: _shutdown_scan_threads 里的 thread.wait()
-    # 在极端情况下会抛 (比如那个 QThread 的 C++ 对象已经被 deleteLater 掉,
-    # libshiboken 抛 RuntimeError: Internal C++ object already deleted)。
-    # 那个异常一旦逃出 main(), 下面这行 os._exit(0) 就到不了 → 解释器正常
+    # try/finally 是**第二道保险**: 它把**整个**「进入事件循环 → 等待扫描
+    # 线程结束」这段都圈进去, 保证里面任何一处抛异常, os._exit(0) 都仍然
+    # 一定执行:
+    #   ① app.exec() 本身抛 (例如事件处理器里的异常一路冒到事件循环) ——
+    #      不兜住的话解释器正常收尾 → 还在跑的 QThread 被析构 → qFatal →
+    #      abort 134。所以 try 必须**开在 app.exec() 之前**。
+    #   ② _shutdown_scan_threads 里的 thread.wait() 在极端情况下会抛
+    #      (比如那个 QThread 的 C++ 对象已经被 deleteLater 掉,
+    #      libshiboken 抛 RuntimeError: Internal C++ object already deleted)。
+    # 那个异常一旦逃出 main(), os._exit(0) 就到不了 → 解释器正常
     # 收尾 → 还在跑的 QThread 被析构 → qFatal → abort (退出码 134) ——
     # 正是这条路径要根治的故障。所以**无论等待过程抛不抛, os._exit(0) 必须
     # 一定执行**。
     try:
+        app.exec()
         _shutdown_scan_threads(timeout_ms=2000)
     finally:
         os._exit(0)

@@ -243,8 +243,20 @@ def main() -> None:
     app._cancel.clear()
 
     # brief 漏掉的路径: 开始检测 / 拖拽也 clear 了 video_results,
-    # 但必须同时重置 _passed_count —— 扫第二轮会累加上一轮的达标数,
-    # 状态栏出现「达标 188 · 不达标 -178」。
+    # 也重置了 _passed_count。
+    #
+    # **更正 (2026-10-29)**: 旧注释写的是「但**必须**同时重置
+    # _passed_count —— 扫第二轮会累加上一轮的达标数」—— **这个前提是
+    # 错的**, 不要照着它去理解代码:
+    #   状态栏的「达标 N」**不是**一个跨轮次累加的运行计数器 —— 它是每轮
+    #   扫描结束时由 _scan_complete (video_qt.py:1653-1655) **从
+    #   video_results 重新算**出来的 (sum(1 for v in ... if v.is_passing)),
+    #   算完还顺手回写 self._passed_count。所以「扫第二轮会累加上一轮的
+    #   达标数」这件事**根本不会发生**。
+    #   → _begin_scan 里那句 self._passed_count = 0 因此**不是
+    #   load-bearing** 的, 它只是双保险 (让扫描过程中 _add_result 的
+    #   自增也不带着上一轮的值), 删掉它不会让状态栏的计数出错。
+    #   别把它当成「漏了这一行就会出 bug」的必需行。
     #
     # 2026-10-27: 这条**原来**是用**源码文本**锚的 (「clear() 之后 320 个
     # 字符内必须出现 `self._passed_count = 0`」+「两条入口都得走

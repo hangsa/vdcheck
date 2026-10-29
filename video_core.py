@@ -255,7 +255,7 @@ def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
     输出格式选 PNG 而非 JPEG: Tk 的 PhotoImage 原生只支持 GIF/PGM/PPM/PNG,
     不能读 JPEG, 用 PNG 才能让弹窗直接显示。
     640x360 PNG 单帧 100-300 KB, 500 帧约 50-150 MB, 可接受。
-    ffmpeg 不可用 / 文件损坏 / 超时 / 跨平台 AttributeError 均返回 False。
+    ffmpeg 不可用 / 文件损坏 / 超时 均返回 False。
     """
     try:
         ffmpeg = get_ffmpeg_path()
@@ -284,7 +284,12 @@ def extract_frame(input_path: str, seconds: float, output_path: str) -> bool:
             **kwargs,
         )
         return result.returncode == 0 and os.path.exists(output_path)
-    except (subprocess.TimeoutExpired, OSError, AttributeError):
+    except (subprocess.TimeoutExpired, OSError):
+        # **不要**在这里加 AttributeError: 这一支当初只可能来自未加平台
+        # 守卫的 subprocess.STARTUPINFO, 守卫(见上)已经把它堵上了 →
+        # 现在它只能吞掉 try 块**内部**抛的 AttributeError (比如 kwargs
+        # 打错), 把真 bug 静默变成「抽帧失败」→ 进度弹窗那一格空着, 用户
+        # 只看到「没抽到帧」, 没有任何诊断信息。宁可让它响着崩。
         return False
 
 
