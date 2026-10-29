@@ -168,15 +168,22 @@ def truncate_text(text: str, col_width: int, measure: Callable[[str], int]) -> s
     慢路径：measure 验证 + 二分查找前缀长度。
     """
     max_width = max(0, col_width - 10)
-    # 快路径的**上界估算按 10pt 标定** (2026-10-29 用户试用反馈: 字号 9 → 10pt)。
-    # 10pt 下 ASCII 平均 ~7.8px/字符、CJK ~15.6px/字符 → 取整成 8 / 16。
-    # 为什么必须跟着字号一起调: 这个估算**只用来判断「肯定装得下」**,
-    # 一旦它小于真实平均宽度, 快路径就会放过超宽文本 —— 而 Qt 的 elide 是
-    # 关的 (TruncatingDelegate 设的是 Qt.ElideNone), 放过去就直接溢出列宽。
-    # 8/16 在 10pt 下是真上界。
-    # 纯 ASCII 用更小的上界可以跳过更多 measure
+    # 快路径的 per_char 是**上界估计** —— 只有当**每个字符的真实 advance
+    # <= per_char** 时, 「len(text) * per_char <= max_width → 肯定装得下」
+    # 才成立。一旦它小于真实字符宽, 快路径就会放过超宽文本 —— 而 Qt 的
+    # elide 是关的 (TruncatingDelegate 设的是 Qt.ElideNone), 放过去就
+    # 直接溢出列宽。
+    #
+    # ⚠️ **换字号 / 换字体必须重新实测这两个常量。** 下面是 10pt 的实测值
+    # (离屏 Sans Serif, QFontMetrics.horizontalAdvance):
+    #   ASCII: 可打印字符里**最宽的是 'W' = 13px** (a=7, w=10, M=11)
+    #   CJK:   '中' = 13px → 取 16 留一点余量
+    # 之前这里是 8/16, 注释写着「8/16 在 10pt 下是真上界」—— **那是错的**:
+    # 8 只是**平均**宽 ('a' 才 7px), 而 'W' 有 13px → 一串 'W' (例如
+    # 大写拉丁文文件名) 会被快路径当成「装得下」放行, 而它真实宽 13px/字
+    # → 文字溢出列宽。现在 ASCII 取 13 = 真实最大 advance → 快路径是真上界。
     has_cjk = any(ord(c) >= 0x80 for c in text)
-    per_char = 8 if not has_cjk else 16
+    per_char = 13 if not has_cjk else 16
     if len(text) * per_char <= max_width:
         return text
     if measure(text) <= max_width:

@@ -183,20 +183,25 @@ def main() -> None:
     check("空串原样返回", got == '', f"got={got!r}")
 
     # 快路径的**上界估算** (video_core.truncate_text 里的 per_char) 必须
-    # >= 真实平均字符宽 —— 否则快路径会放过超宽文本, 而 Qt 的 elide 是关的
-    # (TruncatingDelegate 设的是 Qt.ElideNone) → 文字直接溢出列宽。
-    # 2026-10-29: 字号 9 → 10pt, per_char 7/14 → 8/16 就是为这个 ——
-    # 10pt 下 ASCII 平均 ~7.8px/字符 (Windows Segoe UI), 7 已经不是上界。
-    # 只测**小写 ASCII 与 CJK**: 快路径本来就按**平均**字符宽标定,
-    # 全大写 ('W' 一类) 的平均宽超出这个上界是设计上的近似, 不是这次
-    # 改动引入的, 也不在这次断言的射程里。
+    # >= 真实**最宽**字符宽 —— 否则快路径会放过超宽文本, 而 Qt 的 elide
+    # 是关的 (TruncatingDelegate 设的是 Qt.ElideNone) → 文字直接溢出列宽。
+    #
+    # 2026-10-29 返工轮 1: per_char 8/16 → **13/16** (ASCII 取可打印
+    # 字符里**最宽**的 'W' = 13px)。之前那版注释写的「8/16 是真上界」是
+    # **错的** —— 8 只是**平均**宽 ('a' 才 7px), 而 'W' 有 13px → 一串
+    # 'W' 会被快路径当成「装得下」放行, 真实宽 13px/字 → 溢出列宽。
+    #
+    # 这条断言钉的是**不变量**「快路径返回的文本一定装得下」, **不是**
+    # per_char 这个常量本身 —— 换字体/换字号把常量作废时这里要红。
+    # 所以样本里**必须带宽字形** ('W' / 'w'): 只测 'a' 与 CJK 的话,
+    # 测的恰好是从来不会出事的两个 case (7px / 13px, 都远小于上界)。
     overflow = []
     for n in range(1, 120):
-        for text in ('a' * n, '中文标题' * n):
+        for text in ('a' * n, 'W' * n, 'w' * n, '中文标题' * n):
             res = truncate_text(text, 250, measure)
             if measure(res) > 250 - 10:
                 overflow.append((n, measure(res)))
-    check("快路径也不放过超宽文本 (估算上界 >= 真实平均宽)",
+    check("快路径也不放过超宽文本 (估算上界 >= 真实最宽字符宽)",
           not overflow, f"got={overflow[:5]}")
 
     section("状态栏合并成一行 (状态 + 统计)")

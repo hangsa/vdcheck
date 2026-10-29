@@ -174,19 +174,23 @@ class ColumnSpec:
 # 装不下的话排序箭头就被 '...' 吃掉了 (用户看不到排序态)。
 # 10pt 下按实测重算: 帧率(fps) ▲ = 69px, 码率(kbps) ▲ = 80px,
 # 采样率(kHz) ▲ = 87px, 结果 ▲ = 44px —— 加上截断 allowance (10px)
-# 与不同平台字体的余量, 取下面这组值。
+# 与不同平台字体的余量 (Windows Segoe UI 10pt 比离屏 Sans Serif 宽
+# ~7%~18%), 取下面这组值。
+# 2026-10-29 返工轮 1: 四列各再 +10px —— 原来只剩 10~13px 余量,
+# 换到 Segoe UI 上表头可能被截成 '码率(kbps...'; 加宽后余量 ~20~23px。
+# (合计 1145 → 1185px, 视口 1248~1268px, 仍不出现横向滚动条)
 VIDEO_COLUMNS: list[ColumnSpec] = [
     ColumnSpec(None, '序号', 45, 'center', False),
     ColumnSpec('title', '标题', 300, 'w', False),
     ColumnSpec('resolution', '分辨率', 90),
-    ColumnSpec('frame_rate', '帧率(fps)', 90, 'center', True),
-    ColumnSpec('bitrate', '码率(kbps)', 100, 'center', True),
+    ColumnSpec('frame_rate', '帧率(fps)', 100, 'center', True),
+    ColumnSpec('bitrate', '码率(kbps)', 110, 'center', True),
     ColumnSpec('spec', '规格', 140),
     ColumnSpec('audio_channels', '声道数', 55),
-    ColumnSpec('audio_sample_rate', '采样率(kHz)', 110, 'center', True),
+    ColumnSpec('audio_sample_rate', '采样率(kHz)', 120, 'center', True),
     ColumnSpec('duration', '时长', 75),
     ColumnSpec('file_size', '文件大小', 75),
-    ColumnSpec('result', '结果', 65, 'center', True),
+    ColumnSpec('result', '结果', 75, 'center', True),
 ]
 
 
@@ -1266,9 +1270,9 @@ class MainWindow(QMainWindow):
         self.resize(1280, 700)
         self.setMinimumSize(1000, 500)
 
-        # 全 app 统一 9pt —— **在窗口这一层就 apply**, 不只 main() 里做:
+        # 全 app 统一 10pt —— **在窗口这一层就 apply**, 不只 main() 里做:
         # 任何人直接 `MainWindow()` (断言脚本、将来的嵌入用法) 拿到的都
-        # 必须是同一套字体, 否则模型按 9pt 量宽、视图按 app 默认字体渲染,
+        # 必须是同一套字体, 否则模型按 10pt 量宽、视图按 app 默认字体渲染,
         # 预截断好的文字会溢出列宽 (清单 #2)。
         app = QApplication.instance()
         if app is not None:

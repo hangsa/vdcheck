@@ -507,19 +507,25 @@ def main():
     # 列宽不够宽的话箭头被 '...' 吃掉, 用户看不到排序态。
     # (2026-10-29: 字号 9 → 10pt 之后, 帧率/码率/采样率/结果 四列的
     #  默认宽度都不够了 —— 那次只查了「表头文字」, 没算箭头。)
+    # (2026-10-29 返工轮 1: 原来只查了**升序**的 ▲, 降序的 ▼ 没查 ——
+    #  两个箭头的 advance 一样 (实测各 10px), 但那一档当时**没有断言**,
+    #  列宽将来一变就没人知道了。两个方向都查。)
     m_arrow = VideoTableModel(VIDEO_COLUMNS)
     m_arrow.append_result(mk('x.mp4'))
     missing = []
     for i, col in enumerate(VIDEO_COLUMNS):
         if not col.sortable:
             continue
-        m_arrow.on_header_clicked(i)          # 升序 → 加箭头
+        m_arrow.on_header_clicked(i)          # 升序 → 加 ▲
         head = m_arrow.headerData(i, Qt.Horizontal, Qt.DisplayRole)
         if not head.endswith('▲'):
-            missing.append((i, col.header, head))
-        m_arrow.on_header_clicked(i)          # 降序
+            missing.append((i, col.header, '升序', head))
+        m_arrow.on_header_clicked(i)          # 降序 → 加 ▼
+        head = m_arrow.headerData(i, Qt.Horizontal, Qt.DisplayRole)
+        if not head.endswith('▼'):
+            missing.append((i, col.header, '降序', head))
         m_arrow.on_header_clicked(i)          # 取消排序
-    check("每个可排序列的默认宽度都装得下表头 + 箭头 (箭头不被截掉)",
+    check("每个可排序列的默认宽度都装得下表头 + 箭头 (升序 ▲ / 降序 ▼ 都不被截掉)",
           not missing, f"got={missing}")
 
     section("tooltip: 只在被截断时给完整值")
