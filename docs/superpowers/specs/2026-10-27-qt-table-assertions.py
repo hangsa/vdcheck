@@ -502,6 +502,25 @@ def main():
     check("非活动列无箭头",
           not m5.headerData(1, Qt.Horizontal, Qt.DisplayRole).endswith(('▲', '▼')),
           f"got={m5.headerData(1, Qt.Horizontal, Qt.DisplayRole)!r}")
+    # **每一个**可排序列的默认宽度都要装得下「表头文字 + 箭头」。
+    # 箭头是表头文字的后缀, 跟着列宽一起被像素截断 (产品文档 §6 #16) ——
+    # 列宽不够宽的话箭头被 '...' 吃掉, 用户看不到排序态。
+    # (2026-10-29: 字号 9 → 10pt 之后, 帧率/码率/采样率/结果 四列的
+    #  默认宽度都不够了 —— 那次只查了「表头文字」, 没算箭头。)
+    m_arrow = VideoTableModel(VIDEO_COLUMNS)
+    m_arrow.append_result(mk('x.mp4'))
+    missing = []
+    for i, col in enumerate(VIDEO_COLUMNS):
+        if not col.sortable:
+            continue
+        m_arrow.on_header_clicked(i)          # 升序 → 加箭头
+        head = m_arrow.headerData(i, Qt.Horizontal, Qt.DisplayRole)
+        if not head.endswith('▲'):
+            missing.append((i, col.header, head))
+        m_arrow.on_header_clicked(i)          # 降序
+        m_arrow.on_header_clicked(i)          # 取消排序
+    check("每个可排序列的默认宽度都装得下表头 + 箭头 (箭头不被截掉)",
+          not missing, f"got={missing}")
 
     section("tooltip: 只在被截断时给完整值")
     m6 = VideoTableModel(VIDEO_COLUMNS)

@@ -182,6 +182,23 @@ def main() -> None:
     got = truncate_text('', 250, measure)
     check("空串原样返回", got == '', f"got={got!r}")
 
+    # 快路径的**上界估算** (video_core.truncate_text 里的 per_char) 必须
+    # >= 真实平均字符宽 —— 否则快路径会放过超宽文本, 而 Qt 的 elide 是关的
+    # (TruncatingDelegate 设的是 Qt.ElideNone) → 文字直接溢出列宽。
+    # 2026-10-29: 字号 9 → 10pt, per_char 7/14 → 8/16 就是为这个 ——
+    # 10pt 下 ASCII 平均 ~7.8px/字符 (Windows Segoe UI), 7 已经不是上界。
+    # 只测**小写 ASCII 与 CJK**: 快路径本来就按**平均**字符宽标定,
+    # 全大写 ('W' 一类) 的平均宽超出这个上界是设计上的近似, 不是这次
+    # 改动引入的, 也不在这次断言的射程里。
+    overflow = []
+    for n in range(1, 120):
+        for text in ('a' * n, '中文标题' * n):
+            res = truncate_text(text, 250, measure)
+            if measure(res) > 250 - 10:
+                overflow.append((n, measure(res)))
+    check("快路径也不放过超宽文本 (估算上界 >= 真实平均宽)",
+          not overflow, f"got={overflow[:5]}")
+
     section("状态栏合并成一行 (状态 + 统计)")
     # 原断言 (Tk 版): 建一个 VideoCheckerApp, 看状态栏那一行字。
     # Qt 版对应: video_qt.MainWindow —— 状态栏是 QStatusBar, 文案走

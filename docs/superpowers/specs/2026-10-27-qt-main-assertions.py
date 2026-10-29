@@ -145,16 +145,16 @@ def _run() -> int:
     font = ui_font()
     check("ui_font() 的字体族非空 (app 已存在)",
           bool(font.family()), f"got={font.family()!r}")
-    check("字号 9pt", font.pointSize() == 9, f"got={font.pointSize()}")
+    check("字号 10pt", font.pointSize() == 10, f"got={font.pointSize()}")
     check("QFontMetrics 量得动 (没有 abort)",
           QFontMetrics(ui_font()).horizontalAdvance('码率(kbps)') > 0)
     video_qt.apply_app_font(app)
     check("app.setFont(ui_font()) 已生效", app.font() == ui_font(),
           f"app={app.font()!r}")
-    check("app 的字号是 9pt", app.font().pointSize() == 9,
+    check("app 的字号是 10pt", app.font().pointSize() == 10,
           f"got={app.font().pointSize()}")
     # MainWindow 自己也要 apply —— 直接 MainWindow() (断言脚本、将来的嵌入
-    # 用法) 拿到的必须是同一套字体, 否则模型按 9pt 量宽、视图按 app 默认
+    # 用法) 拿到的必须是同一套字体, 否则模型按 10pt 量宽、视图按 app 默认
     # 字体渲染, 预截断好的文字会溢出列宽 (清单 #2)。
     app.setFont(QFont('Courier', 14))          # 明显不是 ui_font()
     check("前置: app 字体被换成别的", app.font() != ui_font(),
@@ -175,6 +175,29 @@ def _run() -> int:
           and 'QApplication' in (proc.stdout + proc.stderr),
           f"rc={proc.returncode} out={proc.stdout[-120:]!r} "
           f"err={proc.stderr[-120:]!r}")
+
+    # ================================================================
+    section("行高: 主表格的行高按**字体高度**算 (用户反馈: 字体略小且紧凑)")
+    # 行高**不写死**: QFontMetrics(ui_font()).height() + 18 (上下各 9px 留白)。
+    # 10pt 下 = 16 + 18 = 34px (Qt 默认是 30px)。
+    # 这里**按公式重算一遍**, 不引用实现里的常量 —— 常量改了断言要跟着红。
+    expected_row_h = QFontMetrics(ui_font()).height() + 18
+    win_row = MainWindow()
+    win_row._add_result(make_info('a.mp4', '/x/a.mp4'))
+    win_row.show()
+    app.processEvents()
+    check("行高 = 字体高 + 18 (10pt → 34px)",
+          win_row.view.rowHeight(0) == expected_row_h,
+          f"got={win_row.view.rowHeight(0)} want={expected_row_h}")
+    check("行高确实设到了 verticalHeader 上 (defaultSectionSize)",
+          win_row.view.verticalHeader().defaultSectionSize() == expected_row_h,
+          f"got={win_row.view.verticalHeader().defaultSectionSize()} "
+          f"want={expected_row_h}")
+    # 「比 Qt 默认的 30px 宽裕」是用户明确要的 —— 少了这条, 上面两条在
+    # 某个平台上 (字体高恰好 12) 会跟 Qt 默认值撞上, 断言就废了。
+    check("行高比 Qt 默认的 30px 大 (用户要求加行高)",
+          win_row.view.rowHeight(0) > 30,
+          f"got={win_row.view.rowHeight(0)}")
 
     # ================================================================
     section("状态栏文案序列")

@@ -52,7 +52,7 @@ _ui_font: QFont | None = None
 
 
 def ui_font() -> QFont:
-    """全 app 统一的字体 (9pt)。**必须在 QApplication 建好之后求值**。
+    """全 app 统一的字体 (10pt)。**必须在 QApplication 建好之后求值**。
 
     QFont() 会拷贝**当前 app 的**默认字体; app 还不存在时字体族是空的
     (family=''), 于是字宽度量整套偏掉 ('码率(kbps)' 48px → 67px),
@@ -74,9 +74,9 @@ def ui_font() -> QFont:
                 'ui_font() 必须在 QApplication 建好之后调用: '
                 'QFontMetrics 没有 QGuiApplication 会直接 abort 进程 '
                 '(退出码 134), 字体族是不是空的不影响这件事')
-        font = QFont('Segoe UI', 9) if sys.platform == 'win32' else QFont()
+        font = QFont('Segoe UI', 10) if sys.platform == 'win32' else QFont()
         if sys.platform != 'win32':
-            font.setPointSize(9)
+            font.setPointSize(10)
         _ui_font = font
         return font
     return _ui_font
@@ -89,7 +89,7 @@ def snapshot_fail_font() -> QFont:
     """失败字形 '×' 的字体: **14pt 粗体**。
 
     与 Tk 原版一致 (Tk 版的失败字形同样是 14 号粗体) ——
-    「失败」这个状态要一眼看得见, 9pt 常规体不够显眼。
+    「失败」这个状态要一眼看得见, 10pt 常规体不够显眼。
 
     惰性求值 (跟 ui_font() 一样): 字体度量要 QGuiApplication 在场。
     """
@@ -124,7 +124,7 @@ def __getattr__(name: str):
 
 
 def apply_app_font(app: QApplication) -> None:
-    """全 app 统一 9pt 字体。
+    """全 app 统一 10pt 字体。
 
     模型用 QFontMetrics(ui_font()) 量宽度, 视图用 app 的字体渲染 ——
     两者不一致的话, 预截断好的文字会**溢出列宽** (Qt 的 elide 是关的)。
@@ -169,18 +169,24 @@ class ColumnSpec:
     sortable: bool = False
 
 
+# 列宽。**可排序列的宽度要装得下「表头文字 + 排序箭头」** ——
+# 箭头是表头文字的**后缀**, 会跟着列宽一起被像素截断 (产品文档 §6 #16),
+# 装不下的话排序箭头就被 '...' 吃掉了 (用户看不到排序态)。
+# 10pt 下按实测重算: 帧率(fps) ▲ = 69px, 码率(kbps) ▲ = 80px,
+# 采样率(kHz) ▲ = 87px, 结果 ▲ = 44px —— 加上截断 allowance (10px)
+# 与不同平台字体的余量, 取下面这组值。
 VIDEO_COLUMNS: list[ColumnSpec] = [
     ColumnSpec(None, '序号', 45, 'center', False),
-    ColumnSpec('title', '标题', 250, 'w', False),
+    ColumnSpec('title', '标题', 300, 'w', False),
     ColumnSpec('resolution', '分辨率', 90),
-    ColumnSpec('frame_rate', '帧率(fps)', 75, 'center', True),
-    ColumnSpec('bitrate', '码率(kbps)', 85, 'center', True),
+    ColumnSpec('frame_rate', '帧率(fps)', 90, 'center', True),
+    ColumnSpec('bitrate', '码率(kbps)', 100, 'center', True),
     ColumnSpec('spec', '规格', 140),
     ColumnSpec('audio_channels', '声道数', 55),
-    ColumnSpec('audio_sample_rate', '采样率(kHz)', 90, 'center', True),
+    ColumnSpec('audio_sample_rate', '采样率(kHz)', 110, 'center', True),
     ColumnSpec('duration', '时长', 75),
     ColumnSpec('file_size', '文件大小', 75),
-    ColumnSpec('result', '结果', 60, 'center', True),
+    ColumnSpec('result', '结果', 65, 'center', True),
 ]
 
 
@@ -409,10 +415,19 @@ class TruncatingDelegate(QStyledItemDelegate):
 # 抽帧存盘宽度 (640px) 与弹窗里的显示宽度 (320px) —— 现状就是「存 640 显示 320」
 SNAPSHOT_FULL_W = EXTRACT_THUMB_W
 SNAPSHOT_MEM_W = EXTRACT_THUMB_W // 2
+# 缩略图在格子里的**自然高度** (16:9 的 640x360 → 320x180)。
+# 行高按它算 —— 之前行高是 Qt 默认的 30px, 而缩略图是 320x180,
+# _paint_pixmap 把它等比缩到 53x30 显示 (只有 1/6 大小)。
+# Tk 版每格是个 320x180 的 tk.Label, 行高自然就是 ~196px。
+SNAPSHOT_MEM_H = 180
+SNAPSHOT_ROW_H = SNAPSHOT_MEM_H + 16   # 196
+# ⚠️ 已知差异: 非 16:9 的视频 (extract_frame 只定宽 640, 高度按原比例)
+# 缩略图更高, 会被 _paint_pixmap 等比缩到格子里 —— 不会变形, 但会比
+# 16:9 的略小。Tk 版是按内容自适应行高的, 这里固定行高。
 # 时间点列的宽度: 缩略图 + 左右留白 (与现状的 THUMB_DISPLAY_W + 8 一致)
 SNAPSHOT_CELL_W = SNAPSHOT_MEM_W + 8
-# 标题列宽 —— 与主表格 title 列一致 (250px)
-SNAPSHOT_TITLE_W = 250
+# 标题列宽 —— 与主表格 title 列一致 (300px)
+SNAPSHOT_TITLE_W = 300
 # 序号列宽 (固定, 不随时间点数量变化)
 SNAPSHOT_IDX_W = 45
 
@@ -604,7 +619,7 @@ class SnapshotDelegate(QStyledItemDelegate):
 
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
-        # 标题文字在 model 里已经按 250px 截断好了, 别让 Qt 再 elide 一次
+        # 标题文字在 model 里已经按 300px 截断好了, 别让 Qt 再 elide 一次
         option.textElideMode = Qt.ElideNone
 
     def paint(self, painter, option, index):
@@ -627,7 +642,7 @@ class SnapshotDelegate(QStyledItemDelegate):
         if state is not None and state.status == 'failed':
             # 失败 '×' 用 **14pt 粗体** —— 与 Tk 原版一致
             # (Tk 版的失败字形同样是 14 号粗体)。
-            # 失败这个状态得一眼看得见, 9pt 常规体不够显眼。
+            # 失败这个状态得一眼看得见, 10pt 常规体不够显眼。
             painter.setFont(snapshot_fail_font())
         painter.setPen(color)
         painter.drawText(option.rect, Qt.AlignCenter, text)
@@ -848,6 +863,10 @@ class SnapshotDialog(QDialog):
         self.view.setSelectionMode(QAbstractItemView.NoSelection)
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.clicked.connect(self._on_cell_clicked)
+        # 行高必须**装得下缩略图** —— 之前没设, 用的是 Qt 默认的 30px,
+        # _paint_pixmap 把 320x180 的缩略图等比缩到 53x30 显示 (1/6 大小)。
+        # 网格的行 = 文件, 每行含序号/标题/各时间点格 → 行高对所有列生效。
+        self.view.verticalHeader().setDefaultSectionSize(SNAPSHOT_ROW_H)
         root.addWidget(self.view, 1)
 
         # === 底部: 状态文字 + 进度条 ===
@@ -865,7 +884,7 @@ class SnapshotDialog(QDialog):
         self._poll_timer.timeout.connect(self._poll_queue)
 
     def _sync_columns(self) -> None:
-        """列宽: 序号 45 / 标题 250 / 每个时间点 328。"""
+        """列宽: 序号 45 / 标题 300 / 每个时间点 328。"""
         header = self.view.horizontalHeader()
         header.setMinimumSectionSize(20)
         header.setSectionResizeMode(0, QHeaderView.Fixed)
@@ -1346,6 +1365,10 @@ class MainWindow(QMainWindow):
         self.view.viewport().setAcceptDrops(False)
         self.view.setItemDelegate(TruncatingDelegate(self.view))
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # 行高按**字体高度**算, 不写死 —— 以后再调字号不会失配。
+        # +18 = 上下各 9px 的留白 (10pt 下 = 16 + 18 = 34px)。
+        self.view.verticalHeader().setDefaultSectionSize(
+            QFontMetrics(ui_font()).height() + 18)
         self._setup_header()
         root.addWidget(self.view, 1)
 

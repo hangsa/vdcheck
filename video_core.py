@@ -168,9 +168,15 @@ def truncate_text(text: str, col_width: int, measure: Callable[[str], int]) -> s
     慢路径：measure 验证 + 二分查找前缀长度。
     """
     max_width = max(0, col_width - 10)
-    # 9pt 下 ASCII ~7px，CJK ~14px；纯 ASCII 用更小的上界可以跳过更多 measure
+    # 快路径的**上界估算按 10pt 标定** (2026-10-29 用户试用反馈: 字号 9 → 10pt)。
+    # 10pt 下 ASCII 平均 ~7.8px/字符、CJK ~15.6px/字符 → 取整成 8 / 16。
+    # 为什么必须跟着字号一起调: 这个估算**只用来判断「肯定装得下」**,
+    # 一旦它小于真实平均宽度, 快路径就会放过超宽文本 —— 而 Qt 的 elide 是
+    # 关的 (TruncatingDelegate 设的是 Qt.ElideNone), 放过去就直接溢出列宽。
+    # 8/16 在 10pt 下是真上界。
+    # 纯 ASCII 用更小的上界可以跳过更多 measure
     has_cjk = any(ord(c) >= 0x80 for c in text)
-    per_char = 7 if not has_cjk else 14
+    per_char = 8 if not has_cjk else 16
     if len(text) * per_char <= max_width:
         return text
     if measure(text) <= max_width:

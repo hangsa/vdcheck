@@ -39,7 +39,7 @@ def cleanup_tmpdirs() -> None:
 # 没有显示环境时 Qt 用 offscreen 平台 (会打一条字体族警告到 stderr, 不在范围)。
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QBuffer, QEvent, QPointF, Qt  # noqa: E402
+from PySide6.QtCore import QBuffer, QEvent, QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
     QColor, QFont, QFontMetrics, QImage, QKeyEvent, QMouseEvent, QPainter,
     QPixmap,
@@ -130,6 +130,34 @@ def render_cell(model, delegate, row: int, col: int,
     opt = QStyleOptionViewItem()
     opt.rect = pm.rect()
     delegate.paint(painter, opt, model.index(row, col))
+    painter.end()
+    return pm.toImage()
+
+
+def render_real_cell(view, delegate, row: int, col: int) -> QImage:
+    """用**真实 view 的真实 cell 矩形**渲染一个 cell。
+
+    render_cell() 用的是**合成**的 80x40 rect —— opt.rect 是那张图自己的
+    rect, **从不使用真实行高** → 缩略图永远画得下, 于是「行高把缩略图
+    压成 53x30」这个 bug 从来抓不到 (2026-10-29 用户反馈暴露的正是它)。
+
+    这里用 view.visualRect(index) —— 真正显示在屏幕上的那个矩形,
+    行高、列宽都是真的。
+
+    矩形**平移到原点**: 画到一张新图上时, cell 在视口里的偏移 (x>0)
+    会把缩略图画到图外面去。平移只动位置, 不动尺寸。
+    """
+    idx = view.model().index(row, col)
+    rect = view.visualRect(idx)
+    rect.moveTo(QPoint(0, 0))
+    if rect.width() <= 0 or rect.height() <= 0:
+        return QImage()
+    pm = QPixmap(rect.width(), rect.height())
+    pm.fill(Qt.white)
+    painter = QPainter(pm)
+    opt = QStyleOptionViewItem()
+    opt.rect = rect
+    delegate.paint(painter, opt, idx)
     painter.end()
     return pm.toImage()
 
@@ -388,17 +416,17 @@ def _run() -> int:
     blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2))
     check("失败是红色 ×", red > 0 and blue == 0, f"blue={blue} red={red}")
     # 失败 '×' 必须是 **14pt 粗体** —— Tk 原版是
-    # font=('TkDefaultFont', 14, 'bold'), 9pt 常规体不够显眼。
-    # 跟两个对照组比: 9pt 常规 (要更高) / 14pt 常规 (要更粗 → 墨更多)。
+    # font=('TkDefaultFont', 14, 'bold'), 10pt 常规体不够显眼。
+    # 跟两个对照组比: 10pt 常规 (要更高) / 14pt 常规 (要更粗 → 墨更多)。
     fail_img = render_cell(model, delegate, 0, 2)
     fail_box = red_ink_bbox(fail_img)
-    ctrl9 = QFont(video_qt.ui_font())
+    ctrl10 = QFont(video_qt.ui_font())
     ctrl14 = QFont(video_qt.ui_font())
     ctrl14.setPointSize(14)
-    box9 = red_ink_bbox(render_glyph('×', ctrl9))
-    check("失败 '×' 比 9pt 常规体**更高** (字号确实变大了)",
-          fail_box[3] > box9[3],
-          f"delegate_h={fail_box[3]} 9pt_h={box9[3]}")
+    box10 = red_ink_bbox(render_glyph('×', ctrl10))
+    check("失败 '×' 比 10pt 常规体**更高** (字号确实变大了)",
+          fail_box[3] > box10[3],
+          f"delegate_h={fail_box[3]} 10pt_h={box10[3]}")
     _b, _r, _n = count_hues(render_glyph('×', ctrl14))
     check("失败 '×' 比 14pt **常规**体墨更多 (确实是粗体)",
           red > _r,
@@ -415,6 +443,60 @@ def _run() -> int:
     model.mark_done(0, 2, '/tmp/x.png')
     blue, red, neutral = count_hues(render_cell(model, delegate, 0, 2, (120, 80)))
     check("成功 → 委托把 QPixmap 画出来了", ok and red > 0, f"red={red}")
+
+    # ================================================================
+    section("快照网格行高: 缩略图按**原尺寸**显示 (修 bug: 被压成 1/6 大小)")
+    # 2026-10-29 用户反馈「定点截图的图片展示太小」的根因: 快照网格
+    # **从来没设过行高** —— Qt 默认 30px, _paint_pixmap 把 320x180 的
+    # 缩略图等比缩到 53x30 显示。Tk 版每格是个 320x180 的 tk.Label,
+    # 行高自然就是 ~196px。
+    #
+    # 旧断言抓不到这个 bug: render_cell() 用的是**合成**的 80x40 rect,
+    # opt.rect 是那张图自己的 rect —— **从不使用真实行高** → 缩略图
+    # 永远画得下。下面用**真实 view 的真实 cell 矩形**来渲染。
+    dlg_h = SnapshotDialog(win, [make_info()], '/tmp/does/not/exist/snapshot')
+    dlg_h.model.set_time_tokens(['00:00:07:24'])
+    dlg_h._sync_columns()
+    dlg_h.resize(1200, 700)
+    dlg_h.show()
+    app.processEvents()
+    check("快照网格的行高装得下缩略图 (>= 180px)",
+          dlg_h.view.rowHeight(0) >= video_qt.SNAPSHOT_MEM_H,
+          f"got={dlg_h.view.rowHeight(0)} need>={video_qt.SNAPSHOT_MEM_H}")
+    check("行高 = SNAPSHOT_ROW_H (196px)",
+          dlg_h.view.rowHeight(0) == video_qt.SNAPSHOT_ROW_H,
+          f"got={dlg_h.view.rowHeight(0)} want={video_qt.SNAPSHOT_ROW_H}")
+    # 前置: 行高得真的比 Qt 默认的 30px 高得多, 否则上面两条跟「没设行高」
+    # 分不开。
+    check("前置: 行高比 Qt 默认的 30px 高得多",
+          dlg_h.view.rowHeight(0) > 30, f"got={dlg_h.view.rowHeight(0)}")
+    check("前置: 缩略图是 320x180 (原图 640x360 缩一半)",
+          video_qt.SNAPSHOT_MEM_W == 320 and video_qt.SNAPSHOT_MEM_H == 180,
+          f"got={video_qt.SNAPSHOT_MEM_W}x{video_qt.SNAPSHOT_MEM_H}")
+
+    # 塞一张真的缩略图进去 → 用**真实 cell 矩形**渲染 → 像素级验尺寸
+    thumb_dir = mkdtemp(prefix='vdcheck_qt_thumb_')
+    thumb_path = os.path.join(thumb_dir, 'thumb.png')
+    with open(thumb_path, 'wb') as f:
+        f.write(fake_png_bytes(640, 360))          # 纯红的 640x360 原图
+    ok_h = dlg_h.delegate.set_thumbnail(0, 2, thumb_path)
+    dlg_h.model.mark_done(0, 2, thumb_path)
+    app.processEvents()
+    real_img = render_real_cell(dlg_h.view, dlg_h.delegate, 0, 2)
+    real_box = red_ink_bbox(real_img)
+    check("缩略图在**真实行高**下按原尺寸绘制 (320x180, 没被压扁)",
+          ok_h and abs(real_box[2] - video_qt.SNAPSHOT_MEM_W) <= 2
+          and abs(real_box[3] - video_qt.SNAPSHOT_MEM_H) <= 2,
+          f"bbox={real_box} want~({video_qt.SNAPSHOT_MEM_W},"
+          f"{video_qt.SNAPSHOT_MEM_H})")
+    # 端到端: 直接抓**真实视口** —— 用户眼睛看到的那张图。
+    # (旧 bug 下这里会是 53x30 —— 只有 1/6 大小。)
+    vp_img = dlg_h.view.viewport().grab().toImage()
+    vp_box = red_ink_bbox(vp_img)
+    check("真实视口里缩略图就是 320x180 (用户看到的大小)",
+          abs(vp_box[2] - video_qt.SNAPSHOT_MEM_W) <= 2
+          and abs(vp_box[3] - video_qt.SNAPSHOT_MEM_H) <= 2,
+          f"bbox={vp_box}")
 
     # ================================================================
     section("状态从 role 走到画面 (dataChanged → 重绘)")
@@ -498,7 +580,7 @@ def _run() -> int:
           main_align == int(Qt.AlignCenter), f"got={main_align}")
 
     # ================================================================
-    section("标题格按 250px 截断 + ToolTipRole 给完整路径")
+    section("标题格按 300px 截断 + ToolTipRole 给完整路径")
     long_title = 'deep/' + 'x' * 120 + '/movie.mp4'
     m3 = SnapshotGridModel([make_info(long_title, '/x/' + long_title)])
     m3.set_time_tokens(['00:00:07:24'])
@@ -506,8 +588,9 @@ def _run() -> int:
     tip = m3.data(m3.index(0, 1), Qt.ToolTipRole)
     check("标题格被截断了 (以三个 ASCII 点结尾)", shown.endswith('...'),
           f"got={shown!r}")
-    check("截断后宽度不超 250px",
-          QFontMetrics(video_qt.ui_font()).horizontalAdvance(shown) <= 250,
+    check("截断后宽度不超标题列宽 (300px)",
+          QFontMetrics(video_qt.ui_font()).horizontalAdvance(shown)
+          <= video_qt.SNAPSHOT_TITLE_W,
           f"got={shown!r}")
     check("ToolTipRole 给的是**完整路径**",
           tip == video_qt.format_title(m3._files[0]), f"got={tip!r}")
@@ -757,10 +840,10 @@ def _run() -> int:
     # view.columnViewportPosition(c) —— 后者**就是**前者的定义 (Qt 里
     # QTableView::columnViewportPosition 直接转调 horizontalHeader()),
     # 差值按构造恒为 0, 永远不可能失败。改成**能被弄坏**的不变式:
-    # 列宽是应用自己定的 (45 / 250 / 328), 弄坏了就会红。
+    # 列宽是应用自己定的 (45 / 300 / 328), 弄坏了就会红。
     widths = [dlg5.view.columnWidth(c)
               for c in range(dlg5.model.columnCount())]
-    check("列宽: 序号 45 / 标题 250 / 每个时间点 328",
+    check("列宽: 序号 45 / 标题 300 / 每个时间点 328",
           dlg5.view.columnWidth(0) == video_qt.SNAPSHOT_IDX_W
           and dlg5.view.columnWidth(1) == video_qt.SNAPSHOT_TITLE_W
           and all(dlg5.view.columnWidth(c + 2) == video_qt.SNAPSHOT_CELL_W
