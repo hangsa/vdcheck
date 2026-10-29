@@ -77,7 +77,18 @@ Minor 已修完并经 scoped 复审。**下一步：Windows 实测（§7）→ �
 - **产品文档 §6 的 39 行 byte-for-byte 未动**；在表格**下方**加了「Tk 版对照」注记
   （#31/#35/#36/#38/#39 → 各自的 Qt 对应）
 
-### 3.3 **当前：Windows 实测（§7）**
+### 3.3 **当前：PR #1 已开，等 Windows 实测**
+
+- **PR**: https://github.com/hangsa/vdcheck/pull/1
+  （base `main` ← head `refactor/qtableview`，25 文件 +8702/−4150，**mergeable: clean**）
+- 分支已推送并跟踪 `origin/refactor/qtableview`（HEAD `1cdd740`）
+- ⚠️ **PR 会顺带带上本地 `main` 那个还没推的 `2849dfe`**（新增 `黑窗问题.md`）——
+  这是**需要的**：CHANGELOG 链到了它，不带就是死链
+- ⚠️ **`main` 本地比 `origin/main` 多一个 commit** → 合并时注意先推 `main`
+
+- **Windows 实测 8+4 项**（§7）—— 其中 **最小化→任务栏恢复不黑屏** 是整个重构的靶子,
+  macOS 复现不了 → **架构论证在 `黑窗问题.md`, 但至今没在 Windows 上实测过**
+- 之后: 合并到 `main`（`main` 现在仍是 Tk 版 v3.3；本分支是 Qt 版 v4.0）
 
 - 最终整体审查（opus，654 KB diff）结论: **Ready to merge? With fixes** ——
   Critical 0 / Important 3 / Minor 15 → **一次统一修复波**（`b6b4af1`）+
