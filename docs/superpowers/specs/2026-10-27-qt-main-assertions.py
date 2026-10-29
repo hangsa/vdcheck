@@ -40,11 +40,15 @@ def cleanup_tmpdirs() -> None:
 # 没有显示环境时 Qt 用 offscreen 平台 (会打一条字体族警告到 stderr, 不在范围)。
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    QItemSelectionModel, QMimeData, QPointF, Qt, QUrl,
+)
 from PySide6.QtGui import (  # noqa: E402
     QDragEnterEvent, QDropEvent, QFont, QFontMetrics,
 )
-from PySide6.QtWidgets import QApplication, QHeaderView  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication, QHeaderView, QStyle,
+)
 
 # QApplication 必须**先于** video_qt 建好: ui_font() 惰性求值时会拷贝当前
 # app 的默认字体, app 还不存在时字体族是空的 (family=''), 字宽度量整套
@@ -199,6 +203,67 @@ def _run() -> int:
     check("行高不是 Qt 的默认值 30px (说明确实设了)",
           win_row.view.rowHeight(0) != 30,
           f"got={win_row.view.rowHeight(0)}")
+
+    # ================================================================
+    section("选中行: 只有背景色变化, 没有当前格的边框 (用户反馈)")
+    # Windows 风格 (QWindowsVistaStyle) 会给**当前单元格**(current cell)画一个
+    # 边框 —— 在 SelectRows 的行选中下, 表现为行中间夹着**两条蓝色竖线**。
+    # 用户反馈: 「选中哪一行后只需要所在行背景色变化即可」。
+    # 修法: delegate 在 initStyleOption 里清掉 State_HasFocus (Qt 只给**当前格**
+    # 设这个标志; 它只是**画笔提示**, 不影响 currentIndex / 选中集合 / 键盘导航)。
+    #
+    # 这里断言的是**交给样式的 option 里的状态位** —— 像素级断言做不到:
+    # 那两条蓝线只在 Windows 风格下出现, 本机 (offscreen) 复现不了。
+    _cap = {}
+
+    class _SpyDelegate(video_qt.TruncatingDelegate):
+        def initStyleOption(self, option, index):
+            before = option.state
+            super().initStyleOption(option, index)
+            # **按 (行, 列) 记** —— 只按行记的话, 同一行里后面画的列会覆盖掉
+            # 当前格那一列的标志位, 断言就瞎了。
+            _cap[(index.row(), index.column())] = (before, option.state)
+
+    _win_sel = MainWindow()
+    _win_sel._add_result(make_info('a.mp4', '/x/a.mp4'))
+    _win_sel._add_result(make_info('b.mp4', '/x/b.mp4'))
+    _win_sel.show()
+    app.processEvents()
+    _v = _win_sel.view
+    _v.setItemDelegate(_SpyDelegate(_v))
+    _v.setCurrentIndex(_v.model().index(1, 1))
+    _v.selectionModel().select(
+        _v.model().index(1, 1),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows)
+    # **必须让 view 拿到键盘焦点** —— 焦点不在 view 上时, Qt 压根不给任何格设
+    # State_HasFocus, 下面那条断言就成了永真 (没有牙)。
+    _v.setFocus(Qt.OtherFocusReason)
+    app.processEvents()
+    _v.viewport().repaint()
+    app.processEvents()
+
+    _ncols = _v.model().columnCount()
+    check("view 拿到了键盘焦点 (否则下面的断言没有牙)",
+          _v.hasFocus(), f"got={_v.hasFocus()}")
+    # 当前格 (1, 1) 在 delegate 动手**之前**确实带 State_HasFocus ——
+    # 这条是「前提成立」的证明, 没有它后面那条就没意义。
+    check("前提: 当前格在 delegate 之前带 State_HasFocus (Qt 只给当前格设)",
+          bool(_cap.get((1, 1), (0, 0))[0] & QStyle.State_HasFocus),
+          f"got={bool(_cap.get((1, 1), (0, 0))[0] & QStyle.State_HasFocus)}")
+    check("当前格不再带 State_HasFocus (聚焦框 = Windows 上那两条蓝竖线)",
+          not bool(_cap[(1, 1)][1] & QStyle.State_HasFocus),
+          f"got={bool(_cap[(1, 1)][1] & QStyle.State_HasFocus)}")
+    _sel_cells = [k for k, (_b, st) in _cap.items() if st & QStyle.State_Selected]
+    check("选中行的**每一格**都带 State_Selected (整行高亮底色没丢)",
+          sorted(r for r, _c in _sel_cells) == [1] * _ncols,
+          f"got={len(_sel_cells)} 格, 行={sorted({r for r, _c in _sel_cells})}")
+    check("没被选中的行不带 State_Selected",
+          not [k for k, (_b, st) in _cap.items()
+               if k[0] == 0 and st & QStyle.State_Selected],
+          f"got={[k for k, (_b, st) in _cap.items() if k[0] == 0 and st & QStyle.State_Selected]}")
+    check("view 的 currentIndex 没被影响 (键盘行为不变)",
+          _v.currentIndex().row() == 1 and _v.currentIndex().column() == 1,
+          f"got={_v.currentIndex().row()},{_v.currentIndex().column()}")
 
     # ================================================================
     section("状态栏文案序列")

@@ -26,8 +26,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QDialog, QFileDialog,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QStatusBar, QStyledItemDelegate, QTableView,
-    QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QStatusBar, QStyle, QStyledItemDelegate,
+    QTableView, QVBoxLayout, QWidget,
 )
 
 from video_core import (
@@ -390,6 +390,27 @@ class VideoTableModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
 
+def _drop_focus_frame(option) -> None:
+    """去掉 option 里的**聚焦框**, 只留「选中」的高亮底色。
+
+    选中一行时, Qt 会给**当前单元格**(current cell, 也就是鼠标点的那一格)
+    画一个聚焦框。Windows 风格 (QWindowsVistaStyle) 把它画成**左右两条蓝竖线**
+    —— 在 `SelectRows` 的行选中下, 那两条线落在行中间, 看着像表格被划了一道。
+    用户反馈: 「选中哪一行后只需要所在行背景色变化即可, 不需要单元格左右边框的
+    蓝色竖线」。
+
+    `State_HasFocus` 就是那个聚焦框的开关 (Qt6 的 QStyle 里**没有** `State_Current`
+    —— 那是 Qt4 的老标志, QStyle.StateFlag 成员里不存在, 别去引用)。
+    去掉它, 样式就不会再画框; `State_Selected` (整行的高亮底色) **不动**
+    —— 选中依然看得见。
+
+    它只是**画笔提示**: 不影响 view 的 currentIndex、选中集合、键盘导航与
+    Enter 行为 —— 那些走的是 view 自己的状态, 不看 option。
+    与 Tk 版平价: 那边选中 = 只有背景色变化, 没有边框。
+    """
+    option.state &= ~QStyle.State_HasFocus
+
+
 class TruncatingDelegate(QStyledItemDelegate):
     """表格 delegate。
 
@@ -399,6 +420,7 @@ class TruncatingDelegate(QStyledItemDelegate):
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
         option.textElideMode = Qt.ElideNone
+        _drop_focus_frame(option)
 
 
 # ================================================================
@@ -628,6 +650,7 @@ class SnapshotDelegate(QStyledItemDelegate):
         super().initStyleOption(option, index)
         # 标题文字在 model 里已经按 300px 截断好了, 别让 Qt 再 elide 一次
         option.textElideMode = Qt.ElideNone
+        _drop_focus_frame(option)
 
     def paint(self, painter, option, index):
         model = index.model()

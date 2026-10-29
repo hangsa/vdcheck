@@ -39,13 +39,15 @@ def cleanup_tmpdirs() -> None:
 # 没有显示环境时 Qt 用 offscreen 平台 (会打一条字体族警告到 stderr, 不在范围)。
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QBuffer, QEvent, QPoint, QPointF, Qt  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    QBuffer, QEvent, QItemSelectionModel, QPoint, QPointF, Qt,
+)
 from PySide6.QtGui import (  # noqa: E402
     QColor, QFont, QFontMetrics, QImage, QKeyEvent, QMouseEvent, QPainter,
     QPixmap,
 )
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QLabel, QMessageBox, QPushButton, QStyleOptionViewItem,
+    QApplication, QLabel, QMessageBox, QPushButton, QStyle, QStyleOptionViewItem,
     QTableView,
 )
 
@@ -797,6 +799,45 @@ def _run() -> int:
         _double_click(edit, x)
         check(f"双击第 {idx} 个字符 → 只选 {label} 段 ({want!r})",
               edit.selectedText() == want, f"got={edit.selectedText()!r}")
+
+    # ================================================================
+    section("选中行: 没有当前格的边框 (只有背景色变化)")
+    # 与主表格同一件事: 选中行时 Windows 风格会给**当前格**画边框
+    # (两条蓝竖线)。delegate 清掉 State_HasFocus 即可, 整行高亮不受影响。
+    _cap = {}
+
+    class _SpyDelegate(video_qt.SnapshotDelegate):
+        def initStyleOption(self, option, index):
+            before = option.state
+            super().initStyleOption(option, index)
+            _cap[(index.row(), index.column())] = (before, option.state)
+
+    _dlg_sel = SnapshotDialog(win4, files, out_dir)
+    _dlg_sel.model.set_time_tokens(['00:00:07:24'])
+    _dlg_sel._sync_columns()
+    _dlg_sel.resize(900, 500)
+    _dlg_sel.show()
+    app.processEvents()
+    _sv = _dlg_sel.view
+    _sv.setItemDelegate(_SpyDelegate(_sv))
+    _sv.setCurrentIndex(_dlg_sel.model.index(0, 1))
+    _sv.selectionModel().select(
+        _dlg_sel.model.index(0, 1),
+        QItemSelectionModel.Select | QItemSelectionModel.Rows)
+    _sv.setFocus(Qt.OtherFocusReason)
+    app.processEvents()
+    _sv.viewport().repaint()
+    app.processEvents()
+
+    check("前提: 当前格在 delegate 之前带 State_HasFocus",
+          bool(_cap.get((0, 1), (0, 0))[0] & QStyle.State_HasFocus),
+          f"got={bool(_cap.get((0, 1), (0, 0))[0] & QStyle.State_HasFocus)}")
+    check("当前格不再带 State_HasFocus (Windows 上那两条蓝竖线没了)",
+          not bool(_cap[(0, 1)][1] & QStyle.State_HasFocus),
+          f"got={bool(_cap[(0, 1)][1] & QStyle.State_HasFocus)}")
+    check("序号格与标题格仍带 State_Selected (整行高亮没丢)",
+          all(_cap[(0, c)][1] & QStyle.State_Selected for c in (0, 1)),
+          f"got={[bool(_cap[(0, c)][1] & QStyle.State_Selected) for c in (0, 1)]}")
 
     # ================================================================
     section("横向可滚: 5 个时间点时列总宽超出视口")
