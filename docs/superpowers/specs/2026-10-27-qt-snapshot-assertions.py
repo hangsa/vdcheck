@@ -463,7 +463,7 @@ def _run() -> int:
     check("快照网格的行高装得下缩略图 (>= 180px)",
           dlg_h.view.rowHeight(0) >= video_qt.SNAPSHOT_MEM_H,
           f"got={dlg_h.view.rowHeight(0)} need>={video_qt.SNAPSHOT_MEM_H}")
-    check("行高 = SNAPSHOT_ROW_H (196px)",
+    check("行高 = SNAPSHOT_ROW_H (188px, 缩略图上下各留 4px)",
           dlg_h.view.rowHeight(0) == video_qt.SNAPSHOT_ROW_H,
           f"got={dlg_h.view.rowHeight(0)} want={video_qt.SNAPSHOT_ROW_H}")
     # 前置: 行高得真的比 Qt 默认的 30px 高得多, 否则上面两条跟「没设行高」

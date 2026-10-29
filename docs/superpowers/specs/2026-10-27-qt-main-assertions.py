@@ -178,25 +178,26 @@ def _run() -> int:
 
     # ================================================================
     section("行高: 主表格的行高按**字体高度**算 (用户反馈: 字体略小且紧凑)")
-    # 行高**不写死**: QFontMetrics(ui_font()).height() + 18 (上下各 9px 留白)。
-    # 10pt 下 = 16 + 18 = 34px (Qt 默认是 30px)。
+    # 行高**不写死**: QFontMetrics(ui_font()).height() + 12 (上下各 6px 留白)。
+    # 10pt 下 = 16 + 12 = 28px。**刻意不等于** Qt 的默认行高 (10pt 下正好
+    # 30px) —— 否则「设了行高」与「没设」在这两条断言里分不开。
     # 这里**按公式重算一遍**, 不引用实现里的常量 —— 常量改了断言要跟着红。
-    expected_row_h = QFontMetrics(ui_font()).height() + 18
+    expected_row_h = QFontMetrics(ui_font()).height() + 12
     win_row = MainWindow()
     win_row._add_result(make_info('a.mp4', '/x/a.mp4'))
     win_row.show()
     app.processEvents()
-    check("行高 = 字体高 + 18 (10pt → 34px)",
+    check("行高 = 字体高 + 12 (10pt → 28px)",
           win_row.view.rowHeight(0) == expected_row_h,
           f"got={win_row.view.rowHeight(0)} want={expected_row_h}")
     check("行高确实设到了 verticalHeader 上 (defaultSectionSize)",
           win_row.view.verticalHeader().defaultSectionSize() == expected_row_h,
           f"got={win_row.view.verticalHeader().defaultSectionSize()} "
           f"want={expected_row_h}")
-    # 「比 Qt 默认的 30px 宽裕」是用户明确要的 —— 少了这条, 上面两条在
-    # 某个平台上 (字体高恰好 12) 会跟 Qt 默认值撞上, 断言就废了。
-    check("行高比 Qt 默认的 30px 大 (用户要求加行高)",
-          win_row.view.rowHeight(0) > 30,
+    # 「不等于 Qt 默认的 30px」是**故意**的 —— 少了这条, 上面两条在某个平台上
+    # (算出来的值恰好是 30) 就跟「压根没设行高」分不开, 断言就废了。
+    check("行高不是 Qt 的默认值 30px (说明确实设了)",
+          win_row.view.rowHeight(0) != 30,
           f"got={win_row.view.rowHeight(0)}")
 
     # ================================================================

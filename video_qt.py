@@ -422,9 +422,12 @@ SNAPSHOT_MEM_W = EXTRACT_THUMB_W // 2
 # 缩略图在格子里的**自然高度** (16:9 的 640x360 → 320x180)。
 # 行高按它算 —— 之前行高是 Qt 默认的 30px, 而缩略图是 320x180,
 # _paint_pixmap 把它等比缩到 53x30 显示 (只有 1/6 大小)。
-# Tk 版每格是个 320x180 的 tk.Label, 行高自然就是 ~196px。
+# 行高只比缩略图**高 8px** (上下各 4px) —— 与缩略图**左右**各留 4px 一致
+# (SNAPSHOT_CELL_W = 缩略图宽 + 8)。留白再大就显松了 (2026-10-29 用户反馈)。
+# ⚠️ 行高**不能小于**缩略图高, 否则 _paint_pixmap 会把图等比缩小 —— 那正是
+# 「图片显示太小」那个 bug 的成因。
 SNAPSHOT_MEM_H = 180
-SNAPSHOT_ROW_H = SNAPSHOT_MEM_H + 16   # 196
+SNAPSHOT_ROW_H = SNAPSHOT_MEM_H + 8    # 188
 # ⚠️ 已知差异: 非 16:9 的视频 (extract_frame 只定宽 640, 高度按原比例)
 # 缩略图更高, 会被 _paint_pixmap 等比缩到格子里 —— 不会变形, 但会比
 # 16:9 的略小。Tk 版是按内容自适应行高的, 这里固定行高。
@@ -1370,9 +1373,13 @@ class MainWindow(QMainWindow):
         self.view.setItemDelegate(TruncatingDelegate(self.view))
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
         # 行高按**字体高度**算, 不写死 —— 以后再调字号不会失配。
-        # +18 = 上下各 9px 的留白 (10pt 下 = 16 + 18 = 34px)。
+        # +12 = 上下各 6px 的留白 (10pt 下 = 16 + 12 = 28px)。
+        # 留白比 Tk 版 (Label pady=2 → 上下各 2px) 宽, 但 Tk 的行高只有 ~21px;
+        # 10pt 的字需要更多呼吸感, 再宽就显得松 (2026-10-29 用户反馈)。
+        # 刻意**不等于** Qt 的默认行高 (10pt 下正好是 30px) —— 否则
+        # 「设了行高」与「没设」在断言里分不开 (见 qt-main 的那条守卫断言)。
         self.view.verticalHeader().setDefaultSectionSize(
-            QFontMetrics(ui_font()).height() + 18)
+            QFontMetrics(ui_font()).height() + 12)
         self._setup_header()
         root.addWidget(self.view, 1)
 
