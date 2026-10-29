@@ -13,9 +13,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: 检查 Python 版本 —— **真的比版本**, 不是只看有没有 python。
-:: 源码用了 X | None 联合类型注解 (PEP 604), 实际需要 3.10+。
-:: (">=" 写在双引号里, cmd 不会把它当重定向符)
+:: 检查 Python 版本 —— 真的比版本, 不是只看有没有 python。
+:: 源码用了 PEP 604 的联合类型注解（X 或 None 那种写法）, 实际需要 3.10+。
+:: 版本比较里的大于等于号写在双引号里, cmd 不会把它当重定向符。
 python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
 if errorlevel 1 (
     echo [错误] 需要 Python 3.10 或更高版本

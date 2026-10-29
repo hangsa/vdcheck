@@ -87,7 +87,7 @@ _snapshot_fail_font: QFont | None = None
 def snapshot_fail_font() -> QFont:
     """失败字形 '×' 的字体: **14pt 粗体**。
 
-    与 Tk 原版一致 (video_checker.py: font=('TkDefaultFont', 14, 'bold')) ——
+    与 Tk 原版一致 (Tk 版的失败字形同样是 14 号粗体) ——
     「失败」这个状态要一眼看得见, 9pt 常规体不够显眼。
 
     惰性求值 (跟 ui_font() 一样): 字体度量要 QGuiApplication 在场。
@@ -607,7 +607,7 @@ class SnapshotDelegate(QStyledItemDelegate):
         text, color = self._glyph(state)
         if state is not None and state.status == 'failed':
             # 失败 '×' 用 **14pt 粗体** —— 与 Tk 原版一致
-            # (video_checker.py: font=('TkDefaultFont', 14, 'bold'))。
+            # (Tk 版的失败字形同样是 14 号粗体)。
             # 失败这个状态得一眼看得见, 9pt 常规体不够显眼。
             painter.setFont(snapshot_fail_font())
         painter.setPen(color)

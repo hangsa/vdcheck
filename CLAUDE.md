@@ -60,7 +60,7 @@ Three modules, ~2.6k lines total:
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
 - `scan_video_files(directory, recursive)` — enumerates files matching `VIDEO_EXTENSIONS` (36 extensions, case-insensitive; `os.walk` when recursive, `os.listdir` otherwise, unsorted)
-- `run_ffprobe(file_path)` — invokes ffprobe with a 30s timeout, returns parsed JSON or `None`. Hides the console window via `STARTUPINFO`/`CREATE_NO_WINDOW`, **guarded by `sys.platform == 'win32'`** (unguarded, the worker thread died on macOS/Linux)
+- `run_ffprobe(file_path)` — invokes ffprobe with a 30s timeout, returns parsed JSON or `None`. Hides the console window via `STARTUPINFO`/`CREATE_NO_WINDOW`, **guarded by `sys.platform == 'win32'`** (before 2026-10-27 there was **no** guard — the worker thread died on macOS/Linux)
 - `extract_frame(input_path, seconds, output_path)` — ffmpeg, writes a **640px-wide PNG**
 - `parse_video_info(data, full_path, base_path, bitrate_std, sample_rate_std)` — extracts resolution, fps, bitrate (prefers stream-level over format-level), codecs, channels, sample rate, duration, size, container format, and relative path into a `VideoInfo` dataclass. `is_passing` requires **both** `bitrate_kbps >= bitrate_std` AND `sample_rate_passing` (no audio stream counts as passing)
 - `parse_threshold(text)` — parses a threshold; rejects non-positive **and** `inf`/`nan`
@@ -88,7 +88,7 @@ Three modules, ~2.6k lines total:
 - Row 2: 码率标准 + 采样率标准 inputs + 定点截图 button, with 清除记录 pinned to the right via a 272px trailing spacing (visual alignment with Row 1's path entry right edge)
 - Center: `QTableView` with the 11 columns above
 - Bottom: 迁移地址 + 浏览 + 移动达标文件 + 移动全部文件
-- Status bar: a single `QStatusBar` line. Terminal states append the tally via `set_status(text, with_counts=True)` → `检测完成：共 10 · 达标 8 · 不达标 2`; intermediate states (就绪 / 正在检测… (3/10) a.mp4) show only the progress text. The "共 N" in the tally counts **results produced**; the M in "已完成 N/M" is the **total files found** — different sources, not a contradiction.
+- Status bar: a single `QStatusBar` line. Terminal states append the tally via `set_status(text, with_counts=True)` → `检测完成：共 10 · 达标 8 · 不达标 2`; intermediate states (就绪 / 正在检测... (3/10) a.mp4) show only the progress text. The "共 N" in the tally counts **results produced**; the M in "已完成 N/M" is the **total files found** — different sources, not a contradiction.
 - `<Control-o>` opens the browse-folder dialog — **the only shortcut in the app**
 - Drag-and-drop: the window `setAcceptDrops(True)` and an `eventFilter` is installed on `view.viewport()` and `view.horizontalHeader()`, so the **whole table area** (header + body) accepts drops. Paths come from `event.mimeData().urls()` → `toLocalFile()`.
 
