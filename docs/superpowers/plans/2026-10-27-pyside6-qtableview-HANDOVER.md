@@ -1,7 +1,8 @@
 # 重构交接单 — PySide6 / QTableView
 
 > **这份文件是给「下次接手的人」看的**，包含不读代码就不知道的东西。
-> 读完这一份就能从断点继续，不用把整个会话重塞进上下文。
+> 重构已合并到 `main`，**没有断点**；这里是「这个项目是怎么回事」的索引，
+> 不是待办清单。
 >
 > 最后更新: 2026-10-29
 
@@ -9,9 +10,9 @@
 
 ## 0. 一句话状态
 
-表格的 **Qt 表格模型**、**Qt 主窗口**、**定点截图弹窗**（Task 6）、**入口切换 + 打包**
-（Task 7）都已实现并通过审查；**最终整体审查**（opus）已过，3 个 Important + 11 个
-Minor 已修完并经 scoped 复审。**下一步：Windows 实测（§7）→ 合并到 `main`。**
+**Tk → PySide6 的重构已全部完成并合并到 `main`**（v4.0）。P1–P7 每个任务都走了
+「实施者 → 任务审查 → 返工轮 → scoped 复审」，外加一次最终整体审查（opus）；
+用户试用后的三轮反馈也各自修了、验过。**没有待办了。**
 
 ---
 
@@ -19,17 +20,18 @@ Minor 已修完并经 scoped 复审。**下一步：Windows 实测（§7）→ �
 
 | | |
 |---|---|
-| 主 checkout | `/Users/hail/Codes/vdcheck`（**仍是 Tk 版，可正常使用**；分支 `main`，HEAD `2849dfe`） |
-| 重构 worktree | `/Users/hail/Codes/vdcheck/.claude/worktrees/refactor-qtableview` |
-| 分支 | `refactor/qtableview`（**未推送**） |
-| HEAD | `bcb316c` |
-| 提交数 | 36（`1d16bc7..HEAD`） |
+| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.0**；分支 `main`，HEAD `06ee6d8`） |
+| 重构 worktree | **已删除**（合并后清理掉了） |
+| 分支 | `refactor/qtableview` **已合并并删除**（本地 + 远端都删了） |
+| HEAD | `06ee6d8` |
+| 提交数 | 44（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
 | 产品文档 | `docs/产品文档.md`（**框架无关的行为规格 = 验收基准**） |
-| SDD ledger | `.superpowers/sdd/2026-10-27-pyside6-qtableview/progress.md`（**gitignored**，在盘上） |
+| SDD ledger | **已删除**（按 SDD 流程，最终审查干净后清掉；关键裁决已抄进本文件 §4） |
 
-**所有命令都在 worktree 目录下跑。** 主 checkout 与 worktree 的 git 状态是分开的。
+**所有命令都在主 checkout 里跑。** 合并是快进（零冲突），合并后在 `main` 上重跑了
+14 个断言脚本 —— 全绿。
 
 ---
 
@@ -44,13 +46,15 @@ Minor 已修完并经 scoped 复审。**下一步：Windows 实测（§7）→ �
 | P5 Qt 主窗口 | ✅ | `d46d051` | **三轮返工**后 Approved，qt-main 126 条 / qt-table 116 条 |
 | P6 Qt 定点截图弹窗 | ✅ | `19f4a93` | 审查 + 1 轮返工 + scoped 复审后通过，qt-snapshot 76 条 |
 | P7 入口切换 + 打包 | ✅ | `eb229c7` | 审查 + 1 轮返工 + scoped 复审后通过 |
+| 试用反馈三轮 | ✅ | `c568b06` `d139eb0` `feb00c8` `f3f7d5f` | 审查 + 返工；控制器独立验证 |
+| **合并到 `main`** | ✅ | `06ee6d8` | 快进；合并后重跑全量断言全绿；PR #1 MERGED |
 
 **当前 14 个断言脚本全绿。** `video_checker.py` 保持 CRLF（0 裸 LF）。
-**P1–P7 全部完成 —— 只剩最终整体审查 + Windows 实测。**
+**全部完成，没有待办。**
 
 ---
 
-## 3. 断点：下一步做什么
+## 3. 各项的完成情况（**没有断点了**）
 
 ### 3.1 Task 6（Qt 定点截图弹窗 + 放大窗口）—— ✅ **已完成**
 
@@ -77,31 +81,35 @@ Minor 已修完并经 scoped 复审。**下一步：Windows 实测（§7）→ �
 - **产品文档 §6 的 39 行 byte-for-byte 未动**；在表格**下方**加了「Tk 版对照」注记
   （#31/#35/#36/#38/#39 → 各自的 Qt 对应）
 
-### 3.3 **当前：PR #1 已开，等 Windows 实测**
+### 3.3 Task 8 —— 用户试用反馈三轮 —— ✅ **已完成**（`c568b06` / `d139eb0` / `feb00c8` / `f3f7d5f`）
 
-- **PR**: https://github.com/hangsa/vdcheck/pull/1
-  （base `main` ← head `refactor/qtableview`，25 文件 +8702/−4150，**mergeable: clean**）
-- 分支已推送并跟踪 `origin/refactor/qtableview`（HEAD `1cdd740`）
-- ⚠️ **PR 会顺带带上本地 `main` 那个还没推的 `2849dfe`**（新增 `黑窗问题.md`）——
-  这是**需要的**：CHANGELOG 链到了它，不带就是死链
-- ⚠️ **`main` 本地比 `origin/main` 多一个 commit** → 合并时注意先推 `main`
+- 字体 9 → **10pt**；主表格行高 **28px**；标题列 **300px**；四个可排序列各 **+10px**
+- **修了一个真 bug**: 快照网格**从没设过行高** → Qt 默认 30px 把 320×180 的缩略图
+  等比压成 **53×30**（只有 1/6 大小）→ 现按原尺寸 **320×180** 显示
+- **修了一个截断缺陷**: `truncate_text` 快路径的宽度估算在 10pt 下不再是上界
+  （`W` 实测 13px > 估算的 8px）→ 会放过超宽文本导致溢出列宽 → 改成 **13**（实测上界）
+- 选中行时清掉 `State_HasFocus` → **只剩整行背景色变化，没有当前格的两条蓝竖线**
+- 任务审查给出 1 Important + 5 Minor，**全部修完**；scoped 复审因 429 配额中断，
+  那 6 条改由**控制器独立验证**（快路径穷举 (字符×长度) 组合无一组溢出、
+  `per_char=13` 正好等于实测上界、列宽 1185px 无横向滚动条、缩略图墨迹包围盒
+  恰为 320×180）→ **不再补派复审**
+- 14/14 断言全绿
 
-- **Windows 实测 8+4 项**（§7）—— 其中 **最小化→任务栏恢复不黑屏** 是整个重构的靶子,
-  macOS 复现不了 → **架构论证在 `黑窗问题.md`, 但至今没在 Windows 上实测过**
-- 之后: 合并到 `main`（`main` 现在仍是 Tk 版 v3.3；本分支是 Qt 版 v4.0）
+### 3.4 合并 —— ✅ **已完成**
 
-- 最终整体审查（opus，654 KB diff）结论: **Ready to merge? With fixes** ——
+- **PR #1**: https://github.com/hangsa/vdcheck/pull/1 —— GitHub 自动标记为 **MERGED**
+- 合并方式: **快进**（`2849dfe` 本来就是分支的祖先 → 零冲突）
+- 合并后在 `main` 上**重跑** 14 个断言脚本 → 全绿；`video_checker.py` bare LF = 0
+- 清理: worktree 已删、临时分支已删（本地 + 远端）
+- 最终整体审查（opus，654 KB diff）结论 *Ready to merge? With fixes* ——
   Critical 0 / Important 3 / Minor 15 → **一次统一修复波**（`b6b4af1`）+
-  **两个极小的收尾轮**（`76b297f` / `bcb316c`），每一轮都过了 scoped 复审，
-  **最终无开放 finding**
-- 修了什么: 退出路径的守卫漏洞（`try/finally` + 异常路径 `os._exit(1)`）、
-  **changelog**（新建 `CHANGELOG.md`）、**回归套件去掉 tkinter 依赖**、
-  产品文档 §4.1 的 Tk 悬空引用、恒真断言、断言名写反、死代码、
-  **基于不存在的 Python 机制**的注释、`run_ffprobe`/`extract_frame` 不可达的
-  `AttributeError` 分支、tooltip 样式表、「扫两遍计数不累加」的**行为**测试
-- **剩下一件事**: **Windows 实测 8+4 项**（§7）—— 其中 **最小化→任务栏恢复不黑屏**
-  是整个重构的靶子, macOS 复现不了
-- 之后: 合并到 `main`（`main` 现在还是 Tk 版 v3.3）
+  **两个收尾轮**（`76b297f` / `bcb316c`），**最终无开放 finding**
+
+### 3.5 Windows 实测 —— **不再是门禁**
+
+用户已在实机上跑过并给出三轮反馈（字体/留白/缩略图/选中样式），逐条都定位到根因
+并修掉了。§7 的清单**保留作参考**（将来在 Windows 上重新打包时可以用），但它
+**不再阻塞任何东西**。
 
 ---
 
@@ -182,20 +190,25 @@ Minor 已修完并经 scoped 复审。**下一步：Windows 实测（§7）→ �
 
 ## 6. 下次开工的检查清单
 
+**重构已全部完成并合并到 `main`。** 下面是「将来如果还要动这个仓库」的检查清单：
+
 1. 读这一份（不用读整个会话）
-2. `cd` 到 worktree，`git log --oneline -3`，确认 HEAD 是 `bcb316c`
+2. `cd` 到主 checkout（`/Users/hail/Codes/vdcheck`），`git log --oneline -3`，
+   确认 HEAD 是 `06ee6d8` 附近
 3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $f"; done`
    （Qt 脚本在本机需要 `QT_QPA_PLATFORM=offscreen`）
 4. ~~补 Task 5 的 scoped 复审~~ → **已完成**
 5. ~~Task 6 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**
 6. ~~Task 7 → 任务审查 → 返工轮 → scoped 复审~~ → **已完成**
 7. ~~最终整体审查 → 统一修复波 → scoped 复审 → 两个收尾轮~~ → **已完成，无开放 finding**
-8. **Windows 实测**（§7）—— **靶子是最小化→恢复的黑屏，macOS 复现不了**
-9. 合并到 `main`（`main` 现在仍是 Tk 版 v3.3；本分支是 Qt 版 v4.0）
+8. ~~用户试用反馈三轮 → 定位根因 → 修 → 验证~~ → **已完成**
+9. ~~合并到 `main`~~ → **已完成**（快进，合并后重跑全量断言全绿；PR #1 GitHub 标记 MERGED）
 
 ---
 
-## 7. Windows 上必须人工确认的
+## 7. Windows 上的实测清单（**参考用，不是门禁**）
+
+> 用户已在实机上跑过并给出三轮反馈（字体 / 留白 / 缩略图 / 选中样式），逐条都定位到根因并修掉了。下面这份清单**保留**是为了将来在 Windows 上重新打包时能快速过一遍，**不再阻塞任何东西**。
 
 | # | 项 | 怎么看 |
 |---|---|---|
