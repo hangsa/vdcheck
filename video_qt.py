@@ -838,7 +838,7 @@ class SnapshotDialog(QDialog):
 
     def __init__(self, main, files: list[VideoInfo], output_dir: str,
                  default_time_tokens: tuple[str, ...] =
-                 ('00:00:07:24', '00:00:08:00')):
+                 ('00:00:07:24', '00:00:08:00', '00:01:00:00')):
         super().__init__(main)
         self._main = main
         self._files = list(files)
@@ -856,7 +856,12 @@ class SnapshotDialog(QDialog):
 
         self.setWindowTitle('定点截图')
         self.setModal(True)
-        self.resize(1200, 700)
+        # 宽度按「3 个时间点的缩略图一屏放得下」算:
+        #   序号 45 + 标题 300 + 3 × 时间点列 328 = 1329px
+        # 窗口宽 = 列宽总和 + 边距 12 + 纵向滚动条 18 = 1359 → 取 1380
+        # (余量 ~21px)。1200 那个旧值只能放下 2 个时间点 (1057px),
+        # 第 3 个会被挤到横向滚动条外面去。
+        self.resize(1380, 700)
         self._build_widgets()
 
     # ---- 界面 ----

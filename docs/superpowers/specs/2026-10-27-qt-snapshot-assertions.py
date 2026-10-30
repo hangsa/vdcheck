@@ -348,18 +348,44 @@ def _run() -> int:
     win = video_qt.MainWindow()
     dlg = SnapshotDialog(win, [make_info()], '/tmp/does/not/exist/snapshot')
     tokens = [e.text() for e in dlg._tp_entries]
-    check("默认两个时间点 00:00:07:24 / 00:00:08:00",
-          tokens == ['00:00:07:24', '00:00:08:00'], f"got={tokens}")
+    check("默认三个时间点 00:00:07:24 / 00:00:08:00 / 00:01:00:00",
+          tokens == ['00:00:07:24', '00:00:08:00', '00:01:00:00'],
+          f"got={tokens}")
     dlg._add_time_token_entry('00:00:00:00')
     tokens = [e.text() for e in dlg._tp_entries]
     check("「+」追加的是 00:00:00:00",
-          len(tokens) == 3 and tokens[2] == '00:00:00:00', f"got={tokens}")
+          len(tokens) == 4 and tokens[3] == '00:00:00:00', f"got={tokens}")
     btn_texts = [b.text() for b in dlg.findChildren(QPushButton)]
     check("**没有删除按钮** (清空输入框即删除)",
           not any('删除' in t or '移除' in t or '-' == t for t in btn_texts),
           f"got={btn_texts}")
     check("只有一个「+」按钮",
           btn_texts.count('+') == 1, f"got={btn_texts}")
+
+    # ================================================================
+    section("弹窗默认宽度: 3 个时间点的缩略图一屏放得下")
+    # 宽度预算: 序号 45 + 标题 300 + 3 × 328 = 1329px。
+    # 窗口宽 = 1329 + 边距 12 + **纵向滚动条 18**(文件多时会出现)
+    #        = 1359 → 实现取 1380 (余量 ~21px)。
+    _need = (video_qt.SNAPSHOT_IDX_W + video_qt.SNAPSHOT_TITLE_W
+             + 3 * video_qt.SNAPSHOT_CELL_W)
+    for _n, _label in ((1, '文件少 (无纵向滚动条)'), (12, '文件多 (有纵向滚动条)')):
+        _d = SnapshotDialog(win, [make_info() for _ in range(_n)],
+                            '/tmp/does/not/exist/snapshot')
+        _d.show()
+        app.processEvents()
+        # 起跑后网格才按时间点重建列 —— 这里手动走一遍那两步
+        _d.model.set_time_tokens(['00:00:07:24', '00:00:08:00', '00:01:00:00'])
+        _d._sync_columns()
+        app.processEvents()
+        _vp = _d.view.viewport().width()
+        _hsb = _d.view.horizontalScrollBar()
+        check(f"默认宽度下 3 个时间点一屏放得下 ({_label})",
+              _d.width() >= _need and _vp >= _need and _hsb.maximum() == 0,
+              f"窗口={_d.width()} 视口={_vp} 需要={_need} "
+              f"横向滚动条 max={_hsb.maximum()} "
+              f"纵向滚动条={_d.view.verticalScrollBar().isVisible()}")
+        _d.close()
 
     # ================================================================
     section("截图地址: 默认 / 「浏览」套一层 snapshot / 不建目录")
@@ -633,8 +659,9 @@ def _run() -> int:
     check("输出文件名 {base}_t{c+1}_{00-00-07-24}.png",
           os.path.exists(os.path.join(out_dir, expected_name)),
           f"got={sorted(os.listdir(out_dir)) if os.path.isdir(out_dir) else None}")
-    check("状态行: 抽帧完成: 2/2 (2 成功, 0 失败)",
-          dlg3.status_label.text() == '抽帧完成: 2/2 (2 成功, 0 失败)',
+    _n = len(dlg3._tp_entries)      # 默认时间点数 (现在 3 个)
+    check(f"状态行: 抽帧完成: {_n}/{_n} ({_n} 成功, 0 失败)",
+          dlg3.status_label.text() == f'抽帧完成: {_n}/{_n} ({_n} 成功, 0 失败)',
           f"got={dlg3.status_label.text()!r}")
     check("抽帧完按钮回到「开始截图」",
           dlg3.action_btn.text() == '开始截图',
@@ -684,8 +711,10 @@ def _run() -> int:
     check("有失败时也跑完了", finished, f"state={dlg_fail._state}")
     check("_failed_count == 1", dlg_fail._failed_count == 1,
           f"got={dlg_fail._failed_count}")
-    check("状态行: 抽帧完成: 2/2 (1 成功, 1 失败)",
-          dlg_fail.status_label.text() == '抽帧完成: 2/2 (1 成功, 1 失败)',
+    _nf = len(dlg_fail._tp_entries)
+    check(f"状态行: 抽帧完成: {_nf}/{_nf} ({_nf - 1} 成功, 1 失败)",
+          dlg_fail.status_label.text()
+          == f'抽帧完成: {_nf}/{_nf} ({_nf - 1} 成功, 1 失败)',
           f"got={dlg_fail.status_label.text()!r}")
     check("失败的 cell 状态是 failed",
           dlg_fail.model.cell_state(0, 3) is not None
