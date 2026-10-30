@@ -892,6 +892,13 @@ class SnapshotDialog(QDialog):
         self._tp_layout.setContentsMargins(0, 0, 0, 0)
         self._tp_layout.setSpacing(5)
         row2.addLayout(self._tp_layout)
+        # 余量给这一块 —— 不给的话 QHBoxLayout 会把多出来的宽度**分给
+        # 「时间点:」标签**, 标签的格子被撑到近 1000px, 时间点入口就被
+        # 推到行的最右边去了 (用户 2026-10-30 反馈)。
+        # 加了 stretch 之后: 入口紧挨「时间点:」标签, 「+」仍在最右 ——
+        # 与 Tk 版一致 (Tk 里 entries 装在一个 expand=True 的 frame 里,
+        # frame 内的 entry 靠左, 「+」pack 在 frame 之后 → 落在最右)。
+        row2.addStretch(1)
         add_btn = QPushButton('+')
         add_btn.setFixedWidth(30)
         add_btn.clicked.connect(lambda: self._add_time_token_entry('00:00:00:00'))

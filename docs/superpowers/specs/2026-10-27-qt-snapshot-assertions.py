@@ -363,6 +363,46 @@ def _run() -> int:
           btn_texts.count('+') == 1, f"got={btn_texts}")
 
     # ================================================================
+    section("时间点入口的位置: 紧挨「时间点:」标签")
+    # 2026-10-30 用户反馈: 入口被推到了行的最右边。
+    # 根因: QHBoxLayout 把多出来的宽度分给了「时间点:」标签 (标签的格子
+    # 被撑到近 1000px) → 入口落在标签右边很远的地方。
+    # 修法: 标签与入口之间加一个 stretch, 余量全给它, 「+」仍在最右
+    # (与 Tk 版一致: Tk 里 entries 在 expand=True 的 frame 里靠左,
+    #  「+」pack 在 frame 之后 → 落在最右)。
+    _dp = SnapshotDialog(win, [make_info()], '/tmp/does/not/exist/snapshot')
+    _dp.show()
+    app.processEvents()
+    _lbl = next(l for l in _dp.findChildren(QLabel) if l.text() == '时间点:')
+    _plus = next(b for b in _dp.findChildren(QPushButton) if b.text() == '+')
+    _lx = _lbl.mapTo(_dp, _lbl.rect().topLeft()).x() + _lbl.width()
+    _ex = _dp._tp_entries[0].mapTo(_dp, _dp._tp_entries[0].rect().topLeft()).x()
+    check("第一个时间点入口紧挨「时间点:」标签 (间距 ≤ 12px)",
+          0 <= _ex - _lx <= 12,
+          f"标签右边={_lx}px 入口左边={_ex}px 间距={_ex - _lx}px")
+    check("各入口按顺序紧挨排列 (间距 ≤ 12px)",
+          all(0 <= (_dp._tp_entries[i + 1].mapTo(
+              _dp, _dp._tp_entries[i + 1].rect().topLeft()).x()
+              - (_dp._tp_entries[i].mapTo(
+                  _dp, _dp._tp_entries[i].rect().topLeft()).x()
+                  + _dp._tp_entries[i].width())) <= 12
+              for i in range(len(_dp._tp_entries) - 1)),
+          f"x={[_dp._tp_entries[i].mapTo(_dp, _dp._tp_entries[i].rect().topLeft()).x() for i in range(len(_dp._tp_entries))]}")
+    check("「+」按钮仍在行的最右 (与 Tk 版一致)",
+          _plus.mapTo(_dp, _plus.rect().topLeft()).x() >= _dp.width() - 60,
+          f"x={_plus.mapTo(_dp, _plus.rect().topLeft()).x()} "
+          f"窗口宽={_dp.width()}")
+    # 「+」追加的入口要排在「+」按钮**前面**
+    _dp._add_time_token_entry('00:00:00:00')
+    app.processEvents()
+    _last_x = _dp._tp_entries[-1].mapTo(_dp, _dp._tp_entries[-1].rect().topLeft()).x()
+    check("新增的入口排在「+」按钮前面",
+          _last_x < _plus.mapTo(_dp, _plus.rect().topLeft()).x(),
+          f"新入口 x={_last_x} 「+」x="
+          f"{_plus.mapTo(_dp, _plus.rect().topLeft()).x()}")
+    _dp.close()
+
+    # ================================================================
     section("弹窗默认宽度: 3 个时间点的缩略图一屏放得下")
     # 宽度预算: 序号 45 + 标题 300 + 3 × 328 = 1329px。
     # 窗口宽 = 1329 + 边距 12 + **纵向滚动条 18**(文件多时会出现)
