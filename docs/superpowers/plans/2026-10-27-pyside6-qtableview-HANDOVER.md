@@ -4,7 +4,7 @@
 > 重构已合并到 `main`，**没有断点**；这里是「这个项目是怎么回事」的索引，
 > 不是待办清单。
 >
-> 最后更新: 2026-10-29
+> 最后更新: 2026-11-02（同步 HEAD 与文档漂移，内容不变）
 
 ---
 
@@ -20,10 +20,10 @@
 
 | | |
 |---|---|
-| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.0**；分支 `main`，HEAD `06ee6d8`） |
+| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.0**；分支 `main`，HEAD `03dddfe`） |
 | 重构 worktree | **已删除**（合并后清理掉了） |
 | 分支 | `refactor/qtableview` **已合并并删除**（本地 + 远端都删了） |
-| HEAD | `06ee6d8` |
+| HEAD | `03dddfe` |
 | 提交数 | 44（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
@@ -213,7 +213,7 @@
 
 1. 读这一份（不用读整个会话）
 2. `cd` 到主 checkout（`/Users/hail/Codes/vdcheck`），`git log --oneline -3`，
-   确认 HEAD 是 `06ee6d8` 附近
+   确认 HEAD 是 `03dddfe` 附近
 3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $f"; done`
    （Qt 脚本在本机需要 `QT_QPA_PLATFORM=offscreen`）
 4. ~~补 Task 5 的 scoped 复审~~ → **已完成**

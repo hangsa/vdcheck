@@ -178,7 +178,7 @@ class ColumnSpec:
 # ~7%~18%), 取下面这组值。
 # 2026-10-29 返工轮 1: 四列各再 +10px —— 原来只剩 10~13px 余量,
 # 换到 Segoe UI 上表头可能被截成 '码率(kbps...'; 加宽后余量 ~20~23px。
-# (合计 1145 → 1185px, 视口 1248~1268px, 仍不出现横向滚动条)
+# (当时合计 1145 → 1185px; 其后规格列 140 → 160、新增色彩列 142 → 现合计 1347px)
 VIDEO_COLUMNS: list[ColumnSpec] = [
     ColumnSpec(None, '序号', 45, 'center', False),
     ColumnSpec('title', '标题', 300, 'w', False),
@@ -1318,8 +1318,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         # 版本号随 GUI 层一起抬到 v4.0 (GUI 层从 Tkinter 换成 PySide6)
         self.setWindowTitle('视频检测v4.0')
-        # 1440 而不是 1280: 加了「色彩」列后列宽总和 1327px, 1280 的窗口装不下
-        # → 主表格会出现横向滚动条。1440 装得下 (可用 ~1420px)。
+        # 1440 而不是 1280: 列宽总和 1347px (45 序号 + 1302 数据列), 1280 的窗口装不下
+        # → 主表格会出现横向滚动条。1440 装得下 (可用 ~1428px, 余量 81px)。
         # 代价: 1366px 宽的笔记本屏幕放不下 (用户 2026-10-29 知情选定)。
         self.resize(1440, 700)
         self.setMinimumSize(1000, 500)

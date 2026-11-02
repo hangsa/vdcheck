@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **视频码率检查器** (Video Bitrate Checker) — a Chinese-language PySide6 desktop app that scans a directory of video files (or files dropped onto the window), calls `ffprobe` on each, and flags which files meet a user-configured bitrate threshold (default 30000 kbps) **and** sample-rate threshold (default 48 kHz). Users can then move all passing — or all scanned — files to a destination folder. A secondary "定点截图" (fixed-timestamp screenshot) dialog extracts frames at chosen timestamps for eyeball comparison.
 
-The GUI was Tkinter until the `refactor/qtableview` branch (v4.0); `main` is still the Tkinter v3.3. The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
+The GUI was Tkinter (v3.3) until v4.0 replaced it with PySide6 / `QTableView`. That rewrite lived on the `refactor/qtableview` branch and was fast-forward-merged into `main` (branch deleted) — **`main` is the PySide6 v4.0**. The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
 
 ## Running
 
@@ -50,12 +50,12 @@ The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `f
 
 ## Architecture
 
-Three modules, ~2.6k lines total:
+Three modules, ~2.8k lines total:
 
 | File | Role |
 |---|---|
-| `video_core.py` (511) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (2023) | The whole Qt GUI: models, main window, snapshot dialog, zoom window. |
+| `video_core.py` (549) | Pure logic. **No Qt, no Tk.** |
+| `video_qt.py` (2209) | The whole Qt GUI: models, main window, snapshot dialog, zoom window. |
 | `video_checker.py` (34) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -71,7 +71,7 @@ Three modules, ~2.6k lines total:
 
 **Table** — `VideoTableModel(QAbstractTableModel)` + `QTableView`. The table area contains **no native child windows** — that is the root fix for "restore from taskbar shows a black table area" (a Qt top-level window is rendered offscreen and blitted once, so there is no half-painted intermediate state).
 
-- Columns are declared once in `VIDEO_COLUMNS: list[ColumnSpec]` (11 columns: 序号 / title / resolution / frame_rate / bitrate / spec / audio_channels / audio_sample_rate / duration / file_size / result). `ColumnSpec.key is None` means the 序号 column.
+- Columns are declared once in `VIDEO_COLUMNS: list[ColumnSpec]` (12 columns: 序号 / title / resolution / frame_rate / bitrate / spec / audio_channels / audio_sample_rate / color / duration / file_size / result). `ColumnSpec.key is None` means the 序号 column.
 - **Coloring** goes through `Qt.ForegroundRole` → the pure `video_core._cell_fg(info, key)`:
   - Passing rows → all cells use `FG_PASS` (`#228B22` green)
   - Failing rows → only the specific failing cells turn `FG_FAIL` (`#DC143C` red): always `title` and `result`; plus `bitrate` if `bitrate_kbps < bitrate_std`, plus `audio_sample_rate` if sample-rate check failed. Other cells return `None` so Qt uses the palette default (never hard-coded black).
@@ -86,7 +86,7 @@ Three modules, ~2.6k lines total:
 **App** — `MainWindow(QMainWindow)`:
 - Row 1: path entry + 浏览 + 子文件夹 checkbox + 开始检测 button (toggles to 检测中 / 正在停止... when scanning; clicking while scanning cancels via `self._cancel`)
 - Row 2: 码率标准 + 采样率标准 inputs + 定点截图 button, with 清除记录 pinned to the right via a 272px trailing spacing (visual alignment with Row 1's path entry right edge)
-- Center: `QTableView` with the 11 columns above
+- Center: `QTableView` with the 12 columns above
 - Bottom: 迁移地址 + 浏览 + 移动达标文件 + 移动全部文件
 - Status bar: a single `QStatusBar` line. Terminal states append the tally via `set_status(text, with_counts=True)` → `检测完成：共 10 · 达标 8 · 不达标 2`; intermediate states (就绪 / 正在检测... (3/10) a.mp4) show only the progress text. The "共 N" in the tally counts **results produced**; the M in "已完成 N/M" is the **total files found** — different sources, not a contradiction.
 - `<Control-o>` opens the browse-folder dialog — **the only shortcut in the app**
@@ -100,7 +100,7 @@ Three modules, ~2.6k lines total:
 
 The `self._cancel: threading.Event` is checked at the top of each per-file loop; the status bar then reports "已停止检测（已完成 N/M）" with the counts appended. Cancellation never calls `QThread.terminate()` (on Windows that hangs the whole process). If the thread has not finished when the window closes, it is **orphaned** into `MainWindow._orphan_threads` — a **class attribute** pointing at the same list as the module-level `_ORPHANED_THREADS`, so the registration stays reachable from `__del__` while the interpreter tears down (the class object is referenced by the class itself; CPython ≥ 3.4 does **not** clear module globals at teardown). A dropped reference = a running `QThread` destroyed = `abort`, exit code 134. `main()` waits for those threads inside a `try/finally` and calls `os._exit(0)` in the `finally` — never `flush()` stdout/stderr, because in a windowed build both are `None` and a flush would raise before the `os._exit`. `_on_thread_finished` deliberately **skips `deleteLater()`** for threads already in the orphan registry: a deleted C++ object makes the exit path's `thread.wait()` raise `RuntimeError`, which would skip the `os._exit`.
 
-**Fonts** — `ui_font()` is **lazy** and must be called only after a `QApplication` exists (`QFontMetrics` without a `QGuiApplication` aborts the process with exit code 134). `apply_app_font(app)` is called from `MainWindow.__init__` as well as from `main()`, so anyone constructing `MainWindow()` directly gets the same 10pt font. Two things are **calibrated to 10pt** and must move together if the size ever changes: the main table's row height (`QFontMetrics(ui_font()).height() + 18` → 34px, deliberately not hard-coded) and `video_core.truncate_text`'s fast-path estimate (`per_char = 13` ASCII / `16` CJK — see the comment there; Qt's elide is off, so an estimate that is too small overflows the column). The ASCII constant is the **widest printable ASCII** at 10pt (`W` = 13px), not the average — an average-sized estimate lets wide-glyph text through the fast path unmeasured.
+**Fonts** — `ui_font()` is **lazy** and must be called only after a `QApplication` exists (`QFontMetrics` without a `QGuiApplication` aborts the process with exit code 134). `apply_app_font(app)` is called from `MainWindow.__init__` as well as from `main()`, so anyone constructing `MainWindow()` directly gets the same 10pt font. Two things are **calibrated to 10pt** and must move together if the size ever changes: the main table's row height (`QFontMetrics(ui_font()).height() + 12` → 28px, deliberately not hard-coded) and `video_core.truncate_text`'s fast-path estimate (`per_char = 13` ASCII / `16` CJK — see the comment there; Qt's elide is off, so an estimate that is too small overflows the column). The ASCII constant is the **widest printable ASCII** at 10pt (`W` = 13px), not the average — an average-sized estimate lets wide-glyph text through the fast path unmeasured.
 
 **File mover** — both `_move_passing_files` and `_move_all_files` follow the same shape: confirm via a `QMessageBox` question, `os.makedirs(dest_dir, exist_ok=True)`, then `shutil.move` each file, with `_get_unique_dest` appending `_1`, `_2`, ... on name collisions. `_move_passing_files` filters `video_results` by `is_passing`; `_move_all_files` moves everything regardless of pass/fail. Both are **moves**, not copies, and they walk `video_results` — the **insertion order** list, not the table's sorted order.
 
@@ -110,7 +110,7 @@ The `self._cancel: threading.Event` is checked at the top of each per-file loop;
 
 The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\snapshot`, `F\checked`); typing a path into the field uses it verbatim.
 
-**Snapshot dialog** — `SnapshotDialog(QDialog)` (modal) with `SnapshotGridModel` + `SnapshotDelegate` + `EnlargeDialog`. The grid is a `QTableView` (rows = files, columns = timestamps) painting `QPixmap` thumbnails via a delegate — not a `QTableWidget` of labels, so the grid area holds no child windows. Only the **320px** thumbnail stays in memory; the 640px original is re-loaded **from disk** by the zoom window. The grid's row height is **`SNAPSHOT_ROW_H` (196px)** so the 320×180 thumbnail is drawn at its natural size — the delegate scales the pixmap to fit the cell (`KeepAspectRatio`), so a short row crushes it (this was a real bug: Qt's default 30px row rendered it at 53×30). Extraction runs on a **plain daemon thread** (not a `QThread`) so the dialog can be closed mid-run without `abort`; the cancel flag is only checked between cells, so an already-running ffmpeg is not killed.
+**Snapshot dialog** — `SnapshotDialog(QDialog)` (modal) with `SnapshotGridModel` + `SnapshotDelegate` + `EnlargeDialog`. The grid is a `QTableView` (rows = files, columns = timestamps) painting `QPixmap` thumbnails via a delegate — not a `QTableWidget` of labels, so the grid area holds no child windows. Only the **320px** thumbnail stays in memory; the 640px original is re-loaded **from disk** by the zoom window. The grid's row height is **`SNAPSHOT_ROW_H` (188px = 180 + 8)** so the 320×180 thumbnail is drawn at its natural size — the delegate scales the pixmap to fit the cell (`KeepAspectRatio`), so a short row crushes it (this was a real bug: Qt's default 30px row rendered it at 53×30). Extraction runs on a **plain daemon thread** (not a `QThread`) so the dialog can be closed mid-run without `abort`; the cancel flag is only checked between cells, so an already-running ffmpeg is not killed.
 
 ## Key design notes
 
@@ -121,5 +121,5 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 - The `scanning` flag + button state prevent re-entrant scans; drag-drop is also blocked while scanning (an info dialog is shown and the drop ignored)
 - Container format: prefer the `format_name` token matching the file extension (e.g. an `.mp4` file with `format_name='mov,mp4,...'` resolves to `'mp4'`); fall back to the first token, then the extension, then `'N/A'`
 - `DEFAULT_BITRATE_KBPS = 30000`, `DEFAULT_SAMPLE_RATE_KHZ = 48` — both editable from the UI; values are parsed with `parse_threshold()` and must be positive and finite
-- Window: `1280x700`, `minsize(1000, 500)`, title `"视频检测v4.0"`
+- Window: `1440x700`, `minsize(1000, 500)`, title `"视频检测v4.0"` (1440 = the sum of column widths 1347px fits without a horizontal scrollbar; a 1366px laptop screen does not fit the window — deliberate trade-off)
 - `video_checker.py` uses **CRLF** line endings. Never rewrite it with a plain-LF write — use the Edit tool for precise replacements, and verify with `python3 -c "d=open('video_checker.py','rb').read(); c=d.count(b'\r\n'); print('bare LF:', d.count(b'\n')-c)"` (must be `0`).
