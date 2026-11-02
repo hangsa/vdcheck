@@ -8,3 +8,6 @@ build/
 dist/
 
 # 打包用的 ffprobe 目录是下载物, 不在 .gitignore —— 见 CLAUDE.md
+
+# macOS
+.DS_Store
