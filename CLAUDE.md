@@ -50,12 +50,12 @@ The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `f
 
 ## Architecture
 
-Three modules, ~3.0k lines total:
+Three modules, ~3.1k lines total:
 
 | File | Role |
 |---|---|
-| `video_core.py` (648) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (2285) | The whole Qt GUI: models, main window, snapshot dialog, zoom window. |
+| `video_core.py` (657) | Pure logic. **No Qt, no Tk.** |
+| `video_qt.py` (2439) | The whole Qt GUI: models, main window, snapshot dialog, zoom window. |
 | `video_checker.py` (34) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -66,7 +66,7 @@ Three modules, ~3.0k lines total:
 - `parse_threshold(text)` — parses a threshold; rejects non-positive **and** `inf`/`nan`
 - `truncate_text(text, col_width, measure)` — pixel-level truncation ending in three ASCII dots (not `…`)
 - `parse_snapshot_filename(name)` → `(base, token)` | `None` — parses a screenshot filename `{title}_t{idx}_{HH-MM-SS-FF}.png` back into its parts. The regex is **greedy + backtracking**, so it takes the **rightmost** `_t<digits>_` — exactly symmetric to the writer in `video_qt._snapshot_worker`. The token comes back in `:` form (`'00:00:07:24'`), matching the timepoint input boxes
-- `scan_existing_snapshots(output_dir)` → `list[SnapshotFile]` — first level only, **never creates the directory** (directory creation has exactly one gate: `ensure_snapshot_dir`)
+- `scan_existing_snapshots(output_dir, progress=None)` → `list[SnapshotFile]` — first level only, **never creates the directory** (directory creation has exactly one gate: `ensure_snapshot_dir`). The optional `progress(done, total)` callback fires per file — on a network drive the per-file `getmtime` round-trips are slow enough that the UI needs to know
 - `match_snapshots(files, base)` → `{token: SnapshotFile}` — picks one file per (video, timepoint); same timepoint twice → the **newer mtime** wins
 - `time_token_sort_key(token)` → `(h, m, s, frame)` — numeric sort, because string sort puts `00:10` before `00:02`
 - `DEFAULT_BITRATE_KBPS = 30000` / `DEFAULT_SAMPLE_RATE_KHZ = 48` live **here** — core is the single home; the GUI layer imports them
@@ -119,6 +119,7 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 **Two snapshot buttons** — the dialog's top row carries 查看已有截图 and 开始截图, and they are deliberately **different jobs**:
 - **开始截图** extracts frames and **overwrites** the files on disk. Unchanged since 2026-10-27.
 - **查看已有截图** (`_on_view_existing`) is **read-only**: it scans the snapshot dir for filenames matching the writer's rule, matches them against the current selection, and back-fills the grid. It never extracts, never writes, and **never creates the directory** (a missing dir only produces a status line). The **timepoint columns come from the directory** (whatever timepoints exist on disk, sorted), *not* from the input boxes — the input boxes belong to 开始截图 and are left untouched.
+- The scan + decode runs in a **background thread** (`_existing_worker`, mirroring `_snapshot_worker`): the worker parses filenames, then decodes each PNG into a **QImage** (reentrant → safe off the GUI thread) and hands it to the main thread, which builds the **QPixmap** (`QPixmap` may only be created on the GUI thread). The queue is **bounded (maxsize=20)** so a slow main thread applies back-pressure instead of letting decoded images pile up in RAM. The bottom status line reports `分析中 N/M 个文件` → `加载中 K/T (视频名)` → `已有截图: …`; both buttons are disabled while it runs.
 - The match key is `os.path.splitext(info.title)[0]` — the *same* string the writer uses (`VideoInfo.title` is the ffprobe metadata title, falling back to the filename stem), so the two sides agree by construction.
 - A cell with no match gets `CellState(status='empty')` → the delegate paints **nothing**. `'empty'` is distinct from `'idle'` ('…', "not extracted yet") — that distinction is the point of the feature.
 - Same (video, timepoint) twice on disk → the newer mtime wins.

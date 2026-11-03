@@ -586,12 +586,16 @@ class SnapshotFile:
     mtime: float    # 修改时间 (同一 base+token 有多张时取最新的那张)
 
 
-def scan_existing_snapshots(output_dir: str) -> list[SnapshotFile]:
+def scan_existing_snapshots(output_dir: str, progress=None) -> list[SnapshotFile]:
     """扫截图目录里**符合命名规则**的 PNG。
 
     只看第一层 (不递归) —— 抽帧也是平铺写进 output_dir 的。
     目录不存在 → 空列表 (**不建目录**: 建目录只有 ensure_snapshot_dir
     一个口子, 这里只读)。
+
+    progress: 可选的回调 progress(done, total) —— 处理完一个文件调一次。
+    「查看已有截图」的后台线程用它报进度: 本地盘上这一步是毫秒级的,
+    但**网络盘**上 getmtime 逐个往返能慢到几十秒, 主线程得知道进度。
     """
     if not output_dir or not os.path.isdir(output_dir):
         return []
@@ -600,19 +604,24 @@ def scan_existing_snapshots(output_dir: str) -> list[SnapshotFile]:
         names = os.listdir(output_dir)
     except OSError:
         return []
-    for name in names:
+    total = len(names)
+    if progress is not None:
+        progress(0, total)
+    for i, name in enumerate(names, 1):
         parsed = parse_snapshot_filename(name)
-        if parsed is None:
-            continue
-        base, token = parsed
-        path = os.path.join(output_dir, name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            continue
-        out.append(SnapshotFile(base=base, token=token, path=path, mtime=mtime))
+        if parsed is not None:
+            base, token = parsed
+            path = os.path.join(output_dir, name)
+            if os.path.isfile(path):
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    mtime = None
+                if mtime is not None:
+                    out.append(SnapshotFile(base=base, token=token,
+                                            path=path, mtime=mtime))
+        if progress is not None:
+            progress(i, total)
     return out
 
 

@@ -12,6 +12,7 @@ import queue
 import shutil
 import sys
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 
@@ -20,7 +21,7 @@ from PySide6.QtCore import (
     QTimer, Signal, Slot,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QFontMetrics, QKeySequence, QPixmap,
+    QBrush, QColor, QFont, QFontMetrics, QImage, QKeySequence, QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -665,6 +666,19 @@ class SnapshotDelegate(QStyledItemDelegate):
     def thumbnail(self, row: int, col: int) -> QPixmap | None:
         return self._pixmaps.get((row, col))
 
+    def set_thumbnail_image(self, row: int, col: int, image: QImage) -> bool:
+        """用**已经解码好的 QImage** 贴缩略图 (主线程)。
+
+        QPixmap **不能**在工作线程里建 (它要 GUI 线程的绘制引擎) ——
+        所以解码放后台线程做 (QImage 是可重入的, 在那里安全), 贴图
+        回主线程做。返回 False = 这张图建不出来 (文件坏了)。
+        """
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return False
+        self._pixmaps[(row, col)] = pixmap
+        return True
+
     def clear_thumbnails(self) -> None:
         self._pixmaps.clear()
 
@@ -835,6 +849,77 @@ def _snapshot_worker(files, tokens, output_dir, cancel_event, result_queue):
     result_queue.put(('done', (done, total, cancel_event.is_set())))
 
 
+def _existing_worker(files, output_dir, cancel_event, result_queue):
+    """扫描截图目录 + 解码已有截图 (后台线程)。
+
+    只往队列里放 **QImage** 和磁盘路径 —— QPixmap 非线程安全, 贴图
+    留给主线程 (QImage 是可重入的, 在这里解码安全)。
+
+    消息:
+      ('existing_progress', (phase, done, total, name))  phase = 'analyze' | 'load'
+      ('existing_columns', (tokens,))      列 = 目录里实际存在的时间点
+      ('existing_cell', (row, col, qimage, path))
+      ('existing_empty', (row, col))       这个 (视频, 时间点) 没有旧图
+      ('existing_done', (matched, found, ncols))
+
+    **队列是限长的** —— 主线程跟不上时这里被憋住 (背压), 内存不涨。
+    """
+    def report(phase, done, total, name=''):
+        result_queue.put(('existing_progress', (phase, done, total, name)))
+
+    # --- 阶段 1: 分析 (扫目录 + 解析文件名) ---
+    # 节流: 每 16 个文件或每 0.1s 报一次 (队列不必被塞爆)
+    state = {'n': 0, 't': 0.0}
+
+    def on_progress(done, total):
+        now = time.monotonic()
+        if done == total or done - state['n'] >= 16 or now - state['t'] >= 0.1:
+            state['n'] = done
+            state['t'] = now
+            report('analyze', done, total)
+
+    snaps = scan_existing_snapshots(output_dir, progress=on_progress)
+    if cancel_event.is_set():
+        return
+    if not snaps:
+        # 一张合规的都没有 → 网格原样不动, 只报个话
+        result_queue.put(('existing_done', (0, 0, 0)))
+        return
+
+    # --- 阶段 2: 匹配 ---
+    tokens = sorted({s.token for s in snaps}, key=time_token_sort_key)
+    result_queue.put(('existing_columns', (tokens,)))
+    plan = []
+    for r, info in enumerate(files):
+        # base 与生成截图文件时**完全同一个字符串** —— 标题取不到就
+        # 回退文件名, 两边都走 VideoInfo.title, 所以天然对齐。
+        base = os.path.splitext(info.title)[0] or 'video'
+        by_token = match_snapshots(snaps, base)
+        for c, token in enumerate(tokens):
+            plan.append((r, c, by_token.get(token)))
+    total_load = sum(1 for item in plan if item[2] is not None)
+
+    # --- 阶段 3: 加载 (解码) ---
+    report('load', 0, total_load)
+    matched = 0
+    for r, c, sf in plan:
+        if cancel_event.is_set():
+            return
+        if sf is None:
+            result_queue.put(('existing_empty', (r, c)))
+            continue
+        image = QImage(sf.path)
+        if image.isNull():
+            # 图坏了 → 当作没有 (留空), 不报错
+            result_queue.put(('existing_empty', (r, c)))
+            continue
+        image = image.scaledToWidth(SNAPSHOT_MEM_W, Qt.SmoothTransformation)
+        result_queue.put(('existing_cell', (r, c, image, sf.path)))
+        matched += 1
+        report('load', matched, total_load, files[r].title)
+    result_queue.put(('existing_done', (matched, len(snaps), len(tokens))))
+
+
 class SnapshotDialog(QDialog):
     """定点截图弹窗 (模态)。
 
@@ -867,6 +952,11 @@ class SnapshotDialog(QDialog):
         self._cancel = threading.Event()
         self._worker_thread = None
         self._result_queue: queue.Queue = queue.Queue()
+        # 「查看已有截图」那条路: 独立的队列 (限长 → 背压) 与取消标志
+        self._loading_existing = False
+        self._existing_cancel = threading.Event()
+        self._existing_queue: queue.Queue = queue.Queue(maxsize=20)
+        self._existing_thread = None
 
         self.setWindowTitle('定点截图')
         self.setModal(True)
@@ -999,8 +1089,11 @@ class SnapshotDialog(QDialog):
         只读: 不抽帧、不写文件、不建目录。
         时间点列**取自目录** (目录里实际存在哪些时间点就建哪些列) ——
         与上方输入框无关 (输入框是「开始截图」用的)。
+
+        扫描与解码跑在**后台线程**里 (界面全程可动), 底栏状态行实时
+        报「分析中 N/M」→「加载中 K/T (视频名)」。
         """
-        if self._state == 'running':
+        if self._state == 'running' or self._loading_existing:
             return
         output_dir = self.output_edit.text().strip()
         if not output_dir:
@@ -1011,38 +1104,24 @@ class SnapshotDialog(QDialog):
             # 这个按钮只读, 不该在「查看」时创建目录。
             self.status_label.setText(f'截图地址不存在: {output_dir}')
             return
-        snaps = scan_existing_snapshots(output_dir)
-        if not snaps:
-            self.status_label.setText('截图地址里没有符合命名规则的图片。')
-            return
-        tokens = sorted({s.token for s in snaps}, key=time_token_sort_key)
-        # 重建网格: 列 = 目录里实际存在的时间点
-        self._tokens = tokens
-        self.model.set_time_tokens(tokens)
-        self.delegate.clear_thumbnails()
-        self._sync_columns()
-        matched = 0
-        for r, info in enumerate(self._files):
-            # base 与生成截图文件时**完全同一个字符串** —— 标题取不到就
-            # 回退文件名, 两边都走 VideoInfo.title, 所以天然对齐。
-            base = os.path.splitext(info.title)[0] or 'video'
-            by_token = match_snapshots(snaps, base)
-            for c, token in enumerate(tokens):
-                sf = by_token.get(token)
-                if sf is None:
-                    self.model.mark_empty(r, c + 2)
-                    continue
-                if not self.delegate.set_thumbnail(r, c + 2, sf.path):
-                    # 图打不开 (文件坏了) → 留空, 不弹错
-                    self.model.mark_empty(r, c + 2)
-                    continue
-                self.model.mark_done(r, c + 2, sf.path)
-                matched += 1
-        self.progress.setRange(0, max(matched, 1))
-        self.progress.setValue(matched)
-        self.status_label.setText(
-            f'已有截图: {matched} 张已载入 (共 {len(snaps)} 张, '
-            f'{len(tokens)} 个时间点取自目录)')
+        self._loading_existing = True
+        self._existing_cancel.clear()
+        self.view_existing_btn.setEnabled(False)
+        self.action_btn.setEnabled(False)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.status_label.setText('分析中 0/0 个文件')
+        # **限长队列** —— 主线程跟不上时工作线程被憋住 (背压),
+        # 解码好的图不会在队列里堆成几百兆。
+        self._existing_queue = queue.Queue(maxsize=20)
+        self._existing_thread = threading.Thread(
+            target=_existing_worker,
+            args=(self._files, output_dir, self._existing_cancel,
+                  self._existing_queue),
+            daemon=True,
+        )
+        self._existing_thread.start()
+        self._poll_timer.start()
 
     # ---- 状态机 ----
 
@@ -1054,6 +1133,10 @@ class SnapshotDialog(QDialog):
         if self._state == 'running':
             self._cancel.set()
             self.action_btn.setEnabled(False)
+            return
+        if self._loading_existing:
+            # 「查看已有截图」还在加载 → 不许同时抽帧 (两者都要重建网格,
+            # 会打架)。按钮本来就禁着, 这里只是兜底。
             return
         self._start_snap()
 
@@ -1142,6 +1225,71 @@ class SnapshotDialog(QDialog):
                     return
         except queue.Empty:
             pass
+        # 「查看已有截图」的后台线程是**另一条队列** (限长, 背压)
+        if self._loading_existing:
+            try:
+                while True:
+                    msg_type, payload = self._existing_queue.get_nowait()
+                    if self._closed:
+                        return
+                    self._handle_existing_message(msg_type, payload)
+                    if msg_type == 'existing_done':
+                        return
+            except queue.Empty:
+                pass
+
+    # ---- 「查看已有截图」的消息 ----
+
+    def _handle_existing_message(self, msg_type: str, payload) -> None:
+        """处理后台线程的消息 (主线程)。"""
+        if msg_type == 'existing_progress':
+            phase, done, total, name = payload
+            self.progress.setRange(0, max(total, 1))
+            self.progress.setValue(done)
+            if phase == 'analyze':
+                self.status_label.setText(f'分析中 {done}/{total} 个文件')
+            else:
+                suffix = f' ({name})' if name else ''
+                self.status_label.setText(f'加载中 {done}/{total}{suffix}')
+        elif msg_type == 'existing_columns':
+            tokens, = payload
+            # 重建网格: 列 = 目录里实际存在的时间点
+            self._tokens = tokens
+            self.model.set_time_tokens(tokens)
+            self.delegate.clear_thumbnails()
+            self._sync_columns()
+        elif msg_type == 'existing_cell':
+            r, c, image, path = payload
+            if self.delegate.set_thumbnail_image(r, c + 2, image):
+                self.model.mark_done(r, c + 2, path)
+            else:
+                self.model.mark_empty(r, c + 2)
+        elif msg_type == 'existing_empty':
+            r, c = payload
+            self.model.mark_empty(r, c + 2)
+        elif msg_type == 'existing_done':
+            matched, found, ncols = payload
+            self._on_existing_done(matched, found, ncols)
+
+    def _on_existing_done(self, matched: int, found: int, ncols: int) -> None:
+        """已有截图加载完毕 → 收尾 (恢复按钮、报总数)。"""
+        self._loading_existing = False
+        self.view_existing_btn.setEnabled(True)
+        self.action_btn.setEnabled(True)
+        if self._state != 'running':
+            self._poll_timer.stop()
+        if not found:
+            # 一张合规的都没有 → 网格原样不动
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self.status_label.setText('截图地址里没有符合命名规则的图片。')
+            return
+        self.progress.setRange(0, max(matched, 1))
+        self.progress.setValue(matched)
+        self.status_label.setText(
+            f'已有截图: {matched} 张已载入 (共 {found} 张, '
+            f'{ncols} 个时间点取自目录)')
+
 
     def _mark_done(self, row: int, col: int, path: str) -> None:
         """抽帧成功 → 主线程加载 320px 缩略图 (QPixmap 非线程安全)。"""
@@ -1229,6 +1377,10 @@ class SnapshotDialog(QDialog):
         """
         if self._state == 'running':
             self._cancel.set()
+        if self._loading_existing:
+            # 「查看已有截图」的后台线程: 只读操作, 不用二次确认,
+            # 置个取消标志让它在文件之间停下就行。
+            self._existing_cancel.set()
         self._closed = True
         self._poll_timer.stop()
 

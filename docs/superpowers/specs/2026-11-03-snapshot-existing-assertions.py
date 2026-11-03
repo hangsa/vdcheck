@@ -155,6 +155,16 @@ def pump_until(predicate, timeout: float = 20.0) -> bool:
     return bool(predicate())
 
 
+def view_existing(dlg) -> None:
+    """点「查看已有截图」并**等它跑完**。
+
+    这一步现在是**后台线程** (2026-11-03 加的加载进度) —— 点完不会立刻
+    填好网格, 得泵事件循环等它结束, 断言才有东西可看。
+    """
+    dlg._on_view_existing()
+    pump_until(lambda: not dlg._loading_existing, timeout=30)
+
+
 def find_button(dlg, text: str):
     """在弹窗里按文字找按钮。"""
     for btn in dlg.findChildren(QPushButton):
@@ -282,7 +292,7 @@ def test_dialog() -> None:
     before = {n: (os.path.getmtime(os.path.join(out, n)),
                    open(os.path.join(out, n), 'rb').read())
               for n in os.listdir(out)}
-    dlg._on_view_existing()
+    view_existing(dlg)
 
     check("列数 = 2 + 目录里的时间点数 (2)",
           dlg.model.columnCount() == 4, f"got={dlg.model.columnCount()}")
@@ -350,7 +360,7 @@ def test_dialog() -> None:
 
     section("界面: 时间点输入框不被改")
     entries_before = [e.text() for e in dlg._tp_entries]
-    dlg._on_view_existing()
+    view_existing(dlg)
     check("输入框内容原样保留 (列取自目录, 不取自输入框)",
           [e.text() for e in dlg._tp_entries] == entries_before,
           f"got={[e.text() for e in dlg._tp_entries]}")
@@ -364,7 +374,7 @@ def test_dialog() -> None:
     section("界面: 截图地址不存在")
     missing = os.path.join(mkdtemp(), 'nope')
     dlg2 = video_qt.SnapshotDialog(win, files, missing)
-    dlg2._on_view_existing()
+    view_existing(dlg2)
     check("**没有**建目录", not os.path.exists(missing))
     check("状态栏提示了", '不存在' in dlg2.status_label.text(),
           f"got={dlg2.status_label.text()!r}")
@@ -376,7 +386,7 @@ def test_dialog() -> None:
     empty = mkdtemp()
     write_png(empty, '随便一张.png')
     dlg3 = video_qt.SnapshotDialog(win, files, empty)
-    dlg3._on_view_existing()
+    view_existing(dlg3)
     check("状态栏提示了", '没有' in dlg3.status_label.text(),
           f"got={dlg3.status_label.text()!r}")
     check("网格没炸 (仍是 2 列)", dlg3.model.columnCount() == 2,
@@ -388,7 +398,7 @@ def test_dialog() -> None:
     old = write_png(out2, 'a_t1_00-00-07-24.png', 'red')
     old_bytes = open(old, 'rb').read()
     dlg4 = video_qt.SnapshotDialog(win, [make_info('a.mp4')], out2)
-    dlg4._on_view_existing()
+    view_existing(dlg4)
     check("先看已有截图: 第 1 格是 done",
           dlg4.model.cell_state(0, 2).status == 'done',
           f"got={dlg4.model.cell_state(0, 2)}")

@@ -150,6 +150,10 @@ commit `bc6f456`（直接推上 `main`，没有走 PR）。版本号随之抬到
   「…」。「…」的语义是「还没轮到抽帧」，两者不能混。
 - 纯逻辑都在 `video_core.py`：`parse_snapshot_filename` / `scan_existing_snapshots`
   / `match_snapshots` / `time_token_sort_key`。
+- **加载进度**（同日追加）：扫描与解码跑在**后台线程** `_existing_worker` 里，
+  底栏状态行依次显示 `分析中 N/M 个文件` → `加载中 K/T (视频名)` →
+  `已有截图: …`。队列**限长 20**（主线程跟不上 → 背压，内存不涨）；解码好的图
+  以 **QImage** 过队列（QImage 可重入），**QPixmap 只能回主线程建**。
 - **文件名解析用贪婪 + 回溯的正则** → 取**最右**一次 `_t<数字>_`，与生成端
   (`f"{base}_t{c+1}_{token}.png"`) 严格对称 —— 标题里本身带 `_t1_` 也不会拆错。
   断言脚本里有一条**写↔读往返**不变式守着这一点。
