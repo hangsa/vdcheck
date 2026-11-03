@@ -11,13 +11,15 @@
 退出码 0 = 全部通过；非 0 = 有失败。
 """
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
+sys.path.insert(0, _ROOT)
 
 _tmpdirs: list[str] = []
 
@@ -430,6 +432,28 @@ def test_dialog() -> None:
     check("跑完按钮恢复可用", enabled_again)
 
 
+def test_version() -> None:
+    """版本号守卫: 窗口标题与产品文档 §4.1 必须一致。
+
+    之前**没有任何断言**盯着窗口标题 —— 版本号一抬, 产品文档就可能
+    悄悄漂掉 (2026-11-03 抬 v4.1 时才发现)。这里把两者钉在一起。
+    """
+    section("版本号: 窗口标题 ↔ 产品文档 §4.1")
+    win = video_qt.MainWindow()
+    title = win.windowTitle()
+    check("窗口标题是 v4.1", title == '视频检测v4.1', f"got={title!r}")
+    with open(os.path.join(_ROOT, 'docs', '产品文档.md'), encoding='utf-8') as f:
+        doc = f.read()
+    m = re.search(r'窗口标题 `([^`]+)`', doc)
+    check("产品文档 §4.1 里的窗口标题与代码一致",
+          m is not None and m.group(1) == title,
+          f"doc={m.group(1) if m else None!r} code={title!r}")
+    m2 = re.search(r'^版本: (v[\d.]+)', doc, re.M)
+    check("产品文档版本头是 v4.1",
+          m2 is not None and m2.group(1) == 'v4.1',
+          f"got={m2.group(1) if m2 else None!r}")
+
+
 def main() -> int:
     orig_warning = QMessageBox.warning
     orig_critical = QMessageBox.critical
@@ -440,6 +464,7 @@ def main() -> int:
     try:
         test_core()
         test_dialog()
+        test_version()
     finally:
         QMessageBox.warning = orig_warning
         QMessageBox.critical = orig_critical

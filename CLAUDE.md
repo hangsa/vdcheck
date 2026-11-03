@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **视频码率检查器** (Video Bitrate Checker) — a Chinese-language PySide6 desktop app that scans a directory of video files (or files dropped onto the window), calls `ffprobe` on each, and flags which files meet a user-configured bitrate threshold (default 30000 kbps) **and** sample-rate threshold (default 48 kHz). Users can then move all passing — or all scanned — files to a destination folder. A secondary "定点截图" (fixed-timestamp screenshot) dialog extracts frames at chosen timestamps for eyeball comparison.
 
-The GUI was Tkinter (v3.3) until v4.0 replaced it with PySide6 / `QTableView`. That rewrite lived on the `refactor/qtableview` branch and was fast-forward-merged into `main` (branch deleted) — **`main` is the PySide6 v4.0**. The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
+The GUI was Tkinter (v3.3) until v4.0 replaced it with PySide6 / `QTableView`. That rewrite lived on the `refactor/qtableview` branch and was fast-forward-merged into `main` (branch deleted) — **`main` is the PySide6 line, currently v4.1** (v4.0 = the Qt rewrite, v4.1 = 定点截图的「查看已有截图」). The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
 
 ## Running
 
@@ -132,5 +132,5 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 - The `scanning` flag + button state prevent re-entrant scans; drag-drop is also blocked while scanning (an info dialog is shown and the drop ignored)
 - Container format: prefer the `format_name` token matching the file extension (e.g. an `.mp4` file with `format_name='mov,mp4,...'` resolves to `'mp4'`); fall back to the first token, then the extension, then `'N/A'`
 - `DEFAULT_BITRATE_KBPS = 30000`, `DEFAULT_SAMPLE_RATE_KHZ = 48` — both editable from the UI; values are parsed with `parse_threshold()` and must be positive and finite
-- Window: `1440x700`, `minsize(1000, 500)`, title `"视频检测v4.0"` (1440 = the sum of column widths 1347px fits without a horizontal scrollbar; a 1366px laptop screen does not fit the window — deliberate trade-off)
+- Window: `1440x700`, `minsize(1000, 500)`, title `"视频检测v4.1"` (1440 = the sum of column widths 1347px fits without a horizontal scrollbar; a 1366px laptop screen does not fit the window — deliberate trade-off)
 - `video_checker.py` uses **CRLF** line endings. Never rewrite it with a plain-LF write — use the Edit tool for precise replacements, and verify with `python3 -c "d=open('video_checker.py','rb').read(); c=d.count(b'\r\n'); print('bare LF:', d.count(b'\n')-c)"` (must be `0`).

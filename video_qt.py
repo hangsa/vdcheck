@@ -1392,8 +1392,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 版本号随 GUI 层一起抬到 v4.0 (GUI 层从 Tkinter 换成 PySide6)
-        self.setWindowTitle('视频检测v4.0')
+        # 版本号: v4.0 抬的 (GUI 层从 Tkinter 换成 PySide6); v4.1 抬的
+        # (定点截图新增「查看已有截图」)。改这里要同时改产品文档 §4.1
+        # 与 CHANGELOG 的对应条目。
+        self.setWindowTitle('视频检测v4.1')
         # 1440 而不是 1280: 列宽总和 1347px (45 序号 + 1302 数据列), 1280 的窗口装不下
         # → 主表格会出现横向滚动条。1440 装得下 (可用 ~1428px, 余量 81px)。
         # 代价: 1366px 宽的笔记本屏幕放不下 (用户 2026-10-29 知情选定)。
