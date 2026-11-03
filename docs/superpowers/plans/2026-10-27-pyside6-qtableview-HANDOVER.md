@@ -23,10 +23,10 @@
 
 | | |
 |---|---|
-| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.0**；分支 `main`，HEAD `03dddfe`） |
+| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.0**；分支 `main`，HEAD `bc6f456`） |
 | 重构 worktree | **已删除**（合并后清理掉了） |
 | 分支 | `refactor/qtableview` **已合并并删除**（本地 + 远端都删了） |
-| HEAD | `03dddfe` |
+| HEAD | `bc6f456` |
 | 提交数 | 44（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
@@ -126,6 +126,8 @@
   删掉。提交对象在 GitHub 上还能按 SHA `274c3dc` 找回来一段时间。
 
 ### 3.7 「查看已有截图」（2026-11-03 新增）—— ✅ **已完成**
+
+commit `bc6f456`（直接推上 `main`，没有走 PR）。
 
 用户需求：截图地址里已经有上次截的图时，**别再重截**，把旧图按「视频标题 +
 时间点」摆回网格里看看。
@@ -240,7 +242,7 @@
 
 1. 读这一份（不用读整个会话）
 2. `cd` 到主 checkout（`/Users/hail/Codes/vdcheck`），`git log --oneline -3`，
-   确认 HEAD 是 `03dddfe` 附近
+   确认 HEAD 是 `bc6f456` 附近
 3. 跑一遍断言确认绿：`for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $f"; done`
    （Qt 脚本在本机需要 `QT_QPA_PLATFORM=offscreen`）
 4. ~~补 Task 5 的 scoped 复审~~ → **已完成**
