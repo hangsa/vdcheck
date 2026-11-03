@@ -1628,17 +1628,19 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.sample_rate_edit)
         row2.addWidget(QLabel('kHz'))
 
-        # 「定点截图」在 kHz 标签右侧 (产品文档 §4.1)
-        snapshot_btn = QPushButton('定点截图')
-        snapshot_btn.clicked.connect(self._on_snapshot_btn_click)
-        row2.addWidget(snapshot_btn)
-
-        # 「清除记录」右对齐, 右侧留 272px —— Tk 版是硬编码 padx=(0, 272)
-        # (产品文档 §6 #31, 视觉对齐的历史值), 这里照搬。
+        # 「清除记录」与「定点截图」并排在行尾, 「定点截图」在**后**
+        # (2026-11-03 用户要求挪的; 原先它在 kHz 标签右边)。
         row2.addStretch(1)
-        clear_btn = QPushButton('清除记录')
-        clear_btn.clicked.connect(self._clear_records)
-        row2.addWidget(clear_btn)
+        self.clear_btn = QPushButton('清除记录')
+        self.clear_btn.clicked.connect(self._clear_records)
+        row2.addWidget(self.clear_btn)
+        self.snapshot_btn = QPushButton('定点截图')
+        self.snapshot_btn.clicked.connect(self._on_snapshot_btn_click)
+        row2.addWidget(self.snapshot_btn)
+        # 行尾留 272px —— Tk 版是硬编码 padx=(0, 272) (产品文档 §6 #31,
+        # 视觉对齐的历史值), 这里照搬。挪按钮时**不动它**: 它是**行尾的
+        # 右边距** —— 右对齐的现在是「定点截图」(行尾最右那个按钮),
+        # 它的右边缘与 Row 1 的「文件路径」输入框右边缘对齐。
         row2.addSpacing(272)
         root.addLayout(row2)
 

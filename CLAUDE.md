@@ -89,7 +89,7 @@ Three modules, ~3.1k lines total:
 
 **App** — `MainWindow(QMainWindow)`:
 - Row 1: path entry + 浏览 + 子文件夹 checkbox + 开始检测 button (toggles to 检测中 / 正在停止... when scanning; clicking while scanning cancels via `self._cancel`)
-- Row 2: 码率标准 + 采样率标准 inputs + 定点截图 button, with 清除记录 pinned to the right via a 272px trailing spacing (visual alignment with Row 1's path entry right edge)
+- Row 2: 码率标准 + 采样率标准 inputs on the left; **清除记录 then 定点截图** side by side at the row's right end (定点截图 was moved after 清除记录 on 2026-11-03 — it used to sit next to the kHz label), then a 272px trailing spacing (the row's right margin; the rightmost button aligns with Row 1's path entry right edge). Both buttons are kept as attributes (`self.clear_btn` / `self.snapshot_btn`) so the order is assertable
 - Center: `QTableView` with the 12 columns above
 - Bottom: 迁移地址 + 浏览 + 移动达标文件 + 移动全部文件
 - Status bar: a single `QStatusBar` line. Terminal states append the tally via `set_status(text, with_counts=True)` → `检测完成：共 10 · 达标 8 · 不达标 2`; intermediate states (就绪 / 正在检测... (3/10) a.mp4) show only the progress text. The "共 N" in the tally counts **results produced**; the M in "已完成 N/M" is the **total files found** — different sources, not a contradiction.
