@@ -34,8 +34,9 @@ from video_core import (
     DEFAULT_BITRATE_KBPS, DEFAULT_SAMPLE_RATE_KHZ, EXTRACT_THUMB_W,
     VIDEO_EXTENSIONS, VideoInfo, _cell_fg, _extract_sort_key,
     _header_text_with_arrow, _next_sort_state, extract_frame, format_title,
-    parse_threshold, parse_time_token, parse_video_info, run_ffprobe,
-    scan_video_files, time_token_to_string, truncate_text,
+    match_snapshots, parse_threshold, parse_time_token, parse_video_info,
+    run_ffprobe, scan_existing_snapshots, scan_video_files,
+    time_token_sort_key, time_token_to_string, truncate_text,
 )
 
 # 着色常量**只从 video_core 取** —— 界面层不持有自己的颜色常量
@@ -484,7 +485,9 @@ SNAPSHOT_STATE_ROLE = int(Qt.UserRole) + 1
 class CellState:
     """一个时间点单元格的抽帧状态 (存在 model 的 dict[(row, col)] 里)。
 
-    status: 'idle' (还没轮到) | 'loading' | 'done' | 'failed'
+    status: 'idle' (还没轮到) | 'loading' | 'done' | 'failed' | 'empty'
+    'empty' 只出现在「查看已有截图」模式: 该视频在这个时间点上**没有**
+    旧图 → 格子留空 (不是 '…' 那个「还没轮到」的灰点)。
     image_path: 抽出来的 PNG 的磁盘路径 —— 放大窗口从磁盘重新加载原图时用
     """
     status: str = 'idle'
@@ -592,6 +595,14 @@ class SnapshotGridModel(QAbstractTableModel):
 
     def mark_failed(self, row: int, col: int) -> None:
         self._set_cell(row, col, CellState(status='failed'))
+
+    def mark_empty(self, row: int, col: int) -> None:
+        """留空 —— 「查看已有截图」模式下没有旧图的格子。
+
+        与 'idle' 的区别: 'idle' 是「还没轮到抽帧」(画灰 '…'), 'empty' 是
+        「这个视频在这个时间点上就没有旧图」(画**空白**)。
+        """
+        self._set_cell(row, col, CellState(status='empty'))
 
     def _set_cell(self, row: int, col: int, state: CellState) -> None:
         self._cells[(row, col)] = state
@@ -701,6 +712,9 @@ class SnapshotDelegate(QStyledItemDelegate):
             return '…', QColor('blue')
         if state.status == 'failed':
             return '×', QColor('red')
+        if state.status == 'empty':
+            # 「查看已有截图」模式下没有旧图的格子 → **留空** (不是 '…')
+            return '', QColor('gray')
         return '…', QColor('gray')
 
     @staticmethod
@@ -879,6 +893,11 @@ class SnapshotDialog(QDialog):
         browse_btn = QPushButton('浏览')
         browse_btn.clicked.connect(self._browse_output_dir)
         row1.addWidget(browse_btn)
+        # 「查看已有截图」在「开始截图」左边 —— 两个按钮职责分明:
+        # 后者抽帧 (覆盖旧文件), 前者**只读**, 把上次截的图翻出来看。
+        self.view_existing_btn = QPushButton('查看已有截图')
+        self.view_existing_btn.clicked.connect(self._on_view_existing)
+        row1.addWidget(self.view_existing_btn)
         self.action_btn = QPushButton('开始截图')
         self.action_btn.clicked.connect(self._on_action_btn)
         row1.addWidget(self.action_btn)
@@ -972,6 +991,59 @@ class SnapshotDialog(QDialog):
         if folder:
             self.output_edit.setText(snapshot_dest_for(folder))
 
+    # ---- 查看已有截图 ----
+
+    def _on_view_existing(self) -> None:
+        """把截图目录里**已有**的图按「视频标题 + 时间点」回填进网格。
+
+        只读: 不抽帧、不写文件、不建目录。
+        时间点列**取自目录** (目录里实际存在哪些时间点就建哪些列) ——
+        与上方输入框无关 (输入框是「开始截图」用的)。
+        """
+        if self._state == 'running':
+            return
+        output_dir = self.output_edit.text().strip()
+        if not output_dir:
+            QMessageBox.warning(self, '提示', '请先设置截图地址。')
+            return
+        if not os.path.isdir(output_dir):
+            # **不建目录** —— 建目录只有 ensure_snapshot_dir 一个口子,
+            # 这个按钮只读, 不该在「查看」时创建目录。
+            self.status_label.setText(f'截图地址不存在: {output_dir}')
+            return
+        snaps = scan_existing_snapshots(output_dir)
+        if not snaps:
+            self.status_label.setText('截图地址里没有符合命名规则的图片。')
+            return
+        tokens = sorted({s.token for s in snaps}, key=time_token_sort_key)
+        # 重建网格: 列 = 目录里实际存在的时间点
+        self._tokens = tokens
+        self.model.set_time_tokens(tokens)
+        self.delegate.clear_thumbnails()
+        self._sync_columns()
+        matched = 0
+        for r, info in enumerate(self._files):
+            # base 与生成截图文件时**完全同一个字符串** —— 标题取不到就
+            # 回退文件名, 两边都走 VideoInfo.title, 所以天然对齐。
+            base = os.path.splitext(info.title)[0] or 'video'
+            by_token = match_snapshots(snaps, base)
+            for c, token in enumerate(tokens):
+                sf = by_token.get(token)
+                if sf is None:
+                    self.model.mark_empty(r, c + 2)
+                    continue
+                if not self.delegate.set_thumbnail(r, c + 2, sf.path):
+                    # 图打不开 (文件坏了) → 留空, 不弹错
+                    self.model.mark_empty(r, c + 2)
+                    continue
+                self.model.mark_done(r, c + 2, sf.path)
+                matched += 1
+        self.progress.setRange(0, max(matched, 1))
+        self.progress.setValue(matched)
+        self.status_label.setText(
+            f'已有截图: {matched} 张已载入 (共 {len(snaps)} 张, '
+            f'{len(tokens)} 个时间点取自目录)')
+
     # ---- 状态机 ----
 
     def _on_action_btn(self) -> None:
@@ -1025,6 +1097,9 @@ class SnapshotDialog(QDialog):
         self.action_btn.setText('截图中')
         self._set_time_points_enabled(False)
         self.output_edit.setEnabled(False)
+        # 抽帧期间「查看已有截图」也锁掉 —— 它会重建网格, 与正在写入的
+        # 抽帧结果打架 (而且那时候看旧的也没意义)。
+        self.view_existing_btn.setEnabled(False)
 
         self._result_queue = queue.Queue()
         self._worker_thread = threading.Thread(
@@ -1096,6 +1171,7 @@ class SnapshotDialog(QDialog):
         self.action_btn.setEnabled(True)
         self._set_time_points_enabled(True)
         self.output_edit.setEnabled(True)
+        self.view_existing_btn.setEnabled(True)
         status = '抽帧已取消' if cancelled else '抽帧完成'
         self.status_label.setText(
             f"{status}: {done}/{total} "

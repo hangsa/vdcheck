@@ -46,16 +46,16 @@ Run **every** script before claiming a change is done:
 for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $(basename $f)"; done
 ```
 
-The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
+The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
 
 ## Architecture
 
-Three modules, ~2.8k lines total:
+Three modules, ~3.0k lines total:
 
 | File | Role |
 |---|---|
-| `video_core.py` (549) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (2209) | The whole Qt GUI: models, main window, snapshot dialog, zoom window. |
+| `video_core.py` (648) | Pure logic. **No Qt, no Tk.** |
+| `video_qt.py` (2285) | The whole Qt GUI: models, main window, snapshot dialog, zoom window. |
 | `video_checker.py` (34) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -65,6 +65,10 @@ Three modules, ~2.8k lines total:
 - `parse_video_info(data, full_path, base_path, bitrate_std, sample_rate_std)` — extracts resolution, fps, bitrate (prefers stream-level over format-level), codecs, channels, sample rate, duration, size, container format, and relative path into a `VideoInfo` dataclass. `is_passing` requires **both** `bitrate_kbps >= bitrate_std` AND `sample_rate_passing` (no audio stream counts as passing)
 - `parse_threshold(text)` — parses a threshold; rejects non-positive **and** `inf`/`nan`
 - `truncate_text(text, col_width, measure)` — pixel-level truncation ending in three ASCII dots (not `…`)
+- `parse_snapshot_filename(name)` → `(base, token)` | `None` — parses a screenshot filename `{title}_t{idx}_{HH-MM-SS-FF}.png` back into its parts. The regex is **greedy + backtracking**, so it takes the **rightmost** `_t<digits>_` — exactly symmetric to the writer in `video_qt._snapshot_worker`. The token comes back in `:` form (`'00:00:07:24'`), matching the timepoint input boxes
+- `scan_existing_snapshots(output_dir)` → `list[SnapshotFile]` — first level only, **never creates the directory** (directory creation has exactly one gate: `ensure_snapshot_dir`)
+- `match_snapshots(files, base)` → `{token: SnapshotFile}` — picks one file per (video, timepoint); same timepoint twice → the **newer mtime** wins
+- `time_token_sort_key(token)` → `(h, m, s, frame)` — numeric sort, because string sort puts `00:10` before `00:02`
 - `DEFAULT_BITRATE_KBPS = 30000` / `DEFAULT_SAMPLE_RATE_KHZ = 48` live **here** — core is the single home; the GUI layer imports them
 
 **Data model** — `VideoInfo` dataclass holds all display fields (`rel_path`, `title`, `resolution`, `frame_rate`, `bitrate_kbps`, `video_codec`, `audio_codec`, `audio_channels`, `audio_sample_rate`, `duration`, `file_size`, `container_format`), plus thresholds (`bitrate_std`, `sample_rate_std`), pass flags (`is_passing`, `sample_rate_passing`), and `full_path` (used by the mover).
@@ -104,13 +108,20 @@ The `self._cancel: threading.Event` is checked at the top of each per-file loop;
 
 **File mover** — both `_move_passing_files` and `_move_all_files` follow the same shape: confirm via a `QMessageBox` question, `os.makedirs(dest_dir, exist_ok=True)`, then `shutil.move` each file, with `_get_unique_dest` appending `_1`, `_2`, ... on name collisions. `_move_passing_files` filters `video_results` by `is_passing`; `_move_all_files` moves everything regardless of pass/fail. Both are **moves**, not copies, and they walk `video_results` — the **insertion order** list, not the table's sorted order.
 
-**Output directories are created on demand** — scanning/browsing never creates a directory. `snapshot` (screenshots) appears when you click 开始截图 in the dialog; `checked` (moved files) appears when you click 移动达标文件 / 移动全部文件. The screenshot dialog never calls `os.makedirs` itself — it goes through `MainWindow.ensure_snapshot_dir()`, the single gate for that rule. Two fields carry the paths, both derived from the source folder and overwritten on every scan (`_sync_derived_paths`):
+**Output directories are created on demand** — scanning/browsing never creates a directory. `snapshot` (screenshots) appears when you click 开始截图 in the dialog; `checked` (moved files) appears when you click 移动达标文件 / 移动全部文件. The screenshot dialog never calls `os.makedirs` itself — it goes through `MainWindow.ensure_snapshot_dir()`, the single gate for that rule (**查看已有截图 does not create it either** — that button only reads; a missing dir produces a status line). Two fields carry the paths, both derived from the source folder and overwritten on every scan (`_sync_derived_paths`):
 - 迁移地址 → `checked_dest_for(parent)` = `<parent>\checked` (backslashes **unconditionally**)
 - 截图地址 → `snapshot_dest_for(parent)` = `<parent>\snapshot` (backslashes **only on win32** — deliberate asymmetry, see `docs/产品文档.md` §6 #3)
 
 The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\snapshot`, `F\checked`); typing a path into the field uses it verbatim.
 
 **Snapshot dialog** — `SnapshotDialog(QDialog)` (modal) with `SnapshotGridModel` + `SnapshotDelegate` + `EnlargeDialog`. The grid is a `QTableView` (rows = files, columns = timestamps) painting `QPixmap` thumbnails via a delegate — not a `QTableWidget` of labels, so the grid area holds no child windows. Only the **320px** thumbnail stays in memory; the 640px original is re-loaded **from disk** by the zoom window. The grid's row height is **`SNAPSHOT_ROW_H` (188px = 180 + 8)** so the 320×180 thumbnail is drawn at its natural size — the delegate scales the pixmap to fit the cell (`KeepAspectRatio`), so a short row crushes it (this was a real bug: Qt's default 30px row rendered it at 53×30). Extraction runs on a **plain daemon thread** (not a `QThread`) so the dialog can be closed mid-run without `abort`; the cancel flag is only checked between cells, so an already-running ffmpeg is not killed.
+
+**Two snapshot buttons** — the dialog's top row carries 查看已有截图 and 开始截图, and they are deliberately **different jobs**:
+- **开始截图** extracts frames and **overwrites** the files on disk. Unchanged since 2026-10-27.
+- **查看已有截图** (`_on_view_existing`) is **read-only**: it scans the snapshot dir for filenames matching the writer's rule, matches them against the current selection, and back-fills the grid. It never extracts, never writes, and **never creates the directory** (a missing dir only produces a status line). The **timepoint columns come from the directory** (whatever timepoints exist on disk, sorted), *not* from the input boxes — the input boxes belong to 开始截图 and are left untouched.
+- The match key is `os.path.splitext(info.title)[0]` — the *same* string the writer uses (`VideoInfo.title` is the ffprobe metadata title, falling back to the filename stem), so the two sides agree by construction.
+- A cell with no match gets `CellState(status='empty')` → the delegate paints **nothing**. `'empty'` is distinct from `'idle'` ('…', "not extracted yet") — that distinction is the point of the feature.
+- Same (video, timepoint) twice on disk → the newer mtime wins.
 
 ## Key design notes
 

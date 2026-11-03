@@ -8,6 +8,7 @@ import json
 import math
 import ntpath
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -547,3 +548,101 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
         except OSError:
             pass
     return files
+
+
+# --- 已有截图的识别与匹配 (弹窗的「查看已有截图」用) ---
+#
+# 截图文件名规则 (生成端在 video_qt._snapshot_worker):
+#     {视频标题去扩展名}_t{时间点序号}_{HH-MM-SS-FF}.png
+# 例: 视频标题 "a" → "a_t1_00-00-07-24.png"
+#
+# 时间点里的 ':' 换成 '-' 是因为 Windows 不许文件名里带 ':'。
+
+# base 贪婪匹配 + 回溯 → 取**最右**一次 "_t<数字>_", 与生成端严格对称
+# (标题本身带 "_t1_" 也不会拆错: "a_t1" + "_t2_" + token → base="a_t1")。
+_SNAPSHOT_NAME_RE = re.compile(
+    r'^(?P<base>.+)_t(?P<index>\d+)_(?P<token>\d+-\d+-\d+-\d+)\.png$',
+    re.IGNORECASE)
+
+
+def parse_snapshot_filename(name: str) -> tuple[str, str] | None:
+    """把截图文件名拆成 (base, 时间点)。不符合规则 → None。
+
+    base    = 视频标题去掉扩展名 (与生成端是**同一个字符串**)
+    时间点  = ':' 形式 ('00:00:07:24') —— 与时间点输入框同格式
+    """
+    m = _SNAPSHOT_NAME_RE.match(name)
+    if not m:
+        return None
+    return m.group('base'), m.group('token').replace('-', ':')
+
+
+@dataclass
+class SnapshotFile:
+    """截图目录里的一张已有截图。"""
+    base: str       # 视频标题去扩展名
+    token: str      # 时间点 (':' 形式)
+    path: str       # 磁盘路径
+    mtime: float    # 修改时间 (同一 base+token 有多张时取最新的那张)
+
+
+def scan_existing_snapshots(output_dir: str) -> list[SnapshotFile]:
+    """扫截图目录里**符合命名规则**的 PNG。
+
+    只看第一层 (不递归) —— 抽帧也是平铺写进 output_dir 的。
+    目录不存在 → 空列表 (**不建目录**: 建目录只有 ensure_snapshot_dir
+    一个口子, 这里只读)。
+    """
+    if not output_dir or not os.path.isdir(output_dir):
+        return []
+    out: list[SnapshotFile] = []
+    try:
+        names = os.listdir(output_dir)
+    except OSError:
+        return []
+    for name in names:
+        parsed = parse_snapshot_filename(name)
+        if parsed is None:
+            continue
+        base, token = parsed
+        path = os.path.join(output_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        out.append(SnapshotFile(base=base, token=token, path=path, mtime=mtime))
+    return out
+
+
+def match_snapshots(files: list[SnapshotFile], base: str) -> dict[str, SnapshotFile]:
+    """挑出属于某个视频 (base) 的截图: {时间点: 文件}。
+
+    同一个时间点有多张 (改了时间点顺序重截过, 旧文件名还在) →
+    取**修改时间最新**的那张。
+    """
+    out: dict[str, SnapshotFile] = {}
+    for sf in files:
+        if sf.base != base:
+            continue
+        old = out.get(sf.token)
+        if old is None or sf.mtime > old.mtime:
+            out[sf.token] = sf
+    return out
+
+
+def time_token_sort_key(token: str) -> tuple[int, int, int, int]:
+    """时间点的排序键 (时, 分, 秒, 帧) —— **按数值比**, 不按字符串。
+
+    字符串排序会把 '00:10:00:00' 排在 '00:02:00:00' 前面 ('1' < '2')。
+    """
+    nums: list[int] = []
+    for part in token.split(':')[:4]:
+        try:
+            nums.append(int(part))
+        except ValueError:
+            nums.append(0)
+    while len(nums) < 4:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2], nums[3])
