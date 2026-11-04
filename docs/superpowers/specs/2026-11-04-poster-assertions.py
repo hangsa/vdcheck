@@ -460,11 +460,25 @@ def test_dialog():
               and dlg.analyze_btn.x() > dlg.doc_browse_btn.x(),
               f"analyze=({dlg.analyze_btn.x()},{dlg.analyze_btn.y()}) "
               f"browse=({dlg.doc_browse_btn.x()},{dlg.doc_browse_btn.y()})")
-        check('「命名来源字段」在「海报地址」前面 (同一行)',
-              abs(dlg.part_combo.y() - dlg.out_edit.y()) < 5
-              and dlg.part_combo.x() < dlg.out_edit.x(),
-              f"part=({dlg.part_combo.x()},{dlg.part_combo.y()}) "
+        check('「命名来源」在「海报地址」前面 (同一行)',
+              abs(dlg.clip_combo.y() - dlg.out_edit.y()) < 5
+              and dlg.clip_combo.x() < dlg.out_edit.x(),
+              f"clip=({dlg.clip_combo.x()},{dlg.clip_combo.y()}) "
               f"out=({dlg.out_edit.x()},{dlg.out_edit.y()})")
+        check('「海报链接字段」**单独一行**, 在「海报命名规则」行之下',
+              dlg.link_label.y() > dlg.template_edit.y(),
+              f"link_y={dlg.link_label.y()} "
+              f"template_y={dlg.template_edit.y()}")
+        check('「海报链接字段」与「海报命名规则」不同行',
+              abs(dlg.link_label.y() - dlg.template_label.y()) > 5,
+              f"link_y={dlg.link_label.y()} "
+              f"template_y={dlg.template_label.y()}")
+        # ---- 标签文案 ----
+        check('标签: 「命名来源」', dlg.clip_label.text() == '命名来源:',
+              f"got={dlg.clip_label.text()!r}")
+        check('标签: 「海报命名规则」',
+              dlg.template_label.text() == '海报命名规则:',
+              f"got={dlg.template_label.text()!r}")
 
         dlg.doc_edit.setText(csv_path)
         dlg._on_analyze()
@@ -475,27 +489,27 @@ def test_dialog():
         checked = [name for name, cb in dlg.link_checks if cb.isChecked()]
         check('海报链接字段: 自动认出「海报链接」并勾上',
               checked == ['海报链接'], f"got={checked!r}")
-        check('命名来源字段下拉: 默认选中「partname」',
-              dlg.part_combo.currentText() == 'partname',
-              f"got={dlg.part_combo.currentText()!r}")
+        check('「命名来源」默认选中「partname」',
+              dlg.clip_combo.currentText() == 'partname',
+              f"got={dlg.clip_combo.currentText()!r}")
         check('预览只显示前 5 行', dlg.model.rowCount() == 5,
               f"got={dlg.model.rowCount()}")
         check('预览列数 = 字段数', dlg.model.columnCount() == 3,
               f"got={dlg.model.columnCount()}")
         check('预览第一行 = 文档第一条数据',
               dlg.model.rows[0] == CSV_ROWS[0], f"got={dlg.model.rows[0]!r}")
-        check('海报地址自动填 = 文档目录/<partname首行>-poster',
+        check('海报地址自动填 = 文档目录/<命名来源首行>-poster',
               dlg.out_edit.text() == os.path.join(d, '星穹计划-poster'),
               f"got={dlg.out_edit.text()!r}")
         check('状态行报出分析结果',
               '8' in dlg.status_label.text(), f"got={dlg.status_label.text()!r}")
 
         # ---- 改了命名来源 → 海报地址同步跟着变 ----
-        dlg.part_combo.setCurrentIndex(2)          # '时长' → 首行值 '90'
-        check('改「命名来源字段」→ 海报地址**同步**跟着变',
+        dlg.clip_combo.setCurrentIndex(2)          # '时长' → 首行值 '90'
+        check('改「命名来源」→ 海报地址**同步**跟着变',
               dlg.out_edit.text() == os.path.join(d, '90-poster'),
               f"got={dlg.out_edit.text()!r}")
-        dlg.part_combo.setCurrentIndex(0)
+        dlg.clip_combo.setCurrentIndex(0)
         check('改回「partname」→ 地址也跟着回来',
               dlg.out_edit.text() == os.path.join(d, '星穹计划-poster'),
               f"got={dlg.out_edit.text()!r}")
@@ -569,6 +583,106 @@ def test_dialog_download():
         dlg.close()
 
 
+def test_clipname_vs_partname():
+    """命名来源 (文件夹) 与 文件名来源 (逐行不同) 必须分开。
+
+    2026-11-04 用户踩过: 之前的实现把两者合成一个字段 → 文件名用了
+    每行都一样的 clipname → 所有海报算出同一个文件名 → 后下的覆盖先下的。
+    """
+    section('命名来源 vs 文件名来源')
+    d = mkdtemp()
+    out = mkdtemp()
+    img = make_jpeg(os.path.join(d, 'a.jpg'), b'Z' * 50)
+    from pathlib import Path
+    url = Path(img).as_uri()
+    csv_path = os.path.join(d, '清单.csv')
+    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+        f.write('clipname,partname,海报链接\n')
+        for i in range(1, 4):
+            f.write('星穹计划,第%02d集,%s\n' % (i, url))
+
+    dlg = video_qt.PosterDialog(None)
+    try:
+        dlg.doc_edit.setText(csv_path)
+        dlg._on_analyze()
+        check('「命名来源」认到 clipname 列 (决定文件夹名)',
+              dlg.clip_combo.currentText() == 'clipname',
+              f"got={dlg.clip_combo.currentText()!r}")
+        check('「文件名来源」认到 partname 列 (不是 clipname!)',
+              dlg.part_combo.currentText() == 'partname',
+              f"got={dlg.part_combo.currentText()!r}")
+        check('海报地址用 clipname 的值',
+              dlg.out_edit.text() == os.path.join(d, '星穹计划-poster'),
+              f"got={dlg.out_edit.text()!r}")
+
+        dlg.out_edit.setText(out)
+        dlg._on_download()
+        deadline = time.time() + 20
+        while dlg._downloading and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        names = sorted(os.listdir(out))
+        check('文件名用 partname (逐行不同 → 不会互相覆盖)',
+              names == ['第01集-海报链接.jpg', '第02集-海报链接.jpg',
+                        '第03集-海报链接.jpg'],
+              f"got={names!r}")
+        check('三张都在 (没被覆盖掉)', len(names) == 3, f"got={len(names)}")
+    finally:
+        dlg.close()
+
+
+def test_pause_resume():
+    section('下载中可暂停')
+    import queue as _queue
+    import threading
+    d = mkdtemp()
+    out = mkdtemp()
+    img = make_jpeg(os.path.join(d, 'a.jpg'), b'P' * 50)
+    from pathlib import Path
+    url = Path(img).as_uri()
+
+    # --- 工作线程: 暂停标志没 set → 一张都不下; set 回来 → 全下完 ---
+    jobs = [(url, 'a'), (url, 'b'), (url, 'c')]
+    pause = threading.Event()
+    pause.clear()                      # 暂停中
+    cancel = threading.Event()
+    q: _queue.Queue = _queue.Queue(maxsize=20)
+    thread = threading.Thread(
+        target=video_qt._poster_worker,
+        args=(jobs, out, cancel, pause, q), daemon=True)
+    thread.start()
+    time.sleep(0.6)
+    check('暂停中 → 一张都没下', q.qsize() == 0, f"qsize={q.qsize()}")
+    check('暂停中 → 目录是空的', os.listdir(out) == [],
+          f"got={os.listdir(out)!r}")
+    pause.set()                        # 继续
+    thread.join(10)
+    check('继续后全下完', len(os.listdir(out)) == 3,
+          f"got={os.listdir(out)!r}")
+
+    # --- 按钮: 开始下载 → 下载中 → (点一下) 继续下载 → (再点) 下载中 ---
+    dlg = video_qt.PosterDialog(None)
+    try:
+        check('下载前按钮是「开始下载」',
+              dlg.download_btn.text() == '开始下载',
+              f"got={dlg.download_btn.text()!r}")
+        dlg._downloading = True
+        dlg._on_download_btn_click()
+        check('下载中点一下 → 变成「继续下载」',
+              dlg.download_btn.text() == '继续下载',
+              f"got={dlg.download_btn.text()!r}")
+        check('暂停时状态行报「已暂停」',
+              '暂停' in dlg.status_label.text(),
+              f"got={dlg.status_label.text()!r}")
+        dlg._on_download_btn_click()
+        check('再点一下 → 变回「下载中」',
+              dlg.download_btn.text() == '下载中',
+              f"got={dlg.download_btn.text()!r}")
+        dlg._downloading = False
+    finally:
+        dlg.close()
+
+
 def test_main_window_button():
     section('主窗口按钮')
     win = video_qt.MainWindow()
@@ -622,6 +736,8 @@ def main() -> int:
         test_default_dir()
         test_dialog()
         test_dialog_download()
+        test_clipname_vs_partname()
+        test_pause_resume()
         test_main_window_button()
     finally:
         QMessageBox.warning = orig_warning

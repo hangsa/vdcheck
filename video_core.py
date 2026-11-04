@@ -690,9 +690,14 @@ class TabularDocument:
 # 海报链接字段的列名线索 (小写比对)。第一个命中的列就是默认项。
 POSTER_URL_HINTS = ('url', 'link', '海报', '图片', '封面', 'poster', 'image',
                     '缩略图', '图集')
-# 命名来源字段 (partname) 的列名线索。
-PARTNAME_HINTS = ('partname', 'part_name', 'clipname', 'clip_name', '剧名',
-                   '片名', '集名', '名称', '名字', '标题', '项目名')
+# 「命名来源」字段 (clipname) 的列名线索 —— 决定**海报地址**(文件夹名),
+# 那一列的值通常是整个片子都一样。
+CLIPNAME_HINTS = ('clipname', 'clip_name', '剧名', '片名', '专辑', '项目',
+                  '系列', '名称', '名字', '标题')
+# 「文件名来源」字段 (partname) 的列名线索 —— 决定**每个文件的名字**,
+# 那一列的值必须**逐行能区分开**。
+PARTNAME_HINTS = ('partname', 'part_name', '分集', '集名', '期数', '话数',
+                  'episode', '编号', '集号')
 
 # 文件名里的非法字符 (Windows 那套) —— 一律换成 _
 _ILLEGAL_NAME_CHARS = re.compile(r'[\\/:*?"<>|]')
@@ -945,12 +950,52 @@ def guess_link_columns(headers: list[str], rows: list[list[str]]) -> list[int]:
     return [i for i in range(len(headers)) if looks_like_link(i)]
 
 
-def guess_partname_column(headers: list[str], rows: list[list[str]]) -> int:
-    """猜哪一列是命名来源 (partname): 按列名, 不像 → 第一列。"""
+def _column_varies(rows: list[list[str]], col: int) -> bool:
+    """这一列的值**逐行能区分开**吗 (不是每行都一样)。"""
+    values = {str(row[col]).strip() for row in rows
+              if col < len(row) and str(row[col]).strip()}
+    return len(values) > 1
+
+
+def guess_clipname_column(headers: list[str], rows: list[list[str]]) -> int:
+    """猜「命名来源」字段 (clipname) —— 决定**海报地址**(文件夹名)。
+
+    按列名线索 (clipname / 剧名 / 片名 / 专辑…) ; 没有线索就找一列
+    **所有行都一样**的 (那多半是片子级字段) ; 都没有 → 第一列。
+    """
     for i, header in enumerate(headers):
         low = str(header).strip().lower()
-        if any(k in low for k in PARTNAME_HINTS):
+        if any(k in low for k in CLIPNAME_HINTS):
             return i
+    for i in range(len(headers)):
+        if not _column_varies(rows, i):
+            return i
+    return 0
+
+
+def guess_partname_column(headers: list[str], rows: list[list[str]],
+                          exclude: int | None = None) -> int:
+    """猜「文件名来源」字段 (partname) —— 决定**每个海报文件的名字**。
+
+    要求这一列的值**逐行能区分开** —— 否则所有行会算出同一个文件名,
+    后下的把先下的覆盖掉 (2026-11-04 用户踩过这个坑)。
+    排除 exclude (通常是「命名来源」那一列, 它是整个片子共用的)，
+    也排除**链接列** (拿链接当文件名会得到一串网址)。
+    """
+    link_cols = set(guess_link_columns(headers, rows))
+    for i, header in enumerate(headers):
+        if i == exclude or i in link_cols:
+            continue
+        low = str(header).strip().lower()
+        if any(k in low for k in PARTNAME_HINTS) and _column_varies(rows, i):
+            return i
+    for i in range(len(headers)):
+        if i == exclude or i in link_cols:
+            continue
+        if _column_varies(rows, i):
+            return i
+    if exclude is not None and 0 <= exclude < len(headers):
+        return exclude
     return 0
 
 

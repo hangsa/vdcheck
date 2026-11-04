@@ -46,16 +46,16 @@ Run **every** script before claiming a change is done:
 for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $(basename $f)"; done
 ```
 
-The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `read_tabular_document`, `guess_link_columns`, `guess_partname_column`, `render_filename`, `extension_for_url`, `poster_default_dir`, `build_poster_jobs`, `download_poster`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
+The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `read_tabular_document`, `guess_clipname_column`, `guess_link_columns`, `guess_partname_column`, `render_filename`, `extension_for_url`, `poster_default_dir`, `build_poster_jobs`, `download_poster`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
 
 ## Architecture
 
-Three modules, ~4.0k lines total:
+Three modules, ~4.1k lines total:
 
 | File | Role |
 |---|---|
-| `video_core.py` (1041) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (2954) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_core.py` (1086) | Pure logic. **No Qt, no Tk.** |
+| `video_qt.py` (3024) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
 | `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -126,10 +126,12 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 
 **Poster dialog** — `PosterDialog(QDialog)` (modal), opened from the main window's 下载海报 button. It reads a **spreadsheet of poster links** and downloads the images; it is **independent of the video scan** (no `video_results` needed).
 - **Zero third-party dependencies**: `.csv` via the stdlib `csv` module (encoding sniffed utf-8-sig → gbk → utf-8); `.xlsx` via a hand-written parser (`zipfile` + `ElementTree`: `xl/workbook.xml` → first sheet's `r:id` → `xl/_rels/workbook.xml.rels` → the sheet part; strings from `xl/sharedStrings.xml` or `inlineStr`; cell refs like `A1`/`AA1` map to column indexes). **Old binary `.xls` is not supported** — `read_tabular_document` raises `DocumentFormatError` telling the user to re-save as `.xlsx`/`.csv`. Rationale: the project has exactly one third-party dep (PySide6); adding openpyxl/xlrd would touch `build.bat`'s `pip install` and the PyInstaller bundle, and the packaged exe can only be verified on Windows.
-- **Field guessing** is pure and testable: `guess_link_columns` returns **every** column that looks like a poster link (header-name hint **and** the values really look like URLs → else just the values → else *nothing*, so the user picks instead of the app silently downloading the wrong column); `guess_partname_column` (header-name hints → first column). The UI shows **all columns as a row of checkboxes** (auto-checked ones are the detected ones) — a table can have several poster-link columns (竖版/横版…), so a single-select combo would not do.
+- **Field guessing** is pure and testable: `guess_link_columns` returns **every** column that looks like a poster link (header-name hint **and** the values really look like URLs → else just the values → else *nothing*, so the user picks instead of the app silently downloading the wrong column); `guess_clipname_column` picks the **folder-name** column (header hints → a column whose value is the same on every row → first column); `guess_partname_column` picks the **file-name** column and **requires its values to differ per row** (header hints + varies → any varying non-link column → the clipname column). The UI shows **all columns as a row of checkboxes** (auto-checked ones are the detected ones) — a table can have several poster-link columns (竖版/横版…), so a single-select combo would not do.
 - **Naming** — `render_filename(template, partname, imgcol)` substitutes `{partname}`/`{imgcol}` (and the `[partname]`/`[imgcol]` bracket spelling), then replaces the illegal filename chars `\ / : * ? " < > |` with `_`. `{imgcol}` is that link column's **name**, not its value — with several link columns each file gets its own column name (`星穹计划-竖版海报.jpg` / `星穹计划-横版海报.jpg`).
+- **Two different source fields** (2026-11-04): the **命名来源** combo feeds `{clipname}` → only the **folder** name; the **文件名来源** combo feeds `{partname}` → the **file** name. They must not be the same column: a clip name repeats on every row, so using it for file names made every poster land on the same file (later rows overwrote earlier ones).
 - **Extension** — `extension_for_url(url, content_type)`: URL path suffix → `Content-Type` → `.jpg`.
-- **Dialog layout** (2026-11-04, user-specified order): row 1 = 文档 + 浏览 + **开始分析**; row 2 = **命名来源字段** (combo) + **海报地址** + 浏览; row 3 = 命名规则 + 「首行为字段名」 + **海报链接字段** (a row of checkboxes) + 开始下载. Changing 命名来源字段 **recomputes 海报地址** (`_sync_out_dir(force=True)`) — the two are meant to move together.
+- **Dialog layout** (2026-11-04, user-specified order): row 1 = 文档 + 浏览 + **开始分析**; row 2 = **命名来源** (combo) + **海报地址** + 浏览; row 3 = **海报命名规则** (template) + **文件名来源** (combo) + 「首行为字段名」 + 开始下载; row 4 = **海报链接字段** (a row of checkboxes, on its own row). Changing 命名来源 **recomputes 海报地址** (`_sync_out_dir(force=True)`) — the two are meant to move together.
+- **The download button has three states** (2026-11-04): `开始下载` → `下载中` → (click) `继续下载` → (click) `下载中` → done → `开始下载`. Pausing is **between files**: the in-flight download finishes, no new one starts. The worker waits on a `threading.Event` between jobs (`_pause`); the cancel event still wins.
 - The download runs on a **plain daemon thread** (`_poster_worker`, same shape as `_snapshot_worker`) with a **bounded queue (maxsize=20)**; the worker blocks on `put(timeout=…)` so a closed dialog can't wedge it forever. Closing the dialog cancels (the in-flight request is *not* killed). One failed row does not abort the batch; the summary is `下载完成：成功 N · 失败 M` plus the first 3 errors.
 - Changing the document path or the 「首行为字段名」 checkbox **invalidates the analysis** (the download button greys out) — otherwise a stale document would be downloaded.
 

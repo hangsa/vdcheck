@@ -37,7 +37,8 @@ from video_core import (
     VIDEO_EXTENSIONS, DocumentFormatError, VideoInfo, _cell_fg,
     _extract_sort_key, _header_text_with_arrow, _next_sort_state,
     build_poster_jobs, download_poster, extract_frame, format_title,
-    guess_link_columns, guess_partname_column, match_snapshots,
+    guess_clipname_column, guess_link_columns, guess_partname_column,
+    match_snapshots,
     parse_threshold, parse_time_token, parse_video_info, poster_default_dir,
     read_tabular_document, run_ffprobe, scan_existing_snapshots,
     scan_video_files, time_token_sort_key, time_token_to_string, truncate_text,
@@ -1491,12 +1492,15 @@ class PosterPreviewDelegate(TruncatingDelegate):
         painter.restore()
 
 
-def _poster_worker(jobs, output_dir, cancel_event, result_queue):
+def _poster_worker(jobs, output_dir, cancel_event, pause_event, result_queue):
     """后台下载海报。
 
     jobs: [(链接, 文件名不含扩展名)]
     消息: ('poster_item', (done, total, 文件名, ok, 错误信息))
           ('poster_done', (成功数, 失败数, 错误列表))
+
+    pause_event 没 set = **暂停中** → 两张之间停住 (正在下的那张下完
+    才停, 不半途掐断); set 回来 = 继续。
     """
     ok_count = 0
     fail_count = 0
@@ -1514,6 +1518,13 @@ def _poster_worker(jobs, output_dir, cancel_event, result_queue):
         return False
 
     for i, (url, base_name) in enumerate(jobs):
+        if cancel_event.is_set():
+            break
+        # 暂停中 → 在两张之间等着 (正在下的那张已经下完了)
+        while not pause_event.is_set():
+            if cancel_event.is_set():
+                break
+            time.sleep(0.1)
         if cancel_event.is_set():
             break
         try:
@@ -1555,6 +1566,8 @@ class PosterDialog(QDialog):
         self._download_errors: list[str] = []
         self._out_manual = False             # 海报地址被用户手改过 → 不自动覆盖
         self._cancel = threading.Event()
+        self._pause = threading.Event()     # 没 set = 暂停中
+        self._paused = False
         self._result_queue: queue.Queue = queue.Queue(maxsize=20)
         self._worker_thread = None
 
@@ -1572,7 +1585,8 @@ class PosterDialog(QDialog):
 
         # === 第一行: 文档 + 浏览 + 开始分析 ===
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel('文档:'))
+        self.doc_label = QLabel('文档:')
+        row1.addWidget(self.doc_label)
         self.doc_edit = QLineEdit()
         # 文档路径一变 → 之前的分析作废 (否则会拿着**旧文档**的海报去下载)。
         # 用 textChanged 而不是 textEdited: 后者只在**用户手打**时发,
@@ -1588,15 +1602,18 @@ class PosterDialog(QDialog):
         row1.addWidget(self.analyze_btn)
         root.addLayout(row1)
 
-        # === 第二行: 命名来源字段 + 海报地址 ===
-        # 「命名来源字段」在「海报地址」**前面** (2026-11-04 用户要求) ——
+        # === 第二行: 命名来源 + 海报地址 ===
+        # 「命名来源」在「海报地址」**前面** (2026-11-04 用户要求) ——
         # 换了命名来源, 海报地址要**同步**跟着变 (见 _on_part_changed)。
+        # 它决定的是**文件夹名** ({clipname}), 不是文件名。
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel('命名来源字段:'))
-        self.part_combo = QComboBox()
-        self.part_combo.currentIndexChanged.connect(self._on_part_changed)
-        row2.addWidget(self.part_combo)
-        row2.addWidget(QLabel('海报地址:'))
+        self.clip_label = QLabel('命名来源:')
+        row2.addWidget(self.clip_label)
+        self.clip_combo = QComboBox()
+        self.clip_combo.currentIndexChanged.connect(self._on_clip_changed)
+        row2.addWidget(self.clip_combo)
+        self.out_label = QLabel('海报地址:')
+        row2.addWidget(self.out_label)
         self.out_edit = QLineEdit()
         # textEdited **只在用户手改时**才发 —— 程序 setText 不会触发,
         # 正好用来分辨「自动填的」与「用户改过的」
@@ -1607,20 +1624,37 @@ class PosterDialog(QDialog):
         row2.addWidget(self.out_browse_btn)
         root.addLayout(row2)
 
-        # === 第三行: 命名规则 + 海报链接字段(可多选) + 开始下载 ===
+        # === 第三行: 海报命名规则 + 文件名来源 + 开始下载 ===
         row3 = QHBoxLayout()
-        row3.addWidget(QLabel('命名规则:'))
+        self.template_label = QLabel('海报命名规则:')
+        row3.addWidget(self.template_label)
         self.template_edit = QLineEdit('{partname}-{imgcol}')
         self.template_edit.setFixedWidth(220)
         row3.addWidget(self.template_edit)
+        # 「文件名来源」喂的是规则里的 {partname} —— 必须**逐行能区分开**,
+        # 否则所有海报算出同一个文件名, 后下的把先下的覆盖掉
+        self.part_label = QLabel('文件名来源:')
+        row3.addWidget(self.part_label)
+        self.part_combo = QComboBox()
+        row3.addWidget(self.part_combo)
         self.header_check = QCheckBox('首行为字段名')
         self.header_check.setChecked(True)
         # 改了这个 → 读法变了 → 之前的分析作废, 要重新「开始分析」
         self.header_check.toggled.connect(self._on_header_toggled)
         row3.addWidget(self.header_check)
-        row3.addWidget(QLabel('海报链接字段:'))
-        # 海报链接字段**可以有好几个** (2026-11-04 用户要求) → 用一排
-        # 勾选框, 而不是单选下拉。列多的时候横向滚动。
+        row3.addStretch(1)
+        self.download_btn = QPushButton('开始下载')
+        self.download_btn.clicked.connect(self._on_download_btn_click)
+        self.download_btn.setEnabled(False)   # 没分析过不许下载
+        row3.addWidget(self.download_btn)
+        root.addLayout(row3)
+
+        # === 第四行: 海报链接字段(可多选), 单独一行 ===
+        # (2026-11-04 用户要求: 单独做一行, 放在「海报命名规则」行之下)
+        row4 = QHBoxLayout()
+        self.link_label = QLabel('海报链接字段:')
+        row4.addWidget(self.link_label)
+        # 海报链接字段**可以有好几个** → 用一排勾选框, 列多时横向滚动。
         self.link_scroll = QScrollArea()
         self.link_scroll.setWidgetResizable(True)
         self.link_scroll.setFixedHeight(32)
@@ -1631,12 +1665,8 @@ class PosterDialog(QDialog):
         self._link_layout.setContentsMargins(0, 0, 0, 0)
         self._link_layout.setSpacing(8)
         self.link_scroll.setWidget(self._link_widget)
-        row3.addWidget(self.link_scroll, 1)
-        self.download_btn = QPushButton('开始下载')
-        self.download_btn.clicked.connect(self._on_download)
-        self.download_btn.setEnabled(False)   # 没分析过不许下载
-        row3.addWidget(self.download_btn)
-        root.addLayout(row3)
+        row4.addWidget(self.link_scroll, 1)
+        root.addLayout(row4)
 
         # === 中间: 预览 ===
         self.model = PosterPreviewModel([], [])
@@ -1706,18 +1736,19 @@ class PosterDialog(QDialog):
     def _on_out_edited(self) -> None:
         self._out_manual = True
 
-    def _on_part_changed(self) -> None:
-        """改了「命名来源字段」→ 海报地址**同步**跟着变 (用户要求)。
+    def _on_clip_changed(self) -> None:
+        """改了「命名来源」→ 海报地址**同步**跟着变 (用户要求)。
 
         force=True: 连用户手填的地址一起换掉 —— 用户要求两者同步。
         """
         self._sync_out_dir(force=True)
 
     def _sync_out_dir(self, force: bool = False) -> None:
-        """海报地址 = <文档所在目录>/<命名来源字段首行值>-poster。
+        """海报地址 = <文档所在目录>/<命名来源首行值>-poster。
 
+        「命名来源」喂的是 {clipname} —— 它决定**文件夹名**, 不是文件名。
         force=False (刚分析完): 用户手改过地址就不覆盖。
-        force=True  (用户改了「命名来源字段」): 无条件覆盖。
+        force=True  (用户改了「命名来源」): 无条件覆盖。
         """
         if self._doc is None:
             return
@@ -1726,11 +1757,11 @@ class PosterDialog(QDialog):
         path = self.doc_edit.text().strip()
         if not path:
             return
-        part_idx = self.part_combo.currentIndex()
-        part_value = ''
-        if part_idx >= 0 and self._doc.rows and part_idx < len(self._doc.rows[0]):
-            part_value = str(self._doc.rows[0][part_idx]).strip()
-        self.out_edit.setText(poster_default_dir(path, part_value))
+        clip_idx = self.clip_combo.currentIndex()
+        clip_value = ''
+        if clip_idx >= 0 and self._doc.rows and clip_idx < len(self._doc.rows[0]):
+            clip_value = str(self._doc.rows[0][clip_idx]).strip()
+        self.out_edit.setText(poster_default_dir(path, clip_value))
         self._out_manual = False
 
     def _rebuild_link_checks(self, headers: list[str], detected: set[int]) -> None:
@@ -1779,15 +1810,24 @@ class PosterDialog(QDialog):
         self._doc = doc
         self.model.set_document(doc.headers, doc.rows[:self.PREVIEW_ROWS])
 
-        # 命名来源字段: 猜一个, 用户可改
-        part_idx = guess_partname_column(doc.headers, doc.rows)
-        self.part_combo.blockSignals(True)      # 重建下拉别触发同步
+        # 命名来源 ({clipname}) → 海报地址(文件夹名);
+        # 文件名来源 ({partname}) → 每个海报文件的名字。
+        # 两者**分开**: 前者整个片子一样, 后者必须逐行能区分开 ——
+        # 用同一个字段会让所有海报算出同一个文件名, 后下的覆盖先下的。
+        clip_idx = guess_clipname_column(doc.headers, doc.rows)
+        part_idx = guess_partname_column(doc.headers, doc.rows, exclude=clip_idx)
+        self.clip_combo.blockSignals(True)      # 重建下拉别触发同步
+        self.clip_combo.clear()
+        self.clip_combo.addItems(doc.headers)
+        if doc.headers:
+            self.clip_combo.setCurrentIndex(
+                min(clip_idx, len(doc.headers) - 1))
+        self.clip_combo.blockSignals(False)
         self.part_combo.clear()
         self.part_combo.addItems(doc.headers)
         if doc.headers:
             self.part_combo.setCurrentIndex(
                 min(part_idx, len(doc.headers) - 1))
-        self.part_combo.blockSignals(False)
 
         # 海报链接字段: 所有列都列出来, 自动认出的勾上 (可能有好几个)
         detected = set(guess_link_columns(doc.headers, doc.rows))
@@ -1805,6 +1845,31 @@ class PosterDialog(QDialog):
         self.status_label.setText(text)
 
     # ---- 开始下载 ----
+
+    def _on_download_btn_click(self) -> None:
+        """「开始下载」/「下载中」/「继续下载」—— 同一个按钮三种状态。
+
+        下载中点一下 = **暂停** (2026-11-04 用户要求): 正在下的那一张
+        下完就停, 不再开始下一张; 再点一下继续。
+        """
+        if not self._downloading:
+            self._on_download()
+        elif self._paused:
+            self._resume_download()
+        else:
+            self._pause_download()
+
+    def _pause_download(self) -> None:
+        self._paused = True
+        self._pause.clear()          # 工作线程在两张之间看到没 set 就停下
+        self.download_btn.setText('继续下载')
+        self.status_label.setText('已暂停 — 点「继续下载」继续')
+
+    def _resume_download(self) -> None:
+        self._paused = False
+        self._pause.set()
+        self.download_btn.setText('下载中')
+        self.status_label.setText('继续下载…')
 
     def _on_download(self) -> None:
         if self._downloading:
@@ -1834,6 +1899,8 @@ class PosterDialog(QDialog):
             return
 
         self._cancel.clear()
+        self._pause.set()                        # 默认「在跑」
+        self._paused = False
         self._download_ok = 0
         self._download_failed = 0
         self._download_errors = []
@@ -1841,12 +1908,13 @@ class PosterDialog(QDialog):
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
         self.analyze_btn.setEnabled(False)
-        self.download_btn.setEnabled(False)
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText('下载中')
         self.status_label.setText(f'准备下载 {len(jobs)} 张海报…')
         self._result_queue = queue.Queue(maxsize=20)
         self._worker_thread = threading.Thread(
             target=_poster_worker,
-            args=(jobs, out_dir, self._cancel, self._result_queue),
+            args=(jobs, out_dir, self._cancel, self._pause, self._result_queue),
             daemon=True)
         self._worker_thread.start()
         self._poll_timer.start()
@@ -1873,12 +1941,14 @@ class PosterDialog(QDialog):
     def _on_download_done(self, ok_count: int, fail_count: int,
                           errors: list[str]) -> None:
         self._downloading = False
+        self._paused = False
         self._download_ok = ok_count
         self._download_failed = fail_count
         self._download_errors = list(errors)
         self._poll_timer.stop()
         self.analyze_btn.setEnabled(True)
         self.download_btn.setEnabled(True)
+        self.download_btn.setText('开始下载')
         self.progress.setValue(self.progress.maximum())
         text = f'下载完成：成功 {ok_count} · 失败 {fail_count}'
         if errors:
