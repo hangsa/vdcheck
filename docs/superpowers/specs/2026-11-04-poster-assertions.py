@@ -67,16 +67,18 @@ def section(title: str) -> None:
 
 # ---------------------------------------------------------------- 文档样本
 
-CSV_HEADERS = ['partname', '海报链接', '时长']
+# 一张**真实形状**的表: 剧名整个片子一样 (→ 文件夹名), 集名逐行不同
+# (→ 每个海报的文件名), 海报链接是链接, 时长是数字 (不该被当文件名来源)
+CSV_HEADERS = ['剧名', '集名', '海报链接', '时长']
 CSV_ROWS = [
-    ['星穹计划', 'http://x.test/a.jpg', '90'],
-    ['天启纪元', 'http://x.test/b.jpg', '95'],
-    ['星穹计划', 'http://x.test/c.jpg', '100'],
-    ['苍山洱海', 'http://x.test/d.jpg', '88'],
-    ['北纬三十度', 'http://x.test/e.jpg', '77'],
-    ['南风知我意', 'http://x.test/f.jpg', '66'],
-    ['长夜行', 'http://x.test/g.jpg', '55'],
-    ['春日迟迟', 'http://x.test/h.jpg', '44'],
+    ['星穹计划', '第01集', 'http://x.test/a.jpg', '90'],
+    ['天启纪元', '第02集', 'http://x.test/b.jpg', '95'],
+    ['星穹计划', '第03集', 'http://x.test/c.jpg', '100'],
+    ['苍山洱海', '第04集', 'http://x.test/d.jpg', '88'],
+    ['北纬三十度', '第05集', 'http://x.test/e.jpg', '77'],
+    ['南风知我意', '第06集', 'http://x.test/f.jpg', '66'],
+    ['长夜行', '第07集', 'http://x.test/g.jpg', '55'],
+    ['春日迟迟', '第08集', 'http://x.test/h.jpg', '44'],
 ]
 
 
@@ -217,7 +219,7 @@ def test_read_csv():
     check('表头读对', doc.headers == CSV_HEADERS, f"got={doc.headers!r}")
     check('行数读对', len(doc.rows) == 8, f"got={len(doc.rows)}")
     check('第一行数据读对', doc.rows[0] == CSV_ROWS[0], f"got={doc.rows[0]!r}")
-    check('utf-8 BOM 被吃掉', doc.headers[0] == 'partname',
+    check('utf-8 BOM 被吃掉', not doc.headers[0].startswith('\ufeff'),
           f"got={doc.headers[0]!r}")
 
     path_gbk = os.path.join(d, 'gbk.csv')
@@ -299,11 +301,14 @@ def test_guess_columns():
     headers = CSV_HEADERS
     rows = CSV_ROWS
     check('海报链接字段: 按列名猜',
-          video_core.guess_link_columns(headers, rows) == [1],
+          video_core.guess_link_columns(headers, rows) == [2],
           f"got={video_core.guess_link_columns(headers, rows)}")
-    check('命名来源字段: 按列名猜',
-          video_core.guess_partname_column(headers, rows) == 0,
+    check('文件名来源: 按列名猜 (集名)',
+          video_core.guess_partname_column(headers, rows) == 1,
           f"got={video_core.guess_partname_column(headers, rows)}")
+    check('命名来源: 按列名猜 (剧名)',
+          video_core.guess_clipname_column(headers, rows) == 0,
+          f"got={video_core.guess_clipname_column(headers, rows)}")
 
     # 列名里没有线索 → 看值是不是像链接
     h2 = ['甲', '乙']
@@ -430,9 +435,9 @@ def test_default_dir():
     check('= 文档所在目录/<partname>-poster', got == expect, f"got={got!r}")
 
     jobs = video_core.build_poster_jobs(
-        CSV_ROWS, 0, [(1, '海报链接')], '{partname}-{imgcol}')
+        CSV_ROWS, 1, [(2, '海报链接')], '{partname}-{imgcol}')
     check('jobs: 数量', len(jobs) == 8, f"got={len(jobs)}")
-    check('jobs: 文件名按模板', jobs[0] == ('http://x.test/a.jpg', '星穹计划-海报链接'),
+    check('jobs: 文件名按模板', jobs[0] == ('http://x.test/a.jpg', '第01集-海报链接'),
           f"got={jobs[0]!r}")
     check('jobs: 空链接的行跳过',
           video_core.build_poster_jobs([['a', '']], 0, [(1, 'c')],
@@ -479,6 +484,13 @@ def test_dialog():
         check('标签: 「海报命名规则」',
               dlg.template_label.text() == '海报命名规则:',
               f"got={dlg.template_label.text()!r}")
+        # ---- 2026-11-04 细微调整 ----
+        check('「命名来源」下拉框够宽 (≥150px)',
+              dlg.clip_combo.width() >= 150, f"got={dlg.clip_combo.width()}")
+        check('「海报链接字段」那行够高 (≥38px)',
+              dlg.link_scroll.height() >= 38, f"got={dlg.link_scroll.height()}")
+        check('没有「文件名来源」下拉框了 (用户要求去掉)',
+              not hasattr(dlg, 'part_combo'))
 
         dlg.doc_edit.setText(csv_path)
         dlg._on_analyze()
@@ -489,12 +501,15 @@ def test_dialog():
         checked = [name for name, cb in dlg.link_checks if cb.isChecked()]
         check('海报链接字段: 自动认出「海报链接」并勾上',
               checked == ['海报链接'], f"got={checked!r}")
-        check('「命名来源」默认选中「partname」',
-              dlg.clip_combo.currentText() == 'partname',
+        check('「命名来源」默认选中「剧名」 (决定文件夹名)',
+              dlg.clip_combo.currentText() == '剧名',
               f"got={dlg.clip_combo.currentText()!r}")
+        check('文件名来源自动挑中「集名」 (逐行不同的那一列)',
+              dlg.part_column_name == '集名',
+              f"got={dlg.part_column_name!r}")
         check('预览只显示前 5 行', dlg.model.rowCount() == 5,
               f"got={dlg.model.rowCount()}")
-        check('预览列数 = 字段数', dlg.model.columnCount() == 3,
+        check('预览列数 = 字段数', dlg.model.columnCount() == 4,
               f"got={dlg.model.columnCount()}")
         check('预览第一行 = 文档第一条数据',
               dlg.model.rows[0] == CSV_ROWS[0], f"got={dlg.model.rows[0]!r}")
@@ -503,9 +518,12 @@ def test_dialog():
               f"got={dlg.out_edit.text()!r}")
         check('状态行报出分析结果',
               '8' in dlg.status_label.text(), f"got={dlg.status_label.text()!r}")
+        check('状态行报出「文件名取自哪一列」',
+              '文件名取自' in dlg.status_label.text(),
+              f"got={dlg.status_label.text()!r}")
 
         # ---- 改了命名来源 → 海报地址同步跟着变 ----
-        dlg.clip_combo.setCurrentIndex(2)          # '时长' → 首行值 '90'
+        dlg.clip_combo.setCurrentIndex(3)          # '时长' → 首行值 '90'
         check('改「命名来源」→ 海报地址**同步**跟着变',
               dlg.out_edit.text() == os.path.join(d, '90-poster'),
               f"got={dlg.out_edit.text()!r}")
@@ -515,7 +533,7 @@ def test_dialog():
               f"got={dlg.out_edit.text()!r}")
 
         # ---- 勾多个链接字段 ----
-        dlg.link_checks[2][1].setChecked(True)      # 把「时长」也勾上
+        dlg.link_checks[3][1].setChecked(True)      # 把「时长」也勾上
         check('可以勾多个海报链接字段',
               [n for n, cb in dlg.link_checks if cb.isChecked()]
               == ['海报链接', '时长'])
@@ -609,8 +627,8 @@ def test_clipname_vs_partname():
               dlg.clip_combo.currentText() == 'clipname',
               f"got={dlg.clip_combo.currentText()!r}")
         check('「文件名来源」认到 partname 列 (不是 clipname!)',
-              dlg.part_combo.currentText() == 'partname',
-              f"got={dlg.part_combo.currentText()!r}")
+              dlg.part_column_name == 'partname',
+              f"got={dlg.part_column_name!r}")
         check('海报地址用 clipname 的值',
               dlg.out_edit.text() == os.path.join(d, '星穹计划-poster'),
               f"got={dlg.out_edit.text()!r}")

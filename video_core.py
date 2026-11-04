@@ -957,6 +957,20 @@ def _column_varies(rows: list[list[str]], col: int) -> bool:
     return len(values) > 1
 
 
+def _column_is_text(rows: list[list[str]], col: int) -> bool:
+    """这一列的值是**文字**吗 (不是纯数字) —— 数字列 (时长/集数) 当文件名不合适。"""
+    values = [str(row[col]).strip() for row in rows
+              if col < len(row) and str(row[col]).strip()]
+    if not values:
+        return False
+    for value in values:
+        try:
+            float(value)
+        except ValueError:
+            return True          # 有一个不是数字 → 算文字列
+    return False
+
+
 def guess_clipname_column(headers: list[str], rows: list[list[str]]) -> int:
     """猜「命名来源」字段 (clipname) —— 决定**海报地址**(文件夹名)。
 
@@ -988,6 +1002,11 @@ def guess_partname_column(headers: list[str], rows: list[list[str]],
             continue
         low = str(header).strip().lower()
         if any(k in low for k in PARTNAME_HINTS) and _column_varies(rows, i):
+            return i
+    for i in range(len(headers)):
+        if i == exclude or i in link_cols:
+            continue
+        if _column_varies(rows, i) and _column_is_text(rows, i):
             return i
     for i in range(len(headers)):
         if i == exclude or i in link_cols:

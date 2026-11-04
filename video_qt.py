@@ -1560,6 +1560,8 @@ class PosterDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._doc = None                     # TabularDocument
+        self._part_index = 0                 # {partname} 取自哪一列 (自动挑)
+        self.part_column_name = ''           # 那一列的列名 (状态行里报出来)
         self._downloading = False
         self._download_ok = 0
         self._download_failed = 0
@@ -1610,6 +1612,7 @@ class PosterDialog(QDialog):
         self.clip_label = QLabel('命名来源:')
         row2.addWidget(self.clip_label)
         self.clip_combo = QComboBox()
+        self.clip_combo.setFixedWidth(160)      # 列名可能挺长 (2026-11-04 用户要求)
         self.clip_combo.currentIndexChanged.connect(self._on_clip_changed)
         row2.addWidget(self.clip_combo)
         self.out_label = QLabel('海报地址:')
@@ -1624,19 +1627,16 @@ class PosterDialog(QDialog):
         row2.addWidget(self.out_browse_btn)
         root.addLayout(row2)
 
-        # === 第三行: 海报命名规则 + 文件名来源 + 开始下载 ===
+        # === 第三行: 海报命名规则 + 开始下载 ===
         row3 = QHBoxLayout()
         self.template_label = QLabel('海报命名规则:')
         row3.addWidget(self.template_label)
         self.template_edit = QLineEdit('{partname}-{imgcol}')
         self.template_edit.setFixedWidth(220)
         row3.addWidget(self.template_edit)
-        # 「文件名来源」喂的是规则里的 {partname} —— 必须**逐行能区分开**,
-        # 否则所有海报算出同一个文件名, 后下的把先下的覆盖掉
-        self.part_label = QLabel('文件名来源:')
-        row3.addWidget(self.part_label)
-        self.part_combo = QComboBox()
-        row3.addWidget(self.part_combo)
+        # 规则里的 {partname} 取自哪一列 —— **自动挑**, 不占界面 (2026-11-04
+        # 用户要求去掉那个下拉框)。挑的是「每行都不同」的那一列, 挑完在
+        # 状态行里报出来 (self.part_column_name)。
         self.header_check = QCheckBox('首行为字段名')
         self.header_check.setChecked(True)
         # 改了这个 → 读法变了 → 之前的分析作废, 要重新「开始分析」
@@ -1657,7 +1657,7 @@ class PosterDialog(QDialog):
         # 海报链接字段**可以有好几个** → 用一排勾选框, 列多时横向滚动。
         self.link_scroll = QScrollArea()
         self.link_scroll.setWidgetResizable(True)
-        self.link_scroll.setFixedHeight(32)
+        self.link_scroll.setFixedHeight(40)      # 勾选框别被切掉 (2026-11-04 用户要求)
         self.link_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.link_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._link_widget = QWidget()
@@ -1810,9 +1810,9 @@ class PosterDialog(QDialog):
         self._doc = doc
         self.model.set_document(doc.headers, doc.rows[:self.PREVIEW_ROWS])
 
-        # 命名来源 ({clipname}) → 海报地址(文件夹名);
-        # 文件名来源 ({partname}) → 每个海报文件的名字。
-        # 两者**分开**: 前者整个片子一样, 后者必须逐行能区分开 ——
+        # 命名来源 ({clipname}) → 海报地址(文件夹名), 用户可改;
+        # {partname} (文件名) 取自哪一列 → **自动挑**, 挑「每行都不同」的
+        # 那一列。两者**必须分开**: 前者整个片子一样, 后者逐行不同 ——
         # 用同一个字段会让所有海报算出同一个文件名, 后下的覆盖先下的。
         clip_idx = guess_clipname_column(doc.headers, doc.rows)
         part_idx = guess_partname_column(doc.headers, doc.rows, exclude=clip_idx)
@@ -1823,22 +1823,21 @@ class PosterDialog(QDialog):
             self.clip_combo.setCurrentIndex(
                 min(clip_idx, len(doc.headers) - 1))
         self.clip_combo.blockSignals(False)
-        self.part_combo.clear()
-        self.part_combo.addItems(doc.headers)
-        if doc.headers:
-            self.part_combo.setCurrentIndex(
-                min(part_idx, len(doc.headers) - 1))
+        self._part_index = part_idx
+        self.part_column_name = (doc.headers[part_idx]
+                                 if 0 <= part_idx < len(doc.headers) else '')
 
         # 海报链接字段: 所有列都列出来, 自动认出的勾上 (可能有好几个)
         detected = set(guess_link_columns(doc.headers, doc.rows))
         self._rebuild_link_checks(doc.headers, detected)
 
-        # 海报地址默认值: 文档所在目录/<命名来源字段首行值>-poster
+        # 海报地址默认值: 文档所在目录/<命名来源首行值>-poster
         self._sync_out_dir()
 
         self.download_btn.setEnabled(True)
         shown = min(len(doc.rows), self.PREVIEW_ROWS)
         text = (f'已分析：共 {len(doc.rows)} 行 · {len(doc.headers)} 个字段'
+                f' · 文件名取自「{self.part_column_name}」'
                 f' · 认出 {len(detected)} 个海报链接字段 (显示前 {shown} 行)')
         if not detected:
             text += ' — 没认出来, 请自己勾'
@@ -1881,7 +1880,7 @@ class PosterDialog(QDialog):
         if not out_dir:
             QMessageBox.warning(self, '提示', '请先设置海报地址。')
             return
-        part_idx = max(self.part_combo.currentIndex(), 0)
+        part_idx = max(self._part_index, 0)
         links = self._checked_links()
         if not links:
             QMessageBox.warning(self, '提示',
