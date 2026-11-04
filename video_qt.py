@@ -2312,6 +2312,7 @@ class ScanWorker(QObject):
                  bitrate_std: float, sample_rate_std: float,
                  cancel_event: threading.Event, stats: ScanStats,
                  pause_event: threading.Event | None = None,
+                 skip_paths: set[str] | None = None,
                  parent=None):
         super().__init__(parent)
         self._kind = kind                 # 'dir' | 'files'
@@ -2322,6 +2323,8 @@ class ScanWorker(QObject):
         # 暂停标志: 没 set = 暂停中 → **停在文件之间** (当前这个测完就停)
         self._pause = pause_event if pause_event is not None else threading.Event()
         self._pause.set()
+        # 已经测完的文件 (完整路径) —— **跳过, 不重测** (2026-11-04)
+        self._skip = set(skip_paths or ())
         self._stats = stats
 
     @Slot()
@@ -2356,6 +2359,9 @@ class ScanWorker(QObject):
                 time.sleep(0.1)
             if self._cancel.is_set():
                 break
+            if fp in self._skip:
+                # 已经测完的 → 不重测 (也不报进度, 免得计数闪回去)
+                continue
             self.progress.emit(
                 f'正在检测... ({i}/{total}) {os.path.basename(fp)}')
             data = run_ffprobe(fp)
@@ -2765,7 +2771,10 @@ class MainWindow(QMainWindow):
         self.set_status('已暂停 — 点「继续检测」继续')
 
     def _resume_scan(self) -> None:
-        """继续检测 —— 从暂停的地方接着测 (已测完的**不重测**)。"""
+        """继续检测 —— 从暂停的地方接着测 (已测完的**不重测**)。
+
+        记录在暂停期间被清了 → 从头重测 (记录没了, 得再测一遍)。
+        """
         if self._scan_target_unchanged() and not self._scan_cleared:
             self._scan_paused = False
             self._scan_pause.set()
@@ -2812,7 +2821,12 @@ class MainWindow(QMainWindow):
         self._sync_derived_paths(directory)
 
         kind, payload = self._scan_target(directory)
-        self._begin_scan(kind, payload, bitrate_std, sample_rate_std)
+        # **路径没变 + 记录还在 → 接着测** (已测完的不重测, 从上次停下的
+        # 地方往下测); 否则 → 从头测 (2026-11-04 用户要求)。
+        # 记录被「清除记录」清掉 → video_results 空了 → 从头测 ✓
+        continue_scan = bool(self.video_results) and self._scan_target_unchanged()
+        self._begin_scan(kind, payload, bitrate_std, sample_rate_std,
+                         continue_scan=continue_scan)
 
     def _scan_target(self, directory: str) -> tuple[str, object]:
         """本次扫描的目标: ('files', 文件列表) 或 ('dir', 目录)。
@@ -2824,8 +2838,12 @@ class MainWindow(QMainWindow):
         return ('dir', directory)
 
     def _begin_scan(self, kind: str, payload, bitrate_std: float,
-                    sample_rate_std: float) -> None:
-        """真正把扫描跑起来 (点按钮与拖拽共用这一条路径)。"""
+                    sample_rate_std: float, continue_scan: bool = False) -> None:
+        """真正把扫描跑起来 (点按钮与拖拽共用这一条路径)。
+
+        continue_scan=True = **接着测**: 保留已有结果, **已测完的文件不重测**
+        (2026-11-04 用户要求: 路径没变就别从头来)。
+        """
         self._cancel.clear()
         self._scan_pause.set()            # 新的一轮 → 不在暂停中
         self._scan_paused = False
@@ -2835,8 +2853,13 @@ class MainWindow(QMainWindow):
         self.total_files = 0
         self.scan_btn.setText('检测中')
         self.scan_btn.setEnabled(True)
-        self.video_results.clear()
-        self.model.clear()
+        if continue_scan:
+            # 接着测: **不清**已有结果 —— 已经测完的文件直接跳过
+            skip_paths = {v.full_path for v in self.video_results}
+        else:
+            self.video_results.clear()
+            self.model.clear()
+            skip_paths = set()
         # 新一轮扫描: 计数从头来。
         #
         # 更正 (2026-10-29): 旧注释写的是「漏了这一步 _passed_count 会带着
@@ -2852,7 +2875,8 @@ class MainWindow(QMainWindow):
         #   → 这句 = 0 因此**不是 load-bearing** 的, 它只是双保险 (让扫描
         #   过程中 _add_result 的自增也不带着上一轮的值), 删掉它也不会让
         #   状态栏的计数出错。
-        self._passed_count = 0
+        if not continue_scan:
+            self._passed_count = 0
 
         self._thread = QThread(self)
         if kind == 'dir':
@@ -2865,7 +2889,7 @@ class MainWindow(QMainWindow):
         self._scan_payload = list(payload) if kind == 'files' else None
         self._worker = ScanWorker(kind, worker_payload, bitrate_std,
                                   sample_rate_std, self._cancel, self._stats,
-                                  self._scan_pause)
+                                  self._scan_pause, skip_paths)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)

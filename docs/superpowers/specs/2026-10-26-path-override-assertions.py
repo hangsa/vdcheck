@@ -74,7 +74,8 @@ def section(title: str) -> None:
 
 def stub_scan(app, calls):
     """把真正开扫描的那一步换成记录器, 免得真起线程调 ffprobe。"""
-    app._begin_scan = (lambda kind, payload, bitrate_std, sample_rate_std:
+    app._begin_scan = (lambda kind, payload, bitrate_std, sample_rate_std,
+                       continue_scan=False:
                        calls.append((kind, payload)))
 
 

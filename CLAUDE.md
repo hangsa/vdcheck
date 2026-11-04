@@ -55,7 +55,7 @@ Three modules, ~4.6k lines total:
 | File | Role |
 |---|---|
 | `video_core.py` (1192) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (3413) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_qt.py` (3437) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
 | `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -91,6 +91,7 @@ Three modules, ~4.6k lines total:
 
 **App** — `MainWindow(QMainWindow)`:
 - Row 1: path entry + 浏览 + 子文件夹 checkbox + 开始检测 button. The button is **three-state** (2026-11-04): `开始检测` → `检测中` → (click) **暂停** → `继续检测` → (click) resume → `检测中` → `开始检测`. A separate `threading.Event` (`_scan_pause`) pauses the worker **between files**. On resume: if the target is unchanged (same path *and* same dragged-in file list) **the same worker is woken up** — the already-tested files are **not** re-tested; if the path changed or the records were cleared while paused, the old worker is cancelled and a **fresh round starts automatically** (`_scan_restart` → `_scan_complete` → `_start_scan`) — restarting the worker directly would double-report the file it is currently on. Clicking the running button used to **cancel** the scan; now it pauses (cancel is left to closing the window, like the snapshot / poster dialogs).
+- **「开始检测」= continue, not restart** (2026-11-04, after the user hit the gap): an idle click on 开始检测 **keeps the results and skips the already-tested files** when the path is unchanged and the records are still there (`continue_scan=True` → `ScanWorker(skip_paths=…)` skips those paths, `_begin_scan` does *not* clear `video_results` / the model). Only a changed path or a cleared record set starts over. To re-scan the same folder, press 清除记录 first.
 - Row 2: 码率标准 + 采样率标准 inputs on the left; **清除记录 → 定点截图 → 下载海报** in that order at the row's right end (定点截图 was moved after 清除记录 on 2026-11-03 — it used to sit next to the kHz label; 下载海报 was added after it on 2026-11-04), then a 272px trailing spacing (the row's right margin; the rightmost button — now 下载海报 — aligns with Row 1's path entry right edge). All three buttons are kept as attributes (`self.clear_btn` / `self.snapshot_btn` / `self.poster_btn`) so the order is assertable
 - Center: `QTableView` with the 12 columns above
 - Bottom: 迁移地址 + 浏览 + 移动达标文件 + 移动全部文件

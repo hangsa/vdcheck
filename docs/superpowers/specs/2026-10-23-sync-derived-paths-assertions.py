@@ -176,7 +176,8 @@ def main() -> int:
     # 挡掉真实扫描 (会起线程调 ffprobe), 只测开始检测的前半段
     scanned: list[tuple] = []
     real_begin = app._begin_scan
-    app._begin_scan = (lambda kind, payload, bitrate_std, sample_rate_std:
+    app._begin_scan = (lambda kind, payload, bitrate_std, sample_rate_std,
+                       continue_scan=False:
                        scanned.append((kind, payload)))
     try:
         app.path_edit.setText(tmp_b)

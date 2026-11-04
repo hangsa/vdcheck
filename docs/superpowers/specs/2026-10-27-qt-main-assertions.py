@@ -520,6 +520,42 @@ def _run() -> int:
           f"got={win7.model.rowCount()}")
     video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
 
+    # ---- 路径没变 → 再点「开始检测」是**接着测**, 不是从头测 ----
+    section("路径没变 + 记录还在 → 再点「开始检测」接着测 (不重测)")
+    win8 = MainWindow()
+    tested8: list[str] = []
+
+    def slow8(path):
+        tested8.append(os.path.basename(path))
+        time.sleep(0.02)
+        return fake_ffprobe_json()
+
+    video_qt.run_ffprobe = slow8
+    win8.path_edit.setText(src)
+    win8._start_scan()
+    ok8 = wait_scan(win8)
+    check("第一轮扫完了", ok8)
+    n_first = len(tested8)
+    check("第一轮测了 3 个", n_first == 3, f"got={n_first}")
+    win8._on_scan_btn_click()             # 再点一次 (路径没变)
+    ok8b = wait_scan(win8)
+    check("再点一次也跑完了", ok8b)
+    check("**没有文件被重测** (路径没变 → 接着测)",
+          len(tested8) == n_first, f"got={len(tested8)} {tested8}")
+    check("表格里的行还在 (接着测不清结果)",
+          win8.model.rowCount() == 3, f"got={win8.model.rowCount()}")
+    check("状态行还是「检测完成」",
+          '检测完成' in win8.status_bar.currentMessage(),
+          f"got={win8.status_bar.currentMessage()!r}")
+    # 清除记录 → 从头测
+    win8._clear_records()
+    check("「清除记录」清空了结果", len(win8.video_results) == 0)
+    win8._on_scan_btn_click()
+    ok8c = wait_scan(win8)
+    check("清记录后再点 → 从头重测", len(tested8) == 6,
+          f"got={len(tested8)} {tested8}")
+    video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
+
     # ================================================================
     section("派生路径 (迁移地址 / 截图地址)")
     win4 = MainWindow()
