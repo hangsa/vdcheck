@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **视频码率检查器** (Video Bitrate Checker) — a Chinese-language PySide6 desktop app that scans a directory of video files (or files dropped onto the window), calls `ffprobe` on each, and flags which files meet a user-configured bitrate threshold (default 30000 kbps) **and** sample-rate threshold (default 48 kHz). Users can then move all passing — or all scanned — files to a destination folder. A secondary "定点截图" (fixed-timestamp screenshot) dialog extracts frames at chosen timestamps for eyeball comparison.
 
-The GUI was Tkinter (v3.3) until v4.0 replaced it with PySide6 / `QTableView`. That rewrite lived on the `refactor/qtableview` branch and was fast-forward-merged into `main` (branch deleted) — **`main` is the PySide6 line, currently v4.1** (v4.0 = the Qt rewrite, v4.1 = 定点截图的「查看已有截图」). The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
+The GUI was Tkinter (v3.3) until v4.0 replaced it with PySide6 / `QTableView`. That rewrite lived on the `refactor/qtableview` branch and was fast-forward-merged into `main` (branch deleted) — **`main` is the PySide6 line, currently v4.2** (v4.0 = the Qt rewrite, v4.1 = 定点截图的「查看已有截图」, v4.2 = 「下载海报」). The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
 
 ## Running
 
@@ -46,17 +46,17 @@ Run **every** script before claiming a change is done:
 for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $(basename $f)"; done
 ```
 
-The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
+The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `read_tabular_document`, `guess_link_column`, `guess_partname_column`, `render_filename`, `extension_for_url`, `poster_default_dir`, `build_poster_jobs`, `download_poster`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
 
 ## Architecture
 
-Three modules, ~3.1k lines total:
+Three modules, ~3.9k lines total:
 
 | File | Role |
 |---|---|
-| `video_core.py` (657) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (2439) | The whole Qt GUI: models, main window, snapshot dialog, zoom window. |
-| `video_checker.py` (34) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
+| `video_core.py` (1016) | Pure logic. **No Qt, no Tk.** |
+| `video_qt.py` (2883) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
 - `scan_video_files(directory, recursive)` — enumerates files matching `VIDEO_EXTENSIONS` (36 extensions, case-insensitive; `os.walk` when recursive, `os.listdir` otherwise, unsorted)
@@ -89,7 +89,7 @@ Three modules, ~3.1k lines total:
 
 **App** — `MainWindow(QMainWindow)`:
 - Row 1: path entry + 浏览 + 子文件夹 checkbox + 开始检测 button (toggles to 检测中 / 正在停止... when scanning; clicking while scanning cancels via `self._cancel`)
-- Row 2: 码率标准 + 采样率标准 inputs on the left; **清除记录 then 定点截图** side by side at the row's right end (定点截图 was moved after 清除记录 on 2026-11-03 — it used to sit next to the kHz label), then a 272px trailing spacing (the row's right margin; the rightmost button aligns with Row 1's path entry right edge). Both buttons are kept as attributes (`self.clear_btn` / `self.snapshot_btn`) so the order is assertable
+- Row 2: 码率标准 + 采样率标准 inputs on the left; **清除记录 → 定点截图 → 下载海报** in that order at the row's right end (定点截图 was moved after 清除记录 on 2026-11-03 — it used to sit next to the kHz label; 下载海报 was added after it on 2026-11-04), then a 272px trailing spacing (the row's right margin; the rightmost button — now 下载海报 — aligns with Row 1's path entry right edge). All three buttons are kept as attributes (`self.clear_btn` / `self.snapshot_btn` / `self.poster_btn`) so the order is assertable
 - Center: `QTableView` with the 12 columns above
 - Bottom: 迁移地址 + 浏览 + 移动达标文件 + 移动全部文件
 - Status bar: a single `QStatusBar` line. Terminal states append the tally via `set_status(text, with_counts=True)` → `检测完成：共 10 · 达标 8 · 不达标 2`; intermediate states (就绪 / 正在检测... (3/10) a.mp4) show only the progress text. The "共 N" in the tally counts **results produced**; the M in "已完成 N/M" is the **total files found** — different sources, not a contradiction.
@@ -108,7 +108,7 @@ The `self._cancel: threading.Event` is checked at the top of each per-file loop;
 
 **File mover** — both `_move_passing_files` and `_move_all_files` follow the same shape: confirm via a `QMessageBox` question, `os.makedirs(dest_dir, exist_ok=True)`, then `shutil.move` each file, with `_get_unique_dest` appending `_1`, `_2`, ... on name collisions. `_move_passing_files` filters `video_results` by `is_passing`; `_move_all_files` moves everything regardless of pass/fail. Both are **moves**, not copies, and they walk `video_results` — the **insertion order** list, not the table's sorted order.
 
-**Output directories are created on demand** — scanning/browsing never creates a directory. `snapshot` (screenshots) appears when you click 开始截图 in the dialog; `checked` (moved files) appears when you click 移动达标文件 / 移动全部文件. The screenshot dialog never calls `os.makedirs` itself — it goes through `MainWindow.ensure_snapshot_dir()`, the single gate for that rule (**查看已有截图 does not create it either** — that button only reads; a missing dir produces a status line). Two fields carry the paths, both derived from the source folder and overwritten on every scan (`_sync_derived_paths`):
+**Output directories are created on demand** — scanning/browsing never creates a directory. `snapshot` (screenshots) appears when you click 开始截图 in the dialog; `checked` (moved files) appears when you click 移动达标文件 / 移动全部文件; the poster folder appears when you click 开始下载 in the poster dialog (that dialog's **only** `os.makedirs` call site). The screenshot dialog never calls `os.makedirs` itself — it goes through `MainWindow.ensure_snapshot_dir()`, the single gate for that rule (**查看已有截图 does not create it either** — that button only reads; a missing dir produces a status line). Two fields carry the paths, both derived from the source folder and overwritten on every scan (`_sync_derived_paths`):
 - 迁移地址 → `checked_dest_for(parent)` = `<parent>\checked` (backslashes **unconditionally**)
 - 截图地址 → `snapshot_dest_for(parent)` = `<parent>\snapshot` (backslashes **only on win32** — deliberate asymmetry, see `docs/产品文档.md` §6 #3)
 
@@ -124,6 +124,15 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 - A cell with no match gets `CellState(status='empty')` → the delegate paints **nothing**. `'empty'` is distinct from `'idle'` ('…', "not extracted yet") — that distinction is the point of the feature.
 - Same (video, timepoint) twice on disk → the newer mtime wins.
 
+**Poster dialog** — `PosterDialog(QDialog)` (modal), opened from the main window's 下载海报 button. It reads a **spreadsheet of poster links** and downloads the images; it is **independent of the video scan** (no `video_results` needed).
+- **Zero third-party dependencies**: `.csv` via the stdlib `csv` module (encoding sniffed utf-8-sig → gbk → utf-8); `.xlsx` via a hand-written parser (`zipfile` + `ElementTree`: `xl/workbook.xml` → first sheet's `r:id` → `xl/_rels/workbook.xml.rels` → the sheet part; strings from `xl/sharedStrings.xml` or `inlineStr`; cell refs like `A1`/`AA1` map to column indexes). **Old binary `.xls` is not supported** — `read_tabular_document` raises `DocumentFormatError` telling the user to re-save as `.xlsx`/`.csv`. Rationale: the project has exactly one third-party dep (PySide6); adding openpyxl/xlrd would touch `build.bat`'s `pip install` and the PyInstaller bundle, and the packaged exe can only be verified on Windows.
+- **Field guessing** is pure and testable: `guess_link_column` (header name hints → values that look like `http…` → first column), `guess_partname_column` (header name hints → first column). The UI exposes both as combo boxes so the guess is only a default.
+- **Naming** — `render_filename(template, partname, imgcol)` substitutes `{partname}`/`{imgcol}` (and the `[partname]`/`[imgcol]` bracket spelling), then replaces the illegal filename chars `\ / : * ? " < > |` with `_`. `{imgcol}` is the poster-link column's **name**, not its value.
+- **Extension** — `extension_for_url(url, content_type)`: URL path suffix → `Content-Type` → `.jpg`.
+- The download runs on a **plain daemon thread** (`_poster_worker`, same shape as `_snapshot_worker`) with a **bounded queue (maxsize=20)**; the worker blocks on `put(timeout=…)` so a closed dialog can't wedge it forever. Closing the dialog cancels (the in-flight request is *not* killed). One failed row does not abort the batch; the summary is `下载完成：成功 N · 失败 M` plus the first 3 errors.
+- Changing the document path or the 「首行为字段名」 checkbox **invalidates the analysis** (the download button greys out) — otherwise a stale document would be downloaded.
+
+
 ## Key design notes
 
 - `get_ffprobe_path()` and `get_ffmpeg_path()` are wrapped in `@lru_cache(maxsize=1)` — the lookup happens once per process
@@ -133,5 +142,5 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 - The `scanning` flag + button state prevent re-entrant scans; drag-drop is also blocked while scanning (an info dialog is shown and the drop ignored)
 - Container format: prefer the `format_name` token matching the file extension (e.g. an `.mp4` file with `format_name='mov,mp4,...'` resolves to `'mp4'`); fall back to the first token, then the extension, then `'N/A'`
 - `DEFAULT_BITRATE_KBPS = 30000`, `DEFAULT_SAMPLE_RATE_KHZ = 48` — both editable from the UI; values are parsed with `parse_threshold()` and must be positive and finite
-- Window: `1440x700`, `minsize(1000, 500)`, title `"视频检测v4.1"` (1440 = the sum of column widths 1347px fits without a horizontal scrollbar; a 1366px laptop screen does not fit the window — deliberate trade-off)
+- Window: `1440x700`, `minsize(1000, 500)`, title `"视频检测v4.2"` (1440 = the sum of column widths 1347px fits without a horizontal scrollbar; a 1366px laptop screen does not fit the window — deliberate trade-off)
 - `video_checker.py` uses **CRLF** line endings. Never rewrite it with a plain-LF write — use the Edit tool for precise replacements, and verify with `python3 -c "d=open('video_checker.py','rb').read(); c=d.count(b'\r\n'); print('bare LF:', d.count(b'\n')-c)"` (must be `0`).

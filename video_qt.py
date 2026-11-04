@@ -25,19 +25,22 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QCheckBox, QDialog, QFileDialog,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QStatusBar, QStyle, QStyledItemDelegate,
-    QTableView, QVBoxLayout, QWidget,
+    QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog,
+    QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QStatusBar, QStyle,
+    QStyleOptionViewItem, QStyledItemDelegate, QTableView, QVBoxLayout,
+    QWidget,
 )
 
 from video_core import (
     DEFAULT_BITRATE_KBPS, DEFAULT_SAMPLE_RATE_KHZ, EXTRACT_THUMB_W,
-    VIDEO_EXTENSIONS, VideoInfo, _cell_fg, _extract_sort_key,
-    _header_text_with_arrow, _next_sort_state, extract_frame, format_title,
-    match_snapshots, parse_threshold, parse_time_token, parse_video_info,
-    run_ffprobe, scan_existing_snapshots, scan_video_files,
-    time_token_sort_key, time_token_to_string, truncate_text,
+    VIDEO_EXTENSIONS, DocumentFormatError, VideoInfo, _cell_fg,
+    _extract_sort_key, _header_text_with_arrow, _next_sort_state,
+    build_poster_jobs, download_poster, extract_frame, format_title,
+    guess_link_column, guess_partname_column, match_snapshots,
+    parse_threshold, parse_time_token, parse_video_info, poster_default_dir,
+    read_tabular_document, run_ffprobe, scan_existing_snapshots,
+    scan_video_files, time_token_sort_key, time_token_to_string, truncate_text,
 )
 
 # 着色常量**只从 video_core 取** —— 界面层不持有自己的颜色常量
@@ -1405,6 +1408,427 @@ class SnapshotDialog(QDialog):
         super().reject()
 
 
+# ================================================================
+# 下载海报 (poster)
+# ================================================================
+#
+# 需求 (2026-11-04): 用户给一份 csv/xlsx 清单 → 程序按「命名来源字段」与
+# 「海报链接字段」把海报下载到指定目录。
+#
+# 三条约定:
+#   1. **读表与下载的逻辑全在 video_core** —— 这里只管界面。
+#   2. 下载跑在**普通后台线程**里 (同定点截图): 关窗 = 取消, 不杀正在
+#      跑的那一个请求 (产品文档 §6 #27 同一个道理)。
+#   3. 海报目录**按需创建** —— 点「开始下载」时才建 (同截图地址的规矩)。
+
+
+class PosterPreviewModel(QAbstractTableModel):
+    """文档预览: 前几行 × 全部字段。"""
+
+    def __init__(self, headers: list[str], rows: list[list[str]], parent=None):
+        super().__init__(parent)
+        self.headers = list(headers)
+        self.rows = [list(r) for r in rows]
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return len(self.rows)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        return len(self.headers)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = index.row()
+        col = index.column()
+        if role == Qt.DisplayRole:
+            if row >= len(self.rows):
+                return None
+            cells = self.rows[row]
+            return cells[col] if col < len(cells) else ''
+        if role == Qt.ToolTipRole:
+            # 预览里的 URL / 长字段经常比格子宽 → 全文 tooltip
+            if row >= len(self.rows):
+                return None
+            cells = self.rows[row]
+            return cells[col] if col < len(cells) else ''
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.headers[section] if section < len(self.headers) else ''
+        return None
+
+    def set_document(self, headers: list[str], rows: list[list[str]]) -> None:
+        self.beginResetModel()
+        self.headers = list(headers)
+        self.rows = [list(r) for r in rows]
+        self.endResetModel()
+
+
+class PosterPreviewDelegate(TruncatingDelegate):
+    """预览表格的 delegate —— 文字按**格子实际宽度**截断。
+
+    主表格的截断在 model 里做 (列宽是 Python 管的); 这里的列宽由
+    QHeaderView.Stretch 摊, model 不知道 → 只能在 paint 时按 rect 宽度截。
+    截断样式跟主表格一致 (三个 ASCII 点, 不是 Qt 的单字符 '…')。
+    """
+
+    def paint(self, painter, option, index):
+        text = index.data(Qt.DisplayRole)
+        if not text:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        fm = opt.fontMetrics
+        opt.text = truncate_text(str(text), max(opt.rect.width() - 8, 10),
+                                 fm.horizontalAdvance)
+        painter.save()
+        style = (opt.widget.style() if opt.widget is not None
+                 else QApplication.style())
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        painter.restore()
+
+
+def _poster_worker(jobs, output_dir, cancel_event, result_queue):
+    """后台下载海报。
+
+    jobs: [(链接, 文件名不含扩展名)]
+    消息: ('poster_item', (done, total, 文件名, ok, 错误信息))
+          ('poster_done', (成功数, 失败数, 错误列表))
+    """
+    ok_count = 0
+    fail_count = 0
+    errors: list[str] = []
+    total = len(jobs)
+
+    def report(msg) -> bool:
+        """塞消息 —— 队列满时等一会儿; 期间被取消就放弃。"""
+        while not cancel_event.is_set():
+            try:
+                result_queue.put(msg, timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    for i, (url, base_name) in enumerate(jobs):
+        if cancel_event.is_set():
+            break
+        try:
+            path = download_poster(url, output_dir, base_name)
+            ok_count += 1
+            if not report(('poster_item',
+                           (i + 1, total, os.path.basename(path), True, ''))):
+                break
+        except Exception as exc:
+            fail_count += 1
+            err = f'{base_name}: {exc}'
+            errors.append(err)
+            if not report(('poster_item',
+                           (i + 1, total, base_name, False, err))):
+                break
+    report(('poster_done', (ok_count, fail_count, errors)))
+
+
+class PosterDialog(QDialog):
+    """下载海报弹窗 (模态)。
+
+      顶部: 文档 + 海报地址 + 命名规则 + 两个字段下拉 + 开始分析/开始下载
+      中间: 文档预览 (前 5 行)
+      底部: 状态文字 + 进度条
+
+    与「定点截图」弹窗同一形态 (模态 + 底部状态行 + 进度条 + 后台线程),
+    差别只有一个: 它吃的不是视频, 是**一份文档** —— 所以不依赖扫描结果。
+    """
+
+    # 预览显示几行
+    PREVIEW_ROWS = 5
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._doc = None                     # TabularDocument
+        self._downloading = False
+        self._download_ok = 0
+        self._download_failed = 0
+        self._download_errors: list[str] = []
+        self._out_manual = False             # 海报地址被用户手改过 → 不自动覆盖
+        self._cancel = threading.Event()
+        self._result_queue: queue.Queue = queue.Queue(maxsize=20)
+        self._worker_thread = None
+
+        self.setWindowTitle('下载海报')
+        self.setModal(True)
+        self.resize(1000, 520)
+        self._build_widgets()
+
+    # ---- 界面 ----
+
+    def _build_widgets(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(5, 5, 5, 5)
+        root.setSpacing(4)
+
+        # === 第一行: 文档 ===
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel('文档:'))
+        self.doc_edit = QLineEdit()
+        # 文档路径一变 → 之前的分析作废 (否则会拿着**旧文档**的海报去下载)。
+        # 用 textChanged 而不是 textEdited: 后者只在**用户手打**时发,
+        # 「浏览」选完 setText 的路径就漏掉了。
+        self.doc_edit.textChanged.connect(self._on_doc_edited)
+        row1.addWidget(self.doc_edit, 1)
+        doc_browse_btn = QPushButton('浏览')
+        doc_browse_btn.clicked.connect(self._on_browse_doc)
+        row1.addWidget(doc_browse_btn)
+        root.addLayout(row1)
+
+        # === 第二行: 海报地址 ===
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel('海报地址:'))
+        self.out_edit = QLineEdit()
+        # textEdited **只在用户手改时**才发 —— 程序 setText 不会触发,
+        # 正好用来分辨「自动填的」与「用户改过的」
+        self.out_edit.textEdited.connect(self._on_out_edited)
+        row2.addWidget(self.out_edit, 1)
+        out_browse_btn = QPushButton('浏览')
+        out_browse_btn.clicked.connect(self._on_browse_out)
+        row2.addWidget(out_browse_btn)
+        root.addLayout(row2)
+
+        # === 第三行: 命名规则 + 两个字段 ===
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel('命名规则:'))
+        self.template_edit = QLineEdit('{partname}-{imgcol}')
+        self.template_edit.setFixedWidth(220)
+        row3.addWidget(self.template_edit)
+        row3.addWidget(QLabel('命名来源字段:'))
+        self.part_combo = QComboBox()
+        row3.addWidget(self.part_combo)
+        row3.addWidget(QLabel('海报链接字段:'))
+        self.link_combo = QComboBox()
+        row3.addWidget(self.link_combo)
+        self.header_check = QCheckBox('首行为字段名')
+        self.header_check.setChecked(True)
+        # 改了这个 → 读法变了 → 之前的分析作废, 要重新「开始分析」
+        self.header_check.toggled.connect(self._on_header_toggled)
+        row3.addWidget(self.header_check)
+        row3.addStretch(1)
+        root.addLayout(row3)
+
+        # === 第四行: 开始分析 / 开始下载 ===
+        row4 = QHBoxLayout()
+        row4.addStretch(1)
+        self.analyze_btn = QPushButton('开始分析')
+        self.analyze_btn.clicked.connect(self._on_analyze)
+        row4.addWidget(self.analyze_btn)
+        self.download_btn = QPushButton('开始下载')
+        self.download_btn.clicked.connect(self._on_download)
+        self.download_btn.setEnabled(False)   # 没分析过不许下载
+        row4.addWidget(self.download_btn)
+        root.addLayout(row4)
+
+        # === 中间: 预览 ===
+        self.model = PosterPreviewModel([], [])
+        self.view = QTableView()
+        self.view.setModel(self.model)
+        self.view.setItemDelegate(PosterPreviewDelegate(self.view))
+        self.view.setShowGrid(False)
+        self.view.setSelectionMode(QAbstractItemView.NoSelection)
+        self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        root.addWidget(self.view, 1)
+
+        # === 底部: 状态文字 + 进度条 ===
+        self.status_label = QLabel('就绪 — 先选文档, 再点「开始分析」')
+        root.addWidget(self.status_label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        root.addWidget(self.progress)
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(100)
+        self._poll_timer.timeout.connect(self._poll_queue)
+
+    # ---- 文档 / 地址 ----
+
+    def _on_browse_doc(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择清单文档', '',
+            '表格文档 (*.csv *.xlsx);;CSV (*.csv);;Excel (*.xlsx);;所有文件 (*)')
+        if not path:
+            return
+        self.doc_edit.setText(path)
+        self._doc = None
+        self._out_manual = False
+        self.download_btn.setEnabled(False)
+        self.model.set_document([], [])
+        self.status_label.setText('已选文档 — 点「开始分析」看前 5 条')
+
+    def _on_doc_edited(self) -> None:
+        """手改文档路径 → 之前的分析作废。"""
+        self._doc = None
+        self.download_btn.setEnabled(False)
+        self.model.set_document([], [])
+        self.status_label.setText('文档已改 — 点「开始分析」重新读')
+
+    def _on_header_toggled(self) -> None:
+        """「首行为字段名」变了 → 读法变了 → 分析作废。"""
+        if self._doc is None:
+            return
+        self._doc = None
+        self.download_btn.setEnabled(False)
+        self.model.set_document([], [])
+        self.status_label.setText('读法已改 — 点「开始分析」重新读')
+
+    def _on_browse_out(self) -> None:
+        """「浏览」选的就是**海报要落地的那个目录** (用户直接指定)。"""
+        folder = QFileDialog.getExistingDirectory(self, '选择海报存放文件夹')
+        if folder:
+            self.out_edit.setText(folder)
+
+    def _on_out_edited(self) -> None:
+        self._out_manual = True
+
+    # ---- 开始分析 ----
+
+    def _on_analyze(self) -> None:
+        """读文档 → 预览前 5 条 → 猜出两个字段 (用户可改)。"""
+        path = self.doc_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, '提示', '请先选择清单文档。')
+            return
+        try:
+            doc = read_tabular_document(
+                path, has_header=self.header_check.isChecked())
+        except DocumentFormatError as exc:
+            QMessageBox.warning(self, '读不了文档', str(exc))
+            self.status_label.setText(f'读不了文档: {exc}')
+            return
+        except Exception as exc:                       # 兜底 (权限/编码…)
+            QMessageBox.warning(self, '读不了文档', str(exc))
+            self.status_label.setText(f'读不了文档: {exc}')
+            return
+        self._doc = doc
+        self.model.set_document(doc.headers, doc.rows[:self.PREVIEW_ROWS])
+
+        self.part_combo.clear()
+        self.link_combo.clear()
+        self.part_combo.addItems(doc.headers)
+        self.link_combo.addItems(doc.headers)
+        link_idx = guess_link_column(doc.headers, doc.rows)
+        part_idx = guess_partname_column(doc.headers, doc.rows)
+        if doc.headers:
+            self.link_combo.setCurrentIndex(min(link_idx, len(doc.headers) - 1))
+            self.part_combo.setCurrentIndex(min(part_idx, len(doc.headers) - 1))
+
+        # 海报地址默认值: 文档所在目录/<命名来源字段首行值>-poster
+        if not self._out_manual:
+            part_value = ''
+            if doc.rows and part_idx < len(doc.rows[0]):
+                part_value = str(doc.rows[0][part_idx]).strip()
+            self.out_edit.setText(poster_default_dir(path, part_value))
+
+        self.download_btn.setEnabled(True)
+        shown = min(len(doc.rows), self.PREVIEW_ROWS)
+        self.status_label.setText(
+            f'已分析：共 {len(doc.rows)} 行 · {len(doc.headers)} 个字段'
+            f' (显示前 {shown} 行)')
+
+    # ---- 开始下载 ----
+
+    def _on_download(self) -> None:
+        if self._downloading:
+            return
+        if self._doc is None:
+            QMessageBox.warning(self, '提示', '请先点「开始分析」。')
+            return
+        out_dir = self.out_edit.text().strip()
+        if not out_dir:
+            QMessageBox.warning(self, '提示', '请先设置海报地址。')
+            return
+        part_idx = max(self.part_combo.currentIndex(), 0)
+        link_idx = max(self.link_combo.currentIndex(), 0)
+        jobs = build_poster_jobs(self._doc.rows, part_idx, link_idx,
+                                 self.template_edit.text(),
+                                 self.link_combo.currentText())
+        if not jobs:
+            QMessageBox.warning(self, '提示', '海报链接字段里没有可下载的链接。')
+            return
+        try:
+            os.makedirs(out_dir, exist_ok=True)    # 目录**这时**才建
+        except OSError as exc:
+            QMessageBox.warning(self, '建不了目录', f'{out_dir}\n{exc}')
+            return
+
+        self._cancel.clear()
+        self._download_ok = 0
+        self._download_failed = 0
+        self._download_errors = []
+        self._downloading = True
+        self.progress.setRange(0, len(jobs))
+        self.progress.setValue(0)
+        self.analyze_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
+        self.status_label.setText(f'准备下载 {len(jobs)} 张海报…')
+        self._result_queue = queue.Queue(maxsize=20)
+        self._worker_thread = threading.Thread(
+            target=_poster_worker,
+            args=(jobs, out_dir, self._cancel, self._result_queue),
+            daemon=True)
+        self._worker_thread.start()
+        self._poll_timer.start()
+
+    # ---- 后台消息 ----
+
+    def _poll_queue(self) -> None:
+        while True:
+            try:
+                msg_type, payload = self._result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if msg_type == 'poster_item':
+                done, total, name, ok, err = payload
+                self.progress.setValue(done)
+                if ok:
+                    self.status_label.setText(f'下载中 {done}/{total} ({name})')
+                else:
+                    self.status_label.setText(
+                        f'下载中 {done}/{total} ({name}) — 失败: {err}')
+            elif msg_type == 'poster_done':
+                self._on_download_done(*payload)
+
+    def _on_download_done(self, ok_count: int, fail_count: int,
+                          errors: list[str]) -> None:
+        self._downloading = False
+        self._download_ok = ok_count
+        self._download_failed = fail_count
+        self._download_errors = list(errors)
+        self._poll_timer.stop()
+        self.analyze_btn.setEnabled(True)
+        self.download_btn.setEnabled(True)
+        self.progress.setValue(self.progress.maximum())
+        text = f'下载完成：成功 {ok_count} · 失败 {fail_count}'
+        if errors:
+            text += ' — ' + '; '.join(errors[:3])
+        self.status_label.setText(text)
+
+    # ---- 关窗 = 取消下载 ----
+
+    def _cancel_download(self) -> None:
+        self._cancel.set()
+        self._poll_timer.stop()
+
+    def closeEvent(self, event) -> None:
+        self._cancel_download()
+        super().closeEvent(event)
+
+    def reject(self) -> None:
+        self._cancel_download()
+        super().reject()
+
+
 # ---- 派生路径的两个小助手 ----
 #
 # 「浏览」选的是**父目录**, 下面套一层固定子目录 (checked / snapshot),
@@ -1545,9 +1969,9 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         # 版本号: v4.0 抬的 (GUI 层从 Tkinter 换成 PySide6); v4.1 抬的
-        # (定点截图新增「查看已有截图」)。改这里要同时改产品文档 §4.1
-        # 与 CHANGELOG 的对应条目。
-        self.setWindowTitle('视频检测v4.1')
+        # (定点截图新增「查看已有截图」); v4.2 抬的 (新增「下载海报」)。
+        # 改这里要同时改产品文档 §4.1 与 CHANGELOG 的对应条目。
+        self.setWindowTitle('视频检测v4.2')
         # 1440 而不是 1280: 列宽总和 1347px (45 序号 + 1302 数据列), 1280 的窗口装不下
         # → 主表格会出现横向滚动条。1440 装得下 (可用 ~1428px, 余量 81px)。
         # 代价: 1366px 宽的笔记本屏幕放不下 (用户 2026-10-29 知情选定)。
@@ -1637,6 +2061,11 @@ class MainWindow(QMainWindow):
         self.snapshot_btn = QPushButton('定点截图')
         self.snapshot_btn.clicked.connect(self._on_snapshot_btn_click)
         row2.addWidget(self.snapshot_btn)
+        # 「下载海报」在「定点截图」右边 (2026-11-04 用户要求)。
+        # 它吃的是**一份文档**, 不是视频 → 不依赖扫描结果。
+        self.poster_btn = QPushButton('下载海报')
+        self.poster_btn.clicked.connect(self._on_poster_btn_click)
+        row2.addWidget(self.poster_btn)
         # 行尾留 272px —— Tk 版是硬编码 padx=(0, 272) (产品文档 §6 #31,
         # 视觉对齐的历史值), 这里照搬。挪按钮时**不动它**: 它是**行尾的
         # 右边距** —— 右对齐的现在是「定点截图」(行尾最右那个按钮),
@@ -2086,6 +2515,19 @@ class MainWindow(QMainWindow):
         是主窗口当前的默认值。
         """
         dialog = SnapshotDialog(self, self.video_results, self.snapshot_dest)
+        dialog.exec()
+
+    def _on_poster_btn_click(self) -> None:
+        """「下载海报」按钮。
+
+        与「定点截图」不同: 它吃的是**一份文档**, 不是视频 → **不需要
+        先扫描**。直接开弹窗。
+        """
+        self.open_poster_dialog()
+
+    def open_poster_dialog(self) -> None:
+        """打开下载海报弹窗 (模态)。"""
+        dialog = PosterDialog(self)
         dialog.exec()
 
     # ---- 移动文件 ----

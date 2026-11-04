@@ -974,10 +974,16 @@ def _run() -> int:
     check("0 个文件也能跑完 (不崩)", finished, f"state={dlg6._state}")
 
     # ================================================================
-    section("建目录只有两个口子 (整个模块扫)")
+    section("建目录只有三个口子 (整个模块扫)")
     owners = module_makedirs_owners()
-    check("只有 ensure_snapshot_dir 与 _move_files 会建目录",
-          sorted(f for _cls, f in owners) == ['_move_files', 'ensure_snapshot_dir'],
+    # 2026-11-04 加了「下载海报」: 海报目录在**点「开始下载」时**才建 ——
+    # 跟截图地址、迁移地址同一个「按需创建」的规矩, 所以它是第三个口子。
+    check("只有 ensure_snapshot_dir / _move_files / _on_download 会建目录",
+          sorted(f for _cls, f in owners)
+          == ['_move_files', '_on_download', 'ensure_snapshot_dir'],
+          f"got={sorted(owners)}")
+    check("海报目录是下载时才建的 (PosterDialog._on_download)",
+          ('PosterDialog', '_on_download') in owners,
           f"got={sorted(owners)}")
 
     print()

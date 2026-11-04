@@ -4,6 +4,8 @@ Tkinter 版和 PySide6/QTableView 版共用同一份: 凡是不看界面的计�
 纯函数不用建 GUI 就能测 (断言脚本直接 import 本模块)。
 """
 
+import csv
+import io
 import json
 import math
 import ntpath
@@ -12,6 +14,10 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
@@ -655,3 +661,356 @@ def time_token_sort_key(token: str) -> tuple[int, int, int, int]:
     while len(nums) < 4:
         nums.append(0)
     return (nums[0], nums[1], nums[2], nums[3])
+
+
+# ===================================================================
+# 海报下载 (poster) —— 读表格文档 + 下图
+# ===================================================================
+#
+# 需求 (2026-11-04): 用户给一份 csv/xls/xlsx 的清单, 里面有海报链接;
+# 程序按「命名来源字段」+「海报链接字段名」命名, 把海报下载到指定目录。
+#
+# **零第三方依赖**: csv 用标准库, xlsx 用 zipfile + XML 自己解析。
+# 旧版二进制 .xls 读不了 —— 明确报错让用户另存为 .xlsx/.csv
+# (引第三方库会动 build.bat 的 pip install 与 PyInstaller 打包,
+#  而打包产物只在 Windows 上验得了, 本机验不了 → 宁可少支持一种格式)。
+
+
+class DocumentFormatError(Exception):
+    """文档读不了 (格式不支持 / 不是表格 / 文件不在)。"""
+
+
+@dataclass
+class TabularDocument:
+    """一张表: 字段名 + 数据行 (单元格一律是字符串)。"""
+    headers: list[str]
+    rows: list[list[str]]
+
+
+# 海报链接字段的列名线索 (小写比对)。第一个命中的列就是默认项。
+POSTER_URL_HINTS = ('url', 'link', '海报', '图片', '封面', 'poster', 'image',
+                    '缩略图', '图集')
+# 命名来源字段 (partname) 的列名线索。
+PARTNAME_HINTS = ('partname', 'part_name', 'clipname', 'clip_name', '剧名',
+                   '片名', '集名', '名称', '名字', '标题', '项目名')
+
+# 文件名里的非法字符 (Windows 那套) —— 一律换成 _
+_ILLEGAL_NAME_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+# 认得的图片扩展名 (用来判断 URL 后缀能不能直接用)
+_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif',
+               '.tiff', '.avif'}
+
+# Content-Type → 扩展名
+_IMAGE_EXT_BY_CTYPE = {
+    'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/pjpeg': '.jpg',
+    'image/png': '.png', 'image/apng': '.png', 'image/webp': '.webp',
+    'image/gif': '.gif', 'image/bmp': '.bmp', 'image/tiff': '.tif',
+    'image/avif': '.avif', 'image/svg+xml': '.svg',
+}
+
+
+def _decode_text(data: bytes) -> str:
+    """猜文本编码 —— 中文 Excel 导出的 csv 多半是 GBK。"""
+    for enc in ('utf-8-sig', 'gbk', 'utf-8'):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode('utf-8', errors='replace')
+
+
+def _read_csv(path: str) -> list[list[str]]:
+    with open(path, 'rb') as f:
+        data = f.read()
+    text = _decode_text(data)
+    return [list(row) for row in csv.reader(io.StringIO(text))]
+
+
+def _local_name(tag: str) -> str:
+    """XML 标签的本地名 (去掉 {命名空间})。"""
+    return tag.rsplit('}', 1)[-1]
+
+
+def _column_index(ref: str) -> int | None:
+    """单元格引用 → 列号 ('A1' → 0, 'AA1' → 26)。"""
+    letters = ''
+    for ch in ref:
+        if ch.isalpha():
+            letters += ch.upper()
+        else:
+            break
+    if not letters:
+        return None
+    idx = 0
+    for ch in letters:
+        idx = idx * 26 + (ord(ch) - 64)
+    return idx - 1
+
+
+def _cell_value(cell, shared: list[str]) -> str:
+    """一个 xlsx 单元格 → 字符串。"""
+    kind = cell.get('t') or 'n'
+    if kind == 'inlineStr':
+        return ''.join(e.text or '' for e in cell.iter()
+                       if _local_name(e.tag) == 't')
+    raw = None
+    for e in cell.iter():
+        if _local_name(e.tag) == 'v':
+            raw = e.text or ''
+            break
+    if kind == 's':                      # sharedStrings 索引
+        try:
+            return shared[int(raw)]
+        except (TypeError, ValueError, IndexError):
+            return ''
+    if kind == 'b':
+        return 'TRUE' if raw == '1' else 'FALSE'
+    if kind in ('str', 'e'):             # 公式结果 / 错误值
+        return raw or ''
+    if not raw:
+        return ''
+    try:
+        num = float(raw)
+    except ValueError:
+        return raw
+    if num.is_integer():                 # 90 别写成 '90.0'
+        return str(int(num))
+    return str(num)
+
+
+def _read_shared_strings(zf: zipfile.ZipFile) -> list[str]:
+    root = ET.fromstring(zf.read('xl/sharedStrings.xml'))
+    out: list[str] = []
+    for si in root.iter():
+        if _local_name(si.tag) != 'si':
+            continue
+        out.append(''.join(e.text or '' for e in si.iter()
+                           if _local_name(e.tag) == 't'))
+    return out
+
+
+def _normalize_target(target: str) -> str:
+    """rels 里的 Target → zip 里的路径。"""
+    t = (target or '').replace('\\', '/')
+    if t.startswith('/'):
+        t = t.lstrip('/')
+    elif not t.startswith('xl/'):
+        t = 'xl/' + t
+    parts: list[str] = []
+    for part in t.split('/'):
+        if part == '..':
+            if parts:
+                parts.pop()
+        elif part not in ('', '.'):
+            parts.append(part)
+    return '/'.join(parts)
+
+
+def _first_sheet_path(zf: zipfile.ZipFile, names: set[str]) -> str | None:
+    """第一个工作表在 zip 里的路径 (workbook.xml → rels → 目标)。"""
+    rid = None
+    if 'xl/workbook.xml' in names:
+        try:
+            root = ET.fromstring(zf.read('xl/workbook.xml'))
+        except ET.ParseError:
+            root = None
+        if root is not None:
+            for e in root.iter():
+                if _local_name(e.tag) != 'sheet':
+                    continue
+                for key, value in e.attrib.items():
+                    if _local_name(key) == 'id' and value:
+                        rid = value
+                        break
+                if rid:
+                    break
+    if rid and 'xl/_rels/workbook.xml.rels' in names:
+        try:
+            rroot = ET.fromstring(zf.read('xl/_rels/workbook.xml.rels'))
+        except ET.ParseError:
+            rroot = None
+        if rroot is not None:
+            for e in rroot.iter():
+                if _local_name(e.tag) != 'Relationship' or e.get('Id') != rid:
+                    continue
+                path = _normalize_target(e.get('Target'))
+                if path in names:
+                    return path
+                break
+    for name in sorted(names):           # 兜底: 第一个 worksheet
+        if name.startswith('xl/worksheets/') and name.endswith('.xml'):
+            return name
+    return None
+
+
+def _read_xlsx(path: str) -> list[list[str]]:
+    try:
+        zf = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise DocumentFormatError(f'读不了这个 xlsx: {exc}') from exc
+    with zf:
+        names = set(zf.namelist())
+        shared = _read_shared_strings(zf) if 'xl/sharedStrings.xml' in names else []
+        sheet_path = _first_sheet_path(zf, names)
+        if sheet_path is None:
+            raise DocumentFormatError('这个 xlsx 里没有工作表。')
+        try:
+            root = ET.fromstring(zf.read(sheet_path))
+        except ET.ParseError as exc:
+            raise DocumentFormatError(f'这个 xlsx 的工作表解析失败: {exc}') from exc
+    rows: list[list[str]] = []
+    for row_el in root.iter():
+        if _local_name(row_el.tag) != 'row':
+            continue
+        cells: dict[int, str] = {}
+        next_idx = 0
+        for cell in row_el:
+            if _local_name(cell.tag) != 'c':
+                continue
+            ref = cell.get('r')
+            idx = _column_index(ref) if ref else None
+            if idx is None:
+                idx = next_idx
+            cells[idx] = _cell_value(cell, shared)
+            next_idx = idx + 1
+        width = (max(cells) + 1) if cells else 0
+        rows.append([cells.get(i, '') for i in range(width)])
+    return rows
+
+
+def read_tabular_document(path: str, has_header: bool = True) -> TabularDocument:
+    """读一份清单文档 (csv / xlsx) → 字段名 + 数据行。
+
+    has_header=False → 第一行**也当数据**, 列名兜底成「字段1、字段2…」。
+    """
+    if not os.path.isfile(path):
+        raise DocumentFormatError(f'文件不存在: {path}')
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.csv':
+        rows = _read_csv(path)
+    elif ext == '.xlsx':
+        rows = _read_xlsx(path)
+    elif ext == '.xls':
+        raise DocumentFormatError(
+            '.xls 是旧版二进制格式, 本程序读不了 —— 请用 Excel/WPS '
+            '另存为 .xlsx 或 .csv 再试。')
+    else:
+        raise DocumentFormatError(
+            f'不支持的文档格式: {ext or "(无后缀)"} —— 只支持 .csv / .xlsx')
+    if has_header and rows:
+        headers = [str(c).strip() for c in rows[0]]
+        body = rows[1:]
+    else:
+        width = max((len(r) for r in rows), default=0)
+        headers = [f'字段{i + 1}' for i in range(width)]
+        body = rows
+    width = len(headers)
+    body = [[('' if c is None else str(c))
+             for c in (list(r[:width]) + [''] * (width - len(r)))]
+            for r in body]
+    return TabularDocument(headers=headers, rows=body)
+
+
+def guess_link_column(headers: list[str], rows: list[list[str]]) -> int:
+    """猜哪一列是海报链接: 先看列名, 再看值像不像链接, 都不像 → 第一列。"""
+    for i, header in enumerate(headers):
+        low = str(header).strip().lower()
+        if any(k in low for k in POSTER_URL_HINTS):
+            return i
+    for i in range(len(headers)):
+        for row in rows[:20]:
+            if i < len(row):
+                value = str(row[i]).strip().lower()
+                if value.startswith(('http://', 'https://')):
+                    return i
+    return 0
+
+
+def guess_partname_column(headers: list[str], rows: list[list[str]]) -> int:
+    """猜哪一列是命名来源 (partname): 按列名, 不像 → 第一列。"""
+    for i, header in enumerate(headers):
+        low = str(header).strip().lower()
+        if any(k in low for k in PARTNAME_HINTS):
+            return i
+    return 0
+
+
+def render_filename(template: str, partname: str, imgcol: str) -> str:
+    """按命名规则渲染出一个文件名 (不含扩展名)。
+
+    模板里 {partname} / [partname] → 命名来源字段的值,
+    {imgcol} / [imgcol] → 海报链接字段的**字段名**。
+    非法字符 (\\ / : * ? " < > |) 一律换成 _。
+    """
+    name = str(template)
+    for token, value in (('{partname}', partname), ('{imgcol}', imgcol),
+                         ('[partname]', partname), ('[imgcol]', imgcol)):
+        name = name.replace(token, str(value))
+    name = _ILLEGAL_NAME_CHARS.sub('_', name)
+    name = re.sub(r'\s+', ' ', name).strip().strip('.')
+    if len(name) > 120:
+        name = name[:120].rstrip('. ')
+    return name or 'poster'
+
+
+def extension_for_url(url: str, content_type: str = '') -> str:
+    """海报的扩展名: URL 后缀 → Content-Type → 兜底 .jpg。"""
+    path = urllib.parse.urlsplit(url).path
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _IMAGE_EXTS:
+        return ext
+    ctype = (content_type or '').split(';')[0].strip().lower()
+    if ctype in _IMAGE_EXT_BY_CTYPE:
+        return _IMAGE_EXT_BY_CTYPE[ctype]
+    return '.jpg'
+
+
+def poster_default_dir(doc_path: str, partname: str) -> str:
+    """海报地址的默认值: 文档所在目录/<partname>-poster。"""
+    folder = os.path.dirname(os.path.abspath(doc_path))
+    name = _ILLEGAL_NAME_CHARS.sub('_', str(partname).strip()).strip('. ')
+    return os.path.join(folder, (name or 'poster') + '-poster')
+
+
+def build_poster_jobs(rows: list[list[str]], part_index: int, link_index: int,
+                       template: str, imgcol_name: str) -> list[tuple[str, str]]:
+    """表格 → 一串 (链接, 文件名) —— 链接为空的行跳过。"""
+    jobs: list[tuple[str, str]] = []
+    for row in rows:
+        if link_index >= len(row):
+            continue
+        url = str(row[link_index]).strip()
+        if not url:
+            continue
+        part = str(row[part_index]).strip() if part_index < len(row) else ''
+        jobs.append((url, render_filename(template, part, imgcol_name)))
+    return jobs
+
+
+def fetch_bytes(url: str, timeout: float = 30.0) -> tuple[bytes, str]:
+    """抓一个链接 → (内容, Content-Type)。失败抛异常。"""
+    req = urllib.request.Request(
+        url, headers={'User-Agent': 'vdcheck-poster/1.0'})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+        try:
+            ctype = resp.headers.get('Content-Type', '') or ''
+        except Exception:
+            ctype = ''
+    return data, ctype
+
+
+def download_poster(url: str, output_dir: str, base_name: str,
+                    timeout: float = 30.0) -> str:
+    """下载一张海报到 output_dir → 落盘路径。
+
+    扩展名按 URL 后缀 / Content-Type 定; 目录不存在会**建**。
+    """
+    data, ctype = fetch_bytes(url, timeout=timeout)
+    ext = extension_for_url(url, ctype)
+    os.makedirs(output_dir, exist_ok=True)
+    dest = os.path.join(output_dir, base_name + ext)
+    with open(dest, 'wb') as f:
+        f.write(data)
+    return dest

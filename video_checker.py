@@ -11,11 +11,13 @@ tkinterdnd2。
 import video_core  # noqa: F401
 from video_core import (  # noqa: F401
     DEFAULT_BITRATE_KBPS, DEFAULT_SAMPLE_RATE_KHZ, EXTRACT_THUMB_W, FG_FAIL,
-    FG_PASS, VIDEO_EXTENSIONS, VideoInfo, _SORTABLE_COLUMNS, _cell_fg,
-    _extract_sort_key, _header_text_with_arrow, _next_sort_state,
-    extract_frame, format_duration, format_file_size, format_title,
-    get_ffmpeg_path, get_ffprobe_path, parse_threshold, parse_time_token,
-    parse_video_info, run_ffprobe, scan_video_files, time_token_to_string,
+    FG_PASS, VIDEO_EXTENSIONS, DocumentFormatError, TabularDocument, VideoInfo,
+    _SORTABLE_COLUMNS, _cell_fg, _extract_sort_key, _header_text_with_arrow,
+    _next_sort_state, build_poster_jobs, download_poster, extract_frame,
+    format_duration, format_file_size, format_title, get_ffmpeg_path,
+    get_ffprobe_path, guess_link_column, guess_partname_column,
+    parse_threshold, parse_time_token, parse_video_info, poster_default_dir,
+    read_tabular_document, run_ffprobe, scan_video_files, time_token_to_string,
     truncate_text,
 )
 

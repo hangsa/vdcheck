@@ -296,19 +296,27 @@ def _run() -> int:
           win.status_bar.currentMessage() == '就绪',
           f"got={win.status_bar.currentMessage()!r}")
 
-    # ---- Row 2 的按钮次序 (2026-11-03 用户要求) ----
-    section("Row 2: 「定点截图」在「清除记录」之后")
+    # ---- Row 2 的按钮次序 (2026-11-03 / 2026-11-04 用户要求) ----
+    section("Row 2: 「定点截图」在「清除记录」之后, 「下载海报」再往右")
     check("「定点截图」在「清除记录」**右边**",
           win.snapshot_btn.x() > win.clear_btn.x(),
           f"snapshot_x={win.snapshot_btn.x()} clear_x={win.clear_btn.x()}")
-    check("两个按钮都在行尾, 且贴着 Row 1 的路径框右边缘 (272px 的历史对齐)",
-          abs(win.snapshot_btn.geometry().right()
+    check("「下载海报」在「定点截图」**右边** (2026-11-04)",
+          win.poster_btn.x() > win.snapshot_btn.x(),
+          f"poster_x={win.poster_btn.x()} snapshot_x={win.snapshot_btn.x()}")
+    # 行尾**最右**的按钮跟着行尾走 —— 2026-11-04 加了「下载海报」之后,
+    # 与 Row 1 路径框右边缘对齐的是「下载海报」(不是「定点截图」了)。
+    check("行尾最右的按钮贴着 Row 1 的路径框右边缘 (272px 的历史对齐)",
+          abs(win.poster_btn.geometry().right()
               - win.path_edit.geometry().right()) < 40,
-          f"snapshot_right={win.snapshot_btn.geometry().right()} "
+          f"poster_right={win.poster_btn.geometry().right()} "
           f"path_right={win.path_edit.geometry().right()}")
     check("「定点截图」与「清除记录」紧挨着 (中间没有大空隙)",
           win.snapshot_btn.x() - win.clear_btn.x() < 120,
           f"gap={win.snapshot_btn.x() - win.clear_btn.x()}")
+    check("「下载海报」与「定点截图」紧挨着 (中间没有大空隙)",
+          win.poster_btn.x() - win.snapshot_btn.x() < 120,
+          f"gap={win.poster_btn.x() - win.snapshot_btn.x()}")
 
     statuses: list[str] = []
     win.status_changed.connect(statuses.append)
