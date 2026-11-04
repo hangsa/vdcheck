@@ -4,7 +4,7 @@
 > 重构已合并到 `main`，**没有断点**；这里是「这个项目是怎么回事」的索引，
 > 不是待办清单。
 >
-> 最后更新: 2026-11-04（追加「下载海报」功能，见 §3.9）
+> 最后更新: 2026-11-04（追加「下载海报」功能，见 §3.9；定点截图的「删除时间点」与「逆时间点」见 §3.8 之后的各轮）
 
 ---
 
@@ -27,10 +27,10 @@
 
 | | |
 |---|---|
-| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.2**；分支 `main`，HEAD `929fb1f`） |
+| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.3**；分支 `main`，HEAD `88c62ed`） |
 | 重构 worktree | **已删除**（合并后清理掉了） |
 | 分支 | `refactor/qtableview` **已合并并删除**（本地 + 远端都删了） |
-| HEAD | `929fb1f` |
+| HEAD | `88c62ed` |
 | 提交数 | 44（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
