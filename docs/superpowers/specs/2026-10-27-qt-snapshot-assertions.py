@@ -107,7 +107,10 @@ def make_info(title='a.mp4', full_path='/x/a.mp4', passing=True,
         duration='00:01:00', file_size='1.0 GB', is_passing=passing,
         sample_rate_passing=True, bitrate_std=30000.0, sample_rate_std=48.0,
         full_path=full_path, container_format='mp4',
-        frame_rate_fps=30.0, sample_rate_khz=48.0)
+        frame_rate_fps=30.0, sample_rate_khz=48.0,
+        # 时长 (秒) —— **逆时间点**要用它算实际截图时刻
+        # (默认第 3 个时间点现在是逆的, 2026-11-04)
+        duration_seconds=3600.0)
 
 
 def fake_png_bytes(width: int = 640, height: int = 360) -> bytes:
@@ -344,21 +347,25 @@ def _run() -> int:
           f"got={[n for n in REQUIRED if not hasattr(video_qt, n)]}")
 
     # ================================================================
-    section("默认时间点 / 「+」追加 / 无删除按钮")
+    section("默认时间点 / 「+」追加 / 删除按钮 (2026-11-04)")
     win = video_qt.MainWindow()
     dlg = SnapshotDialog(win, [make_info()], '/tmp/does/not/exist/snapshot')
     tokens = [e.text() for e in dlg._tp_entries]
     check("默认三个时间点 00:00:07:24 / 00:00:08:00 / 00:01:00:00",
           tokens == ['00:00:07:24', '00:00:08:00', '00:01:00:00'],
           f"got={tokens}")
+    check("默认类型: 前两个正、第 3 个逆 (2026-11-04 用户要求)",
+          [g.kind for g in dlg._tp_groups] == ['正', '正', '逆'],
+          f"got={[g.kind for g in dlg._tp_groups]}")
     dlg._add_time_token_entry('00:00:00:00')
     tokens = [e.text() for e in dlg._tp_entries]
-    check("「+」追加的是 00:00:00:00",
+    check("追加的是 00:00:00:00",
           len(tokens) == 4 and tokens[3] == '00:00:00:00', f"got={tokens}")
     btn_texts = [b.text() for b in dlg.findChildren(QPushButton)]
-    check("**没有删除按钮** (清空输入框即删除)",
-          not any('删除' in t or '移除' in t or '-' == t for t in btn_texts),
-          f"got={btn_texts}")
+    # 2026-11-04: **有删除按钮了** (以前刻意没有, 产品文档 §6 #28 ——
+    # 那条是用户这次明确要求改的)
+    check("每个时间点都带一个删除按钮",
+          btn_texts.count('×') == 4, f"got={btn_texts}")
     check("只有一个「+」按钮",
           btn_texts.count('+') == 1, f"got={btn_texts}")
 
@@ -376,18 +383,24 @@ def _run() -> int:
     _lbl = next(l for l in _dp.findChildren(QLabel) if l.text() == '时间点:')
     _plus = next(b for b in _dp.findChildren(QPushButton) if b.text() == '+')
     _lx = _lbl.mapTo(_dp, _lbl.rect().topLeft()).x() + _lbl.width()
-    _ex = _dp._tp_entries[0].mapTo(_dp, _dp._tp_entries[0].rect().topLeft()).x()
-    check("第一个时间点入口紧挨「时间点:」标签 (间距 ≤ 12px)",
-          0 <= _ex - _lx <= 12,
-          f"标签右边={_lx}px 入口左边={_ex}px 间距={_ex - _lx}px")
-    check("各入口按顺序紧挨排列 (间距 ≤ 12px)",
-          all(0 <= (_dp._tp_entries[i + 1].mapTo(
-              _dp, _dp._tp_entries[i + 1].rect().topLeft()).x()
-              - (_dp._tp_entries[i].mapTo(
-                  _dp, _dp._tp_entries[i].rect().topLeft()).x()
-                  + _dp._tp_entries[i].width())) <= 12
-              for i in range(len(_dp._tp_entries) - 1)),
-          f"x={[_dp._tp_entries[i].mapTo(_dp, _dp._tp_entries[i].rect().topLeft()).x() for i in range(len(_dp._tp_entries))]}")
+    # 2026-11-04: 每个时间点是一**组** [类型标记][输入框][删除按钮],
+    # 所以「紧挨标签」看的是**组** (类型标记), 组与组之间看的是
+    # 「上一个组的删除按钮 → 下一个组的类型标记」。
+    _gx = _dp._tp_groups[0].label.mapTo(
+        _dp, _dp._tp_groups[0].label.rect().topLeft()).x()
+    check("第一个时间点组紧挨「时间点:」标签 (间距 ≤ 12px)",
+          0 <= _gx - _lx <= 12,
+          f"标签右边={_lx}px 组左边={_gx}px 间距={_gx - _lx}px")
+    _gaps = []
+    for i in range(len(_dp._tp_groups) - 1):
+        left = _dp._tp_groups[i].delete_btn.mapTo(
+            _dp, _dp._tp_groups[i].delete_btn.rect().topLeft()).x()
+        left += _dp._tp_groups[i].delete_btn.width()
+        right = _dp._tp_groups[i + 1].label.mapTo(
+            _dp, _dp._tp_groups[i + 1].label.rect().topLeft()).x()
+        _gaps.append(right - left)
+    check("各时间点组按顺序紧挨排列 (间距 ≤ 12px)",
+          all(0 <= g <= 12 for g in _gaps), f"gaps={_gaps}")
     check("「+」按钮仍在行的最右 (与 Tk 版一致)",
           _plus.mapTo(_dp, _plus.rect().topLeft()).x() >= _dp.width() - 60,
           f"x={_plus.mapTo(_dp, _plus.rect().topLeft()).x()} "

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **视频码率检查器** (Video Bitrate Checker) — a Chinese-language PySide6 desktop app that scans a directory of video files (or files dropped onto the window), calls `ffprobe` on each, and flags which files meet a user-configured bitrate threshold (default 30000 kbps) **and** sample-rate threshold (default 48 kHz). Users can then move all passing — or all scanned — files to a destination folder. A secondary "定点截图" (fixed-timestamp screenshot) dialog extracts frames at chosen timestamps for eyeball comparison.
 
-The GUI was Tkinter (v3.3) until v4.0 replaced it with PySide6 / `QTableView`. That rewrite lived on the `refactor/qtableview` branch and was fast-forward-merged into `main` (branch deleted) — **`main` is the PySide6 line, currently v4.2** (v4.0 = the Qt rewrite, v4.1 = 定点截图的「查看已有截图」, v4.2 = 「下载海报」). The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
+The GUI was Tkinter (v3.3) until v4.0 replaced it with PySide6 / `QTableView`. That rewrite lived on the `refactor/qtableview` branch and was fast-forward-merged into `main` (branch deleted) — **`main` is the PySide6 line, currently v4.3** (v4.0 = the Qt rewrite, v4.1 = 定点截图的「查看已有截图」, v4.2 = 「下载海报」, v4.3 = 定点截图的「删除时间点」与「逆时间点」). The behavioral spec lives in `docs/产品文档.md` and is framework-agnostic — it is the acceptance baseline.
 
 ## Running
 
@@ -46,16 +46,16 @@ Run **every** script before claiming a change is done:
 for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $(basename $f)"; done
 ```
 
-The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `read_tabular_document`, `guess_clipname_column`, `guess_link_columns`, `guess_partname_column`, `unique_poster_path`, `render_filename`, `extension_for_url`, `poster_default_dir`, `build_poster_jobs`, `download_poster`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
+The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `read_tabular_document`, `guess_clipname_column`, `guess_link_columns`, `guess_partname_column`, `unique_poster_path`, `is_reverse_token`, `strip_reverse_marker`, `actual_seconds_for_token`, `render_filename`, `extension_for_url`, `poster_default_dir`, `build_poster_jobs`, `download_poster`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
 
 ## Architecture
 
-Three modules, ~4.1k lines total:
+Three modules, ~4.4k lines total:
 
 | File | Role |
 |---|---|
-| `video_core.py` (1140) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (3087) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_core.py` (1192) | Pure logic. **No Qt, no Tk.** |
+| `video_qt.py` (3164) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
 | `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -65,13 +65,15 @@ Three modules, ~4.1k lines total:
 - `parse_video_info(data, full_path, base_path, bitrate_std, sample_rate_std)` — extracts resolution, fps, bitrate (prefers stream-level over format-level), codecs, channels, sample rate, duration, size, container format, and relative path into a `VideoInfo` dataclass. `is_passing` requires **both** `bitrate_kbps >= bitrate_std` AND `sample_rate_passing` (no audio stream counts as passing)
 - `parse_threshold(text)` — parses a threshold; rejects non-positive **and** `inf`/`nan`
 - `truncate_text(text, col_width, measure)` — pixel-level truncation ending in three ASCII dots (not `…`)
-- `parse_snapshot_filename(name)` → `(base, token)` | `None` — parses a screenshot filename `{title}_t{idx}_{HH-MM-SS-FF}.png` back into its parts. The regex is **greedy + backtracking**, so it takes the **rightmost** `_t<digits>_` — exactly symmetric to the writer in `video_qt._snapshot_worker`. The token comes back in `:` form (`'00:00:07:24'`), matching the timepoint input boxes
+- `parse_snapshot_filename(name)` → `(base, token)` | `None` — parses a screenshot filename `{title}_t{idx}_{HH-MM-SS-FF}.png` back into its parts. The token part may carry an **`R` prefix** (`…_t3_R00-01-00-00.png`) = a reverse timepoint (counted from the end); the marker is kept in the returned token so the type survives the round trip. The regex is **greedy + backtracking**, so it takes the **rightmost** `_t<digits>_` — exactly symmetric to the writer in `video_qt._snapshot_worker`. The token comes back in `:` form (`'00:00:07:24'`), matching the timepoint input boxes
 - `scan_existing_snapshots(output_dir, progress=None)` → `list[SnapshotFile]` — first level only, **never creates the directory** (directory creation has exactly one gate: `ensure_snapshot_dir`). The optional `progress(done, total)` callback fires per file — on a network drive the per-file `getmtime` round-trips are slow enough that the UI needs to know
 - `match_snapshots(files, base)` → `{token: SnapshotFile}` — picks one file per (video, timepoint); same timepoint twice → the **newer mtime** wins
-- `time_token_sort_key(token)` → `(h, m, s, frame)` — numeric sort, because string sort puts `00:10` before `00:02`
+- `time_token_sort_key(token)` → `(h, m, s, frame)` — numeric sort, because string sort puts `00:10` before `00:02`. Strips the reverse `R` marker first
+- `is_reverse_token(token)` / `strip_reverse_marker(token)` — the `R` marker of a reverse timepoint (from the end); `parse_time_token` strips it automatically
+- `actual_seconds_for_token(token, fps, duration_seconds)` → the **actual** capture moment: forward = the entered value, reverse = `duration_seconds - entered`. Raises `ValueError` when a reverse timepoint is beyond the video's length (that one cell fails)
 - `DEFAULT_BITRATE_KBPS = 30000` / `DEFAULT_SAMPLE_RATE_KHZ = 48` live **here** — core is the single home; the GUI layer imports them
 
-**Data model** — `VideoInfo` dataclass holds all display fields (`rel_path`, `title`, `resolution`, `frame_rate`, `bitrate_kbps`, `video_codec`, `audio_codec`, `audio_channels`, `audio_sample_rate`, `duration`, `file_size`, `container_format`), plus thresholds (`bitrate_std`, `sample_rate_std`), pass flags (`is_passing`, `sample_rate_passing`), and `full_path` (used by the mover).
+**Data model** — `VideoInfo` dataclass holds all display fields (`rel_path`, `title`, `resolution`, `frame_rate`, `bitrate_kbps`, `video_codec`, `audio_codec`, `audio_channels`, `audio_sample_rate`, `duration`, `file_size`, `container_format`), plus thresholds (`bitrate_std`, `sample_rate_std`), pass flags (`is_passing`, `sample_rate_passing`), `full_path` (used by the mover) and `duration_seconds` (the **raw** length — reverse timepoints need it; the display string `duration` would lose the fraction).
 
 **Table** — `VideoTableModel(QAbstractTableModel)` + `QTableView`. The table area contains **no native child windows** — that is the root fix for "restore from taskbar shows a black table area" (a Qt top-level window is rendered offscreen and blitted once, so there is no half-painted intermediate state).
 
@@ -116,6 +118,8 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 
 **Snapshot dialog** — `SnapshotDialog(QDialog)` (modal) with `SnapshotGridModel` + `SnapshotDelegate` + `EnlargeDialog`. The grid is a `QTableView` (rows = files, columns = timestamps) painting `QPixmap` thumbnails via a delegate — not a `QTableWidget` of labels, so the grid area holds no child windows. Only the **320px** thumbnail stays in memory; the 640px original is re-loaded **from disk** by the zoom window. The grid's row height is **`SNAPSHOT_ROW_H` (188px = 180 + 8)** so the 320×180 thumbnail is drawn at its natural size — the delegate scales the pixmap to fit the cell (`KeepAspectRatio`), so a short row crushes it (this was a real bug: Qt's default 30px row rendered it at 53×30). Extraction runs on a **plain daemon thread** (not a `QThread`) so the dialog can be closed mid-run without `abort`; the cancel flag is only checked between cells, so an already-running ffmpeg is not killed.
 
+**Timepoint rows** (2026-11-04) — each timepoint is a **group** of three widgets: `[kind label][QLineEdit][× delete]`. The kind is **正** (from the start) or **逆** (from the end: the actual capture moment is `duration_seconds - entered`, so it is computed **per video**). The kind is chosen **when adding** — the `+` button carries a menu (正时间点 / 逆时间点). The three defaults are 正 / 正 / **逆** (the third one, `00:01:00:00`, is a minute from the end). A reverse timepoint is stored with an **`R` marker** (`R00:01:00:00`) — that is what ends up in the file name (`…_t3_R00-01-00-00.png`), so the type survives and 正/逆 with the same number never collide. The grid header renders it as `T3: 逆 00-01-00-00`. **Every timepoint can be deleted, including the defaults** (this replaced the old "no delete button" rule — the user asked for it).
+
 **Two snapshot buttons** — the dialog's top row carries 查看已有截图 and 开始截图, and they are deliberately **different jobs**:
 - **开始截图** extracts frames and **overwrites** the files on disk. Unchanged since 2026-10-27.
 - **查看已有截图** (`_on_view_existing`) is **read-only**: it scans the snapshot dir for filenames matching the writer's rule, matches them against the current selection, and back-fills the grid. It never extracts, never writes, and **never creates the directory** (a missing dir only produces a status line). The **timepoint columns come from the directory** (whatever timepoints exist on disk, sorted), *not* from the input boxes — the input boxes belong to 开始截图 and are left untouched.
@@ -147,5 +151,5 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 - The `scanning` flag + button state prevent re-entrant scans; drag-drop is also blocked while scanning (an info dialog is shown and the drop ignored)
 - Container format: prefer the `format_name` token matching the file extension (e.g. an `.mp4` file with `format_name='mov,mp4,...'` resolves to `'mp4'`); fall back to the first token, then the extension, then `'N/A'`
 - `DEFAULT_BITRATE_KBPS = 30000`, `DEFAULT_SAMPLE_RATE_KHZ = 48` — both editable from the UI; values are parsed with `parse_threshold()` and must be positive and finite
-- Window: `1440x700`, `minsize(1000, 500)`, title `"视频检测v4.2"` (1440 = the sum of column widths 1347px fits without a horizontal scrollbar; a 1366px laptop screen does not fit the window — deliberate trade-off)
+- Window: `1440x700`, `minsize(1000, 500)`, title `"视频检测v4.3"` (1440 = the sum of column widths 1347px fits without a horizontal scrollbar; a 1366px laptop screen does not fit the window — deliberate trade-off)
 - `video_checker.py` uses **CRLF** line endings. Never rewrite it with a plain-LF write — use the Edit tool for precise replacements, and verify with `python3 -c "d=open('video_checker.py','rb').read(); c=d.count(b'\r\n'); print('bare LF:', d.count(b'\n')-c)"` (must be `0`).

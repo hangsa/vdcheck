@@ -89,7 +89,9 @@ def make_info(title='a.mp4', full_path='/x/a.mp4') -> VideoInfo:
         duration='00:01:00', file_size='1.0 GB', is_passing=True,
         sample_rate_passing=True, bitrate_std=30000.0, sample_rate_std=48.0,
         full_path=full_path, container_format='mp4',
-        frame_rate_fps=30.0, sample_rate_khz=48.0)
+        frame_rate_fps=30.0, sample_rate_khz=48.0,
+        # 时长 (秒) —— 逆时间点算实际时刻要用 (默认第 3 个是逆的)
+        duration_seconds=3600.0)
 
 
 def fake_png_bytes(width: int = 640, height: int = 360,
@@ -453,7 +455,7 @@ def test_version() -> None:
     section("版本号: 窗口标题 ↔ 产品文档 §4.1")
     win = video_qt.MainWindow()
     title = win.windowTitle()
-    check("窗口标题是 v4.2", title == '视频检测v4.2', f"got={title!r}")
+    check("窗口标题是 v4.3", title == '视频检测v4.3', f"got={title!r}")
     with open(os.path.join(_ROOT, 'docs', '产品文档.md'), encoding='utf-8') as f:
         doc = f.read()
     m = re.search(r'窗口标题 `([^`]+)`', doc)
@@ -461,8 +463,8 @@ def test_version() -> None:
           m is not None and m.group(1) == title,
           f"doc={m.group(1) if m else None!r} code={title!r}")
     m2 = re.search(r'^版本: (v[\d.]+)', doc, re.M)
-    check("产品文档版本头是 v4.2",
-          m2 is not None and m2.group(1) == 'v4.2',
+    check("产品文档版本头是 v4.3",
+          m2 is not None and m2.group(1) == 'v4.3',
           f"got={m2.group(1) if m else None!r}")
 
 

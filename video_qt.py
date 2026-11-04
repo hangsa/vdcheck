@@ -27,7 +27,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog,
     QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
     QStatusBar, QStyle, QStyleOptionViewItem, QStyledItemDelegate, QTableView,
     QVBoxLayout, QWidget,
 )
@@ -36,12 +36,13 @@ from video_core import (
     DEFAULT_BITRATE_KBPS, DEFAULT_SAMPLE_RATE_KHZ, EXTRACT_THUMB_W,
     VIDEO_EXTENSIONS, DocumentFormatError, VideoInfo, _cell_fg,
     _extract_sort_key, _header_text_with_arrow, _next_sort_state,
-    build_poster_jobs, download_poster, extract_frame, format_title,
-    guess_clipname_column, guess_link_columns, guess_partname_column,
-    match_snapshots,
-    parse_threshold, parse_time_token, parse_video_info, poster_default_dir,
+    actual_seconds_for_token, build_poster_jobs, download_poster,
+    extract_frame, format_title, guess_clipname_column, guess_link_columns,
+    guess_partname_column, is_reverse_token, match_snapshots, parse_threshold,
+    parse_time_token, parse_video_info, poster_default_dir,
     read_tabular_document, run_ffprobe, scan_existing_snapshots,
-    scan_video_files, time_token_sort_key, time_token_to_string, truncate_text,
+    scan_video_files, strip_reverse_marker, time_token_sort_key,
+    time_token_to_string, truncate_text,
 )
 
 # 着色常量**只从 video_core 取** —— 界面层不持有自己的颜色常量
@@ -564,7 +565,13 @@ class SnapshotGridModel(QAbstractTableModel):
             return '标题'
         c = section - 2
         if 0 <= c < len(self._tokens):
-            return f"T{c + 1}: {time_token_to_string(self._tokens[c])}"
+            token = self._tokens[c]
+            if is_reverse_token(token):
+                # 逆时间点: 表头标出来 (用户一眼能看出这一列是片尾往前数)
+                text = '逆 ' + time_token_to_string(strip_reverse_marker(token))
+            else:
+                text = time_token_to_string(token)
+            return f"T{c + 1}: {text}"
         return None
 
     # ---- 时间点列 ----
@@ -787,6 +794,19 @@ class TimeTokenEdit(QLineEdit):
         self.setSelection(start, end - start)
 
 
+@dataclass
+class TimePointGroup:
+    """一个时间点: 类型 (正/逆) + 输入框 + 删除按钮。
+
+    类型在**添加的时候**就定下 (2026-11-04 用户要求) —— 所以这里存的是
+    一个静态标记标签, 不是下拉框。
+    """
+    kind: str                 # '正' | '逆'
+    label: QLabel             # 类型标记
+    edit: TimeTokenEdit       # 时间点输入框
+    delete_btn: QPushButton   # 删除这一组
+
+
 class EnlargeDialog(QDialog):
     """放大查看窗口 —— **从磁盘重新加载** 640px 原图。
 
@@ -837,7 +857,10 @@ def _snapshot_worker(files, tokens, output_dir, cancel_event, result_queue):
             result_queue.put(('cell_start', (r, c)))
             result_queue.put(('progress', (done, total, info.title)))
             try:
-                seconds = parse_time_token(token, info.frame_rate_fps)
+                # 正时间点 = 输入值; 逆时间点 = 视频时长 - 输入值。
+                # 逆时间点超过片长 → ValueError → 那一格标失败。
+                seconds = actual_seconds_for_token(
+                    token, info.frame_rate_fps, info.duration_seconds)
             except ValueError:
                 result_queue.put(('cell_failed', (r, c)))
                 done += 1
@@ -941,12 +964,16 @@ class SnapshotDialog(QDialog):
 
     def __init__(self, main, files: list[VideoInfo], output_dir: str,
                  default_time_tokens: tuple[str, ...] =
-                 ('00:00:07:24', '00:00:08:00', '00:01:00:00')):
+                 ('00:00:07:24', '00:00:08:00', '00:01:00:00'),
+                 default_time_kinds: tuple[str, ...] = ('正', '正', '逆')):
         super().__init__(main)
         self._main = main
         self._files = list(files)
         self._output_dir = output_dir
         self._tokens = list(default_time_tokens)
+        # 每个时间点的类型 (正/逆)。默认三个里**前两个正、第 3 个逆**
+        # (2026-11-04 用户要求)。
+        self._kinds = list(default_time_kinds)
         self._state = 'idle'          # idle / running / done
         self._failed_count = 0
         self._cells_processed = 0
@@ -1012,14 +1039,21 @@ class SnapshotDialog(QDialog):
         # 与 Tk 版一致 (Tk 里 entries 装在一个 expand=True 的 frame 里,
         # frame 内的 entry 靠左, 「+」pack 在 frame 之后 → 落在最右)。
         row2.addStretch(1)
-        add_btn = QPushButton('+')
-        add_btn.setFixedWidth(30)
-        add_btn.clicked.connect(lambda: self._add_time_token_entry('00:00:00:00'))
-        row2.addWidget(add_btn)
+        # 「+」是**带菜单**的: 点它先选类型 (正/逆), 再加时间点
+        # (2026-11-04 用户要求: 类型在添加的时候选)。
+        self.add_btn = QPushButton('+')
+        self.add_btn.setFixedWidth(30)
+        add_menu = QMenu(self)
+        add_menu.addAction('正时间点').triggered.connect(
+            lambda: self._add_time_token_entry('00:00:00:00', '正'))
+        add_menu.addAction('逆时间点').triggered.connect(
+            lambda: self._add_time_token_entry('00:00:00:00', '逆'))
+        self.add_btn.setMenu(add_menu)
+        row2.addWidget(self.add_btn)
         root.addLayout(row2)
-        self._tp_entries: list[TimeTokenEdit] = []
-        for tok in self._tokens:
-            self._add_time_token_entry(tok)
+        self._tp_groups: list[TimePointGroup] = []
+        for tok, kind in zip(self._tokens, self._kinds):
+            self._add_time_token_entry(tok, kind)
 
         # === 中间: 网格 ===
         self.model = SnapshotGridModel(self._files, self)
@@ -1063,12 +1097,46 @@ class SnapshotDialog(QDialog):
             header.setSectionResizeMode(c + 2, QHeaderView.Fixed)
             self.view.setColumnWidth(c + 2, SNAPSHOT_CELL_W)
 
-    def _add_time_token_entry(self, default: str = '00:00:00:00') -> None:
-        """加一个时间点入口 (初始两个 + 「+」追加的都是这个)。"""
+    @property
+    def _tp_entries(self) -> list[TimeTokenEdit]:
+        """各组的时间点输入框 (按顺序) —— 给断言脚本用。"""
+        return [group.edit for group in self._tp_groups]
+
+    def _add_time_token_entry(self, default: str = '00:00:00:00',
+                               kind: str = '正') -> None:
+        """加一个时间点 (一组三个控件: 类型标记 + 输入框 + 删除按钮)。
+
+        类型在**添加的时候**定下 —— 之后只有「删掉重来」能换类型。
+        """
+        label = QLabel(kind)
+        label.setFixedWidth(18)
+        label.setAlignment(Qt.AlignCenter)
+        if kind == '逆':
+            label.setStyleSheet('font-weight: bold;')
         edit = TimeTokenEdit(default)
         edit.setFixedWidth(110)
+        delete_btn = QPushButton('×')
+        delete_btn.setFixedWidth(24)
+        delete_btn.setToolTip('删除这个时间点')
+        self._tp_layout.addWidget(label)
         self._tp_layout.addWidget(edit)
-        self._tp_entries.append(edit)
+        self._tp_layout.addWidget(delete_btn)
+        self._tp_groups.append(
+            TimePointGroup(kind=kind, label=label, edit=edit,
+                           delete_btn=delete_btn))
+        delete_btn.clicked.connect(lambda: self._delete_time_point(edit))
+
+    def _delete_time_point(self, edit: TimeTokenEdit) -> None:
+        """删掉一个时间点 —— **默认的也能删** (2026-11-04 用户要求)。"""
+        for group in list(self._tp_groups):
+            if group.edit is not edit:
+                continue
+            for widget in (group.label, group.edit, group.delete_btn):
+                self._tp_layout.removeWidget(widget)
+                widget.setParent(None)
+                widget.deleteLater()
+            self._tp_groups.remove(group)
+            return
 
     # ---- 截图地址 ----
 
@@ -1146,17 +1214,22 @@ class SnapshotDialog(QDialog):
 
     def _start_snap(self) -> None:
         """校验 → 建目录 → 重建网格 → 起 worker。"""
-        tokens = [e.text().strip() for e in self._tp_entries]
-        tokens = [t for t in tokens if t]
-        if not tokens:
+        # 每个时间点带上它的类型: 逆的加 'R' 前缀 (从片尾往片头数)
+        pairs = [(group.kind, group.edit.text().strip())
+                 for group in self._tp_groups]
+        pairs = [(kind, value) for kind, value in pairs if value]
+        if not pairs:
             QMessageBox.warning(self, '提示', '请输入至少一个时间点。')
             return
-        for tok in tokens:
+        tokens: list[str] = []
+        for kind, value in pairs:
+            token = ('R' + value) if kind == '逆' else value
             try:
-                parse_time_token(tok, 30.0)      # fps 只做语法校验
+                parse_time_token(token, 30.0)     # fps 只做语法校验
             except ValueError as e:
                 QMessageBox.critical(self, '错误', f"时间点格式错误: {e}")
                 return
+            tokens.append(token)
         output_dir = self.output_edit.text().strip()
         if not output_dir:
             QMessageBox.warning(self, '提示', '请先设置截图地址。')
@@ -1199,8 +1272,11 @@ class SnapshotDialog(QDialog):
         self._poll_timer.start()
 
     def _set_time_points_enabled(self, enabled: bool) -> None:
-        for edit in self._tp_entries:
-            edit.setEnabled(enabled)
+        """抽帧期间锁住时间点区 (输入框 / 删除按钮 / 「+」)。"""
+        for group in self._tp_groups:
+            group.edit.setEnabled(enabled)
+            group.delete_btn.setEnabled(enabled)
+        self.add_btn.setEnabled(enabled)
 
     # ---- worker 结果 ----
 
@@ -2147,9 +2223,10 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         # 版本号: v4.0 抬的 (GUI 层从 Tkinter 换成 PySide6); v4.1 抬的
-        # (定点截图新增「查看已有截图」); v4.2 抬的 (新增「下载海报」)。
+        # (定点截图新增「查看已有截图」); v4.2 抬的 (新增「下载海报」);
+        # v4.3 抬的 (定点截图新增「删除时间点」与「逆时间点」)。
         # 改这里要同时改产品文档 §4.1 与 CHANGELOG 的对应条目。
-        self.setWindowTitle('视频检测v4.2')
+        self.setWindowTitle('视频检测v4.3')
         # 1440 而不是 1280: 列宽总和 1347px (45 序号 + 1302 数据列), 1280 的窗口装不下
         # → 主表格会出现横向滚动条。1440 装得下 (可用 ~1428px, 余量 81px)。
         # 代价: 1366px 宽的笔记本屏幕放不下 (用户 2026-10-29 知情选定)。

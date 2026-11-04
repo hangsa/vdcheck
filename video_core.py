@@ -99,6 +99,10 @@ class VideoInfo:
     # 排序用原始数值 (parse_video_info 写入; 默认值仅供测试夹具)
     frame_rate_fps: float = 0.0
     sample_rate_khz: float = 0.0
+    # 视频时长 (秒, 原始值) —— **逆时间点**要用它算「片尾往前推」的实际
+    # 截图时刻。duration 是给界面看的格式化字符串 ('HH:MM:SS'), 反解会
+    # 丢掉小数, 所以这里另存一份精确的 (2026-11-04)。
+    duration_seconds: float = 0.0
 
 
 def format_duration(seconds: float) -> str:
@@ -121,12 +125,31 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024 ** 3:.2f} GB"
 
 
+# 逆时间点的标记 (2026-11-04): 时间点字符串前面带个 'R' = 从片尾往片头数。
+# 文件名里也是这个标记 ('名字_t1_R00-01-00-00.png'), 解析时原样带回。
+REVERSE_MARKER = 'R'
+
+
+def is_reverse_token(token: str) -> bool:
+    """这个时间点是**逆时间点**吗 (从片尾往片头数)。"""
+    return str(token).strip().upper().startswith(REVERSE_MARKER)
+
+
+def strip_reverse_marker(token: str) -> str:
+    """去掉逆时间点的 'R' 标记, 剩下 'HH:MM:SS:frame'。"""
+    text = str(token).strip()
+    if text[:1].upper() == REVERSE_MARKER:
+        return text[1:]
+    return text
+
+
 def parse_time_token(token: str, fps: float) -> float:
     """把 'HH:MM:SS:frame' 解析为秒 (float).
 
     帧号除以 fps 得到该帧的秒偏移。非法格式 / 越界 / fps<=0 抛 ValueError。
+    前面的 'R' 标记 (逆时间点) 会被自动剥掉。
     """
-    parts = token.strip().split(':')
+    parts = strip_reverse_marker(token).split(':')
     if len(parts) != 4:
         raise ValueError(f"时间点格式应为 HH:MM:SS:frame, 得到: {token!r}")
     try:
@@ -144,8 +167,30 @@ def time_token_to_string(token: str) -> str:
     """把 'HH:MM:SS:frame' 中的 ':' 替换为 '-'.
 
     用于文件名 (Windows 保留 ':') 和进度弹窗列头显示。
+    逆时间点的 'R' 标记**保留** ('R00:01:00:00' → 'R00-01-00-00')。
     """
     return token.replace(':', '-')
+
+
+def actual_seconds_for_token(token: str, fps: float,
+                             duration_seconds: float) -> float:
+    """这个时间点**实际**在第几秒截图。
+
+    正时间点 = 输入值;
+    逆时间点 = 视频时长 - 输入值 (从片尾往片头数)。
+
+    逆时间点算出来是负数 (输入值超过片长) → 抛 ValueError,
+    调用方把**那一格**标成失败 (别的行不受影响)。
+    """
+    entered = parse_time_token(token, fps)
+    if not is_reverse_token(token):
+        return entered
+    actual = duration_seconds - entered
+    if actual < 0:
+        raise ValueError(
+            f'逆时间点 {strip_reverse_marker(token)} 超过片长 '
+            f'({duration_seconds:.1f} 秒)')
+    return actual
 
 
 def format_title(info: VideoInfo) -> str:
@@ -405,9 +450,11 @@ def parse_video_info(
     # 时长
     duration_sec = fmt.get('duration')
     try:
-        duration = format_duration(float(duration_sec))
+        duration_seconds = float(duration_sec)
+        duration = format_duration(duration_seconds)
     except (TypeError, ValueError):
         duration = "N/A"
+        duration_seconds = 0.0
 
     # 文件大小
     size_str = fmt.get('size')
@@ -470,6 +517,7 @@ def parse_video_info(
         audio_sample_rate=audio_sample_rate,
         sample_rate_khz=sample_rate_hz / 1000.0,
         duration=duration,
+        duration_seconds=duration_seconds,
         file_size=file_size,
         is_passing=is_passing,
         sample_rate_passing=sample_rate_passing,
@@ -566,8 +614,11 @@ def scan_video_files(directory: str, recursive: bool) -> list[str]:
 
 # base 贪婪匹配 + 回溯 → 取**最右**一次 "_t<数字>_", 与生成端严格对称
 # (标题本身带 "_t1_" 也不会拆错: "a_t1" + "_t2_" + token → base="a_t1")。
+# 时间点部分允许一个可选的 'R' 前缀 (逆时间点, 2026-11-04):
+#   名字_t1_00-00-07-24.png   正时间点
+#   名字_t1_R00-01-00-00.png  逆时间点
 _SNAPSHOT_NAME_RE = re.compile(
-    r'^(?P<base>.+)_t(?P<index>\d+)_(?P<token>\d+-\d+-\d+-\d+)\.png$',
+    r'^(?P<base>.+)_t(?P<index>\d+)_(?P<token>[R]?\d+-\d+-\d+-\d+)\.png$',
     re.IGNORECASE)
 
 
@@ -575,7 +626,8 @@ def parse_snapshot_filename(name: str) -> tuple[str, str] | None:
     """把截图文件名拆成 (base, 时间点)。不符合规则 → None。
 
     base    = 视频标题去掉扩展名 (与生成端是**同一个字符串**)
-    时间点  = ':' 形式 ('00:00:07:24') —— 与时间点输入框同格式
+    时间点  = ':' 形式 ('00:00:07:24') —— 与时间点输入框同格式;
+              逆时间点带 'R' 前缀 ('R00:01:00:00')
     """
     m = _SNAPSHOT_NAME_RE.match(name)
     if not m:
@@ -653,7 +705,7 @@ def time_token_sort_key(token: str) -> tuple[int, int, int, int]:
     字符串排序会把 '00:10:00:00' 排在 '00:02:00:00' 前面 ('1' < '2')。
     """
     nums: list[int] = []
-    for part in token.split(':')[:4]:
+    for part in strip_reverse_marker(token).split(':')[:4]:
         try:
             nums.append(int(part))
         except ValueError:
