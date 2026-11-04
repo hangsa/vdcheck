@@ -846,13 +846,18 @@ class EnlargeDialog(QDialog):
         root.addWidget(close_btn)
 
 
-def _snapshot_worker(files, tokens, output_dir, cancel_event, result_queue):
+def _snapshot_worker(files, tokens, output_dir, cancel_event, pause_event,
+                     skip_cells, result_queue):
     """抽帧的 worker (后台线程)。
 
     **只往队列里放磁盘路径** —— QPixmap 非线程安全, 加载留给主线程。
 
     取消标志只在**格子之间**查: 已经在跑的 ffmpeg 不会被杀掉
-    (产品文档 §6 #27)。
+    (产品文档 §6 #27)。暂停标志同理: 暂停 → 两格之间停住。
+
+    skip_cells: 已经抽好的 {(行号, 时间点)} —— **跳过, 不重抽**
+    (2026-11-04 用户要求)。按**时间点**而不是列号记 —— 列号会随
+    增删时间点而移位, 时间点不会。
     """
     total = len(files) * len(tokens)
     done = 0
@@ -862,6 +867,18 @@ def _snapshot_worker(files, tokens, output_dir, cancel_event, result_queue):
         for c, token in enumerate(tokens):
             if cancel_event.is_set():
                 break
+            # 暂停中 → 停住 (当前这格还没开始, 不动它)
+            while not pause_event.is_set():
+                if cancel_event.is_set():
+                    break
+                time.sleep(0.1)
+            if cancel_event.is_set():
+                break
+            if (r, token) in skip_cells:
+                # 已经截好了 → 不重抽 (算作已完成)
+                result_queue.put(('progress', (done, total, info.title)))
+                done += 1
+                continue
             result_queue.put(('cell_start', (r, c)))
             result_queue.put(('progress', (done, total, info.title)))
             try:
@@ -982,7 +999,12 @@ class SnapshotDialog(QDialog):
         # 每个时间点的类型 (正/逆)。默认三个里**前两个正、第 3 个逆**
         # (2026-11-04 用户要求)。
         self._kinds = list(default_time_kinds)
-        self._state = 'idle'          # idle / running / done
+        self._state = 'idle'          # idle / running / paused / done
+        self._pause = threading.Event()   # 没 set = 暂停中
+        self._pause.set()                  # 默认「在跑」
+        # 时间点被改动后「继续」→ 让当前这轮跑完, 跑完自动再起一轮
+        # (见 _resume_snapshot)
+        self._restart_after_done = False
         self._failed_count = 0
         self._cells_processed = 0
         self._total = len(self._files) * len(self._tokens)
@@ -1212,38 +1234,43 @@ class SnapshotDialog(QDialog):
     # ---- 状态机 ----
 
     def _on_action_btn(self) -> None:
-        """「开始截图」/「截图中」: idle/done → 起新一轮; running → 取消。
+        """「开始截图」/「截图中」/「继续截图」。
 
-        取消只置标志 —— **已启动的 ffmpeg 不会被杀** (产品文档 §6 #27)。
+        idle/done → 起新一轮; running → **暂停**; paused → **继续**。
+        (2026-11-04 用户要求: 暂停后继续, 已经截好的不重抽。)
+
+        暂停只置标志 —— **已启动的 ffmpeg 不会被杀** (产品文档 §6 #27)。
         """
         if self._state == 'running':
-            self._cancel.set()
-            self.action_btn.setEnabled(False)
+            self._pause_snapshot()
+            return
+        if self._state == 'paused':
+            self._resume_snapshot()
             return
         if self._loading_existing:
             # 「查看已有截图」还在加载 → 不许同时抽帧 (两者都要重建网格,
             # 会打架)。按钮本来就禁着, 这里只是兜底。
             return
-        self._start_snap()
+        self._start_snap(resume=False)
 
-    def _start_snap(self) -> None:
-        """校验 → 建目录 → 重建网格 → 起 worker。"""
+    def _start_snap(self, resume: bool = False) -> None:
+        """校验 → 建目录 → 重建网格 → 起 worker。
+
+        resume=True（从「已暂停」继续）：**已经截好的不重抽** ——
+        跳过的是「(文件, 时间点)」这一对（不是列号 —— 列号会随增删时间点
+        移位，时间点不会），所以新增的时间点、改了值的时间点都照常抽。
+        """
         # 每个时间点带上它的类型: 逆的加 'R' 前缀 (从片尾往片头数)
-        pairs = [(group.kind, group.edit.text().strip())
-                 for group in self._tp_groups]
-        pairs = [(kind, value) for kind, value in pairs if value]
-        if not pairs:
+        tokens = self._current_tokens()
+        if not tokens:
             QMessageBox.warning(self, '提示', '请输入至少一个时间点。')
             return
-        tokens: list[str] = []
-        for kind, value in pairs:
-            token = ('R' + value) if kind == '逆' else value
+        for token in tokens:
             try:
                 parse_time_token(token, 30.0)     # fps 只做语法校验
             except ValueError as e:
                 QMessageBox.critical(self, '错误', f"时间点格式错误: {e}")
                 return
-            tokens.append(token)
         output_dir = self.output_edit.text().strip()
         if not output_dir:
             QMessageBox.warning(self, '提示', '请先设置截图地址。')
@@ -1257,16 +1284,26 @@ class SnapshotDialog(QDialog):
             QMessageBox.critical(self, '错误', f"无法创建截图地址:\n{e}")
             return
 
+        # 网格重建前, 把已截好的记下来 (按「行 + 时间点」) —— 继续时
+        # 重建网格会把状态清掉, 得贴回去。
+        # 先把积压的消息处理掉 —— 不然「刚抽完还没记进模型」的那一格
+        # 会被重抽一遍。
+        if resume:
+            self._drain_pending()
+        saved = self._collect_done_cells() if resume else {}
+
         self._tokens = tokens
         self.model.set_time_tokens(tokens)
         self.delegate.clear_thumbnails()
         self._sync_columns()
+        # 贴回已截好的缩略图 (重建网格把状态清了)
+        self._cells_processed = self._restore_done_cells(saved)
         self._cancel.clear()
+        self._pause.set()                        # 默认「在跑」
         self._failed_count = 0
-        self._cells_processed = 0
         self._total = len(self._files) * len(tokens)
         self.progress.setRange(0, max(self._total, 1))
-        self.progress.setValue(0)
+        self.progress.setValue(self._cells_processed)
         self._state = 'running'
         self.action_btn.setText('截图中')
         self._set_time_points_enabled(False)
@@ -1278,12 +1315,96 @@ class SnapshotDialog(QDialog):
         self._result_queue = queue.Queue()
         self._worker_thread = threading.Thread(
             target=_snapshot_worker,
-            args=(self._files, tokens, output_dir, self._cancel,
-                  self._result_queue),
+            args=(self._files, tokens, output_dir, self._cancel, self._pause,
+                  set(saved.keys()), self._result_queue),
             daemon=True,
         )
         self._worker_thread.start()
         self._poll_timer.start()
+
+    # ---- 暂停 / 继续 ----
+
+    def _pause_snapshot(self) -> None:
+        """暂停抽帧 —— 正在跑的那一格抽完就停, 不再开始下一格。
+
+        暂停期间**时间点可以改**（能新增 / 删除 / 改值）—— 继续时按新的
+        来: 没动过的已截好的不重抽, 新增/改了的照常抽。
+        """
+        self._drain_pending()        # 先把积压的消息处理掉 (模型要是最新的)
+        if self._state != 'running':
+            return                   # 刚好在这之前就抽完了
+        self._state = 'paused'
+        self._pause.clear()          # 工作线程在两格之间看到没 set 就停下
+        self.action_btn.setText('继续截图')
+        self._set_time_points_enabled(True)
+        self.status_label.setText('已暂停 — 点「继续截图」继续')
+
+    def _current_tokens(self) -> list[str]:
+        """当前时间点入口里的值 → token 列表 (逆的带 R 前缀, 空的跳过)。"""
+        out: list[str] = []
+        for group in self._tp_groups:
+            value = group.edit.text().strip()
+            if not value:
+                continue
+            out.append(('R' + value) if group.kind == '逆' else value)
+        return out
+
+    def _resume_snapshot(self) -> None:
+        """继续抽帧。
+
+        - 时间点**没动** → **唤醒原来那条 worker**: 从暂停的地方接着跑,
+          一格都不会重抽 (2026-11-04 用户要求)。
+        - 时间点**动了** (新增 / 删除 / 改值) → 先让当前这轮跑完 (它抽的
+          是老时间点, 本来也要抽), 跑完**自动再起一轮**: 新增的时间点
+          照常抽, 已经截好的按「(文件, 时间点)」跳过。
+          (不直接重起 worker —— 老 worker 可能正在抽某一格, 两条 worker
+           同时写同一个文件会写坏。)
+        """
+        if self._current_tokens() == self._tokens:
+            # 没动 → 唤醒原来的 worker
+            self._pause.set()
+            self._state = 'running'
+            self.action_btn.setText('截图中')
+            self._set_time_points_enabled(False)
+            self.status_label.setText('继续抽帧…')
+            return
+        # 动了 → 当前这轮跑完, 跑完自动起新一轮
+        self._restart_after_done = True
+        self._pause.set()
+        self._state = 'running'
+        self.action_btn.setText('截图中')
+        self._set_time_points_enabled(False)
+        self.status_label.setText('时间点已改 — 这一轮跑完自动补新的')
+
+    def _collect_done_cells(self) -> dict[tuple[int, str], str]:
+        """已截好的格子 → {(行号, 时间点): 图片路径}。
+
+        按**时间点**记而不是列号 —— 列号会随增删时间点而移位。
+        """
+        out: dict[tuple[int, str], str] = {}
+        tokens = self.model.time_tokens
+        for r in range(self.model.rowCount()):
+            for c, token in enumerate(tokens):
+                state = self.model.cell_state(r, c + 2)
+                if state is not None and state.status == 'done' \
+                        and state.image_path:
+                    out[(r, token)] = state.image_path
+        return out
+
+    def _restore_done_cells(self, saved: dict[tuple[int, str], str]) -> int:
+        """把已截好的缩略图贴回重建后的网格 (按时间点对回列号)。"""
+        if not saved:
+            return 0
+        tokens = self.model.time_tokens
+        count = 0
+        for (r, token), path in saved.items():
+            if token not in tokens:
+                continue
+            c = tokens.index(token)
+            if self.delegate.set_thumbnail(r, c + 2, path):
+                self.model.mark_done(r, c + 2, path)
+                count += 1
+        return count
 
     def _set_time_points_enabled(self, enabled: bool) -> None:
         """抽帧期间锁住时间点区 (输入框 / 删除按钮 / 「+」)。"""
@@ -1301,21 +1422,8 @@ class SnapshotDialog(QDialog):
                 msg_type, payload = self._result_queue.get_nowait()
                 if self._closed:
                     return
-                if msg_type == 'cell_start':
-                    r, c = payload
-                    self.model.mark_loading(r, c + 2)
-                elif msg_type == 'cell_done':
-                    r, c, path = payload
-                    self._mark_done(r, c + 2, path)
-                elif msg_type == 'cell_failed':
-                    r, c = payload
-                    self._mark_failed(r, c + 2)
-                elif msg_type == 'progress':
-                    done, total, current = payload
-                    self._update_status(done, total, current)
-                elif msg_type == 'done':
-                    done, total, cancelled = payload
-                    self._on_snap_done(done, total, cancelled)
+                self._handle_snapshot_message(msg_type, payload)
+                if msg_type == 'done':
                     return
         except queue.Empty:
             pass
@@ -1331,6 +1439,39 @@ class SnapshotDialog(QDialog):
                         return
             except queue.Empty:
                 pass
+
+    def _handle_snapshot_message(self, msg_type: str, payload) -> None:
+        """处理抽帧 worker 的一条消息 (主线程)。"""
+        if msg_type == 'cell_start':
+            r, c = payload
+            self.model.mark_loading(r, c + 2)
+        elif msg_type == 'cell_done':
+            r, c, path = payload
+            self._mark_done(r, c + 2, path)
+        elif msg_type == 'cell_failed':
+            r, c = payload
+            self._mark_failed(r, c + 2)
+        elif msg_type == 'progress':
+            done, total, current = payload
+            self._update_status(done, total, current)
+        elif msg_type == 'done':
+            done, total, cancelled = payload
+            self._on_snap_done(done, total, cancelled)
+
+    def _drain_pending(self) -> None:
+        """把队列里**积压的消息**处理掉 (暂停 / 继续前调用)。
+
+        「已经截好」的判定看的是模型里的状态 —— 消息没处理就等于没记上,
+        继续时那一格会被重抽一遍 (白白多跑一次 ffmpeg)。
+        """
+        try:
+            while True:
+                msg_type, payload = self._result_queue.get_nowait()
+                if self._closed:
+                    return
+                self._handle_snapshot_message(msg_type, payload)
+        except queue.Empty:
+            pass
 
     # ---- 「查看已有截图」的消息 ----
 
@@ -1408,6 +1549,12 @@ class SnapshotDialog(QDialog):
 
     def _on_snap_done(self, done: int, total: int, cancelled: bool) -> None:
         self._poll_timer.stop()
+        if self._restart_after_done and not cancelled:
+            # 时间点被改过 → 这一轮跑完了, 自动起新一轮 (新的时间点照常抽,
+            # 已经截好的跳过)
+            self._restart_after_done = False
+            self._start_snap(resume=True)
+            return
         self._state = 'idle' if cancelled else 'done'
         self.action_btn.setText('开始截图')
         self.action_btn.setEnabled(True)
@@ -1454,7 +1601,8 @@ class SnapshotDialog(QDialog):
         """
         if self._close_confirmed:
             return True
-        if self._state == 'running':
+        if self._state in ('running', 'paused'):
+            # 暂停时后台线程**还活着** (在等) —— 照样要确认, 照样要取消
             answer = QMessageBox.question(
                 self, '确认关闭', '抽帧还在进行中, 确定要关闭吗?',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -1469,8 +1617,9 @@ class SnapshotDialog(QDialog):
         **只置取消标志**, 不 kill 已启动的 ffmpeg 进程
         (产品文档 §6 #27)。
         """
-        if self._state == 'running':
+        if self._state in ('running', 'paused'):
             self._cancel.set()
+            self._pause.set()      # 叫醒在暂停等待里的工作线程
         if self._loading_existing:
             # 「查看已有截图」的后台线程: 只读操作, 不用二次确认,
             # 置个取消标志让它在文件之间停下就行。

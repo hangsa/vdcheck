@@ -257,7 +257,7 @@ def test_worker():
         q = queue.Queue()
         video_qt._snapshot_worker([make_info(duration_seconds=120.0)],
                                   ['00:00:10:00'], out,
-                                  threading.Event(), q)
+                                  threading.Event(), running_pause(), set(), q)
         check('正时间点: 秒数 = 输入值', calls[0][0] == 10.0,
               f"got={calls[0][0]}")
         check('正时间点: 文件名没有 R',
@@ -269,7 +269,7 @@ def test_worker():
         q = queue.Queue()
         video_qt._snapshot_worker([make_info(duration_seconds=120.0)],
                                   ['R00:00:10:00'], out,
-                                  threading.Event(), q)
+                                  threading.Event(), running_pause(), set(), q)
         check('逆时间点: 秒数 = 时长 - 输入值', calls[0][0] == 110.0,
               f"got={calls[0][0]}")
         check('逆时间点: 文件名带 R',
@@ -281,7 +281,7 @@ def test_worker():
         q = queue.Queue()
         video_qt._snapshot_worker([make_info(duration_seconds=300.0)],
                                   ['R00:10:00:00'], out,
-                                  threading.Event(), q)
+                                  threading.Event(), running_pause(), set(), q)
         check('逆时间点超过片长 → 不抽帧', calls == [], f"got={calls}")
         msgs = []
         while not q.empty():
@@ -316,6 +316,172 @@ def test_start_snap_tokens():
         win.close()
 
 
+def running_pause() -> threading.Event:
+    """一个「在跑」状态的暂停标志 (set = 不暂停)。"""
+    event = threading.Event()
+    event.set()
+    return event
+
+
+def fake_png_bytes(width: int = 64, height: int = 36) -> bytes:
+    """一张纯色 PNG —— 缩略图要从磁盘读, 得是真图片。"""
+    from PySide6.QtGui import QColor, QImage
+    img = QImage(width, height, QImage.Format_RGB32)
+    img.fill(QColor('red'))
+    path = os.path.join(mkdtemp(), 'x.png')
+    img.save(path, 'PNG')
+    with open(path, 'rb') as f:
+        data = f.read()
+    os.remove(path)
+    return data
+
+
+def test_worker_skip():
+    """worker: skip_cells 里的格子不重抽 (2026-11-04 用户要求)。"""
+    section('worker: 跳过已抽好的格子')
+    out = mkdtemp()
+    calls = []
+    real = video_qt.extract_frame
+
+    def fake_extract(path, seconds, out_path):
+        calls.append((os.path.basename(out_path), seconds))
+        with open(out_path, 'wb') as f:
+            f.write(fake_png_bytes())
+        return True
+
+    video_qt.extract_frame = fake_extract
+    try:
+        q = queue.Queue()
+        video_qt._snapshot_worker(
+            [make_info(duration_seconds=120.0)],
+            ['00:00:10:00', '00:00:20:00'], out,
+            threading.Event(), running_pause(),
+            {(0, '00:00:10:00')},          # ← 这格已经截好了
+            q)
+        check('已抽好的那格不重抽 (只抽了 1 格)',
+              len(calls) == 1, f"got={calls}")
+        check('抽的是**没抽过**的那格', calls and calls[0][1] == 20.0,
+              f"got={calls}")
+        msgs = []
+        while not q.empty():
+            msgs.append(q.get())
+        done = [m for m in msgs if m[0] == 'done']
+        check('跳过的格子算作已完成 (2/2)',
+              done and done[0][1][0] == 2,
+              f"got={done[0][1] if done else None}")
+    finally:
+        video_qt.extract_frame = real
+
+
+def test_worker_pause():
+    """worker: 暂停标志没 set → 一格都不抽。"""
+    section('worker: 暂停标志')
+    out = mkdtemp()
+    calls = []
+    real = video_qt.extract_frame
+
+    def fake_extract(path, seconds, out_path):
+        calls.append(seconds)
+        with open(out_path, 'wb') as f:
+            f.write(fake_png_bytes())
+        return True
+
+    video_qt.extract_frame = fake_extract
+    try:
+        pause = threading.Event()
+        pause.clear()                       # 暂停中
+        q = queue.Queue()
+        thread = threading.Thread(
+            target=video_qt._snapshot_worker,
+            args=([make_info(duration_seconds=120.0)],
+                  ['00:00:10:00', '00:00:20:00'], out,
+                  threading.Event(), pause, set(), q),
+            daemon=True)
+        thread.start()
+        time.sleep(0.5)
+        check('暂停中 → 一格都没抽', calls == [], f"got={calls}")
+        pause.set()                         # 继续
+        thread.join(10)
+        check('继续后抽完', len(calls) == 2, f"got={calls}")
+    finally:
+        video_qt.extract_frame = real
+
+
+def test_dialog_pause_resume():
+    """弹窗: 暂停 → 继续, 已截好的不重抽, 新增的时间点照常抽。"""
+    section('弹窗: 暂停 / 继续')
+    win = video_qt.MainWindow()
+    out = mkdtemp()
+    calls = []
+    real = video_qt.extract_frame
+
+    def fake_extract(path, seconds, out_path):
+        calls.append(os.path.basename(out_path))
+        time.sleep(0.03)
+        with open(out_path, 'wb') as f:
+            f.write(fake_png_bytes())
+        return True
+
+    video_qt.extract_frame = fake_extract
+    try:
+        # 时长要给够 —— 默认第 3 个时间点是**逆**的, 没时长会失败
+        dlg = video_qt.SnapshotDialog(win, [make_info('a.mp4',
+                                                      duration_seconds=3600.0),
+                                            make_info('b.mp4',
+                                                      duration_seconds=3600.0)],
+                                      out)
+        dlg._on_action_btn()
+        check('起跑后按钮是「截图中」', dlg.action_btn.text() == '截图中',
+              f"got={dlg.action_btn.text()!r}")
+        # 等第一格抽完 (模型里标上 done)
+        deadline = time.time() + 10
+        while dlg._cells_processed < 1 and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        check('至少抽完一格', dlg._cells_processed >= 1,
+              f"got={dlg._cells_processed}")
+        # 点一下 → 暂停
+        dlg.action_btn.click()
+        check('点一下 → 状态是 paused', dlg._state == 'paused',
+              f"got={dlg._state!r}")
+        check('按钮变「继续截图」', dlg.action_btn.text() == '继续截图',
+              f"got={dlg.action_btn.text()!r}")
+        check('状态行报「已暂停」', '暂停' in dlg.status_label.text(),
+              f"got={dlg.status_label.text()!r}")
+        check('暂停期间时间点可以改', dlg._tp_entries[0].isEnabled())
+        # 等 worker 真的停下 (抽帧调用不再增加) —— 这样模型才是最新的
+        last = len(calls)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.05)
+            if len(calls) == last:
+                break
+            last = len(calls)
+        app.processEvents()
+        # 暂停期间新增一个时间点
+        dlg._add_time_token_entry('00:00:30:00', '正')
+        # 继续
+        dlg.action_btn.click()
+        check('点「继续截图」→ 又在跑', dlg._state == 'running',
+              f"got={dlg._state!r}")
+        deadline = time.time() + 20
+        while dlg._state == 'running' and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        check('跑完了', dlg._state != 'running', f"got={dlg._state!r}")
+        # 2 个文件 × 4 个时间点 = 8 格 —— **每格只抽一次**
+        check('每格只抽了一次 (已截好的没重抽)',
+              len(calls) == 8, f"got={len(calls)} 次 {calls}")
+        check('新增时间点的图也抽了',
+              any('00-00-30-00' in name for name in calls),
+              f"got={calls}")
+        dlg.close()
+    finally:
+        video_qt.extract_frame = real
+        win.close()
+
+
 def main() -> int:
     orig_warning = QMessageBox.warning
     orig_critical = QMessageBox.critical
@@ -331,6 +497,9 @@ def main() -> int:
         test_header_marker()
         test_worker()
         test_start_snap_tokens()
+        test_worker_skip()
+        test_worker_pause()
+        test_dialog_pause_resume()
     finally:
         QMessageBox.warning = orig_warning
         QMessageBox.critical = orig_critical

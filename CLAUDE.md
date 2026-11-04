@@ -50,12 +50,12 @@ The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `f
 
 ## Architecture
 
-Three modules, ~4.4k lines total:
+Three modules, ~4.5k lines total:
 
 | File | Role |
 |---|---|
 | `video_core.py` (1192) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (3164) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_qt.py` (3327) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
 | `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -117,6 +117,7 @@ The `self._cancel: threading.Event` is checked at the top of each per-file loop;
 The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\snapshot`, `F\checked`); typing a path into the field uses it verbatim.
 
 **Snapshot dialog** — `SnapshotDialog(QDialog)` (modal) with `SnapshotGridModel` + `SnapshotDelegate` + `EnlargeDialog`. The grid is a `QTableView` (rows = files, columns = timestamps) painting `QPixmap` thumbnails via a delegate — not a `QTableWidget` of labels, so the grid area holds no child windows. Only the **320px** thumbnail stays in memory; the 640px original is re-loaded **from disk** by the zoom window. The grid's row height is **`SNAPSHOT_ROW_H` (188px = 180 + 8)** so the 320×180 thumbnail is drawn at its natural size — the delegate scales the pixmap to fit the cell (`KeepAspectRatio`), so a short row crushes it (this was a real bug: Qt's default 30px row rendered it at 53×30). Extraction runs on a **plain daemon thread** (not a `QThread`) so the dialog can be closed mid-run without `abort`; the cancel flag is only checked between cells, so an already-running ffmpeg is not killed.
+- **Pause / resume** (2026-11-04): the action button is three-state (`开始截图` → `截图中` → `继续截图`). A second `threading.Event` (`_pause`) pauses the worker **between cells**. On resume, if the timepoint list is **unchanged** the *same* worker is woken up — nothing is re-extracted; if the timepoints **changed**, the current round finishes and a **second round starts automatically** (`_restart_after_done`): the new timepoints are extracted, the already-captured ones are skipped. The skip key is `(row, token)` — **not** the column index, which shifts when timepoints are added/removed. Restarting the worker directly would be wrong: the old worker may still be extracting a cell, and two workers writing the same PNG corrupt it. `_drain_pending()` (before pausing and before resuming) flushes the message queue so "already captured" is judged on an up-to-date model — otherwise the cell that just finished gets extracted a second time.
 
 **Timepoint rows** (2026-11-04) — each timepoint is a **group**: `[QLineEdit][× delete]`, and a **reverse** one also carries a bold **`R`** label in front (forward ones carry **no** label). The kind is **正** (from the start) or **逆** (from the end: the actual capture moment is `duration_seconds - entered`, so it is computed **per video**). The kind is chosen **when adding** — the `+` button carries a menu (正时间点 / 逆时间点). The three defaults are 正 / 正 / **逆** (the third one, `00:01:00:00`, is a minute from the end). A reverse timepoint is stored with an **`R` marker** (`R00:01:00:00`) — that is what ends up in the file name (`…_t3_R00-01-00-00.png`), so the type survives and 正/逆 with the same number never collide. The grid header renders it as `T3: R00-01-00-00` — **the same shape as the file name**. **Every timepoint can be deleted, including the defaults** (this replaced the old "no delete button" rule — the user asked for it).
 
