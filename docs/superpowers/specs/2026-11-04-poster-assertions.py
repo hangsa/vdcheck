@@ -35,7 +35,7 @@ def cleanup_tmpdirs() -> None:
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
 
 app = QApplication.instance() or QApplication(sys.argv)
 
@@ -454,6 +454,7 @@ def test_dialog():
     dlg.show()
     app.processEvents()
     try:
+        check('海报弹窗是**非模态**的 (主窗口不被冻住)', not dlg.isModal())
         check('未分析前「开始下载」禁用', not dlg.download_btn.isEnabled())
         check('模板默认 {partname}-{imgcol}',
               dlg.template_edit.text() == '{partname}-{imgcol}',
@@ -717,20 +718,72 @@ def test_main_window_button():
         # 不需要先扫描 —— 没扫描结果也能开弹窗
         opened = []
 
-        class _FakeDialog:
+        class _FakeDialog(QDialog):
             def __init__(self, *args, **kwargs):
-                opened.append(True)
+                super().__init__(*args, **kwargs)
+                opened.append(self)
 
-            def exec(self):
-                return 0
+            def show(self):
+                super().show()      # 真显示 —— 否则 close() 不会触发 finished
 
         real = video_qt.PosterDialog
         video_qt.PosterDialog = _FakeDialog
         try:
             win._on_poster_btn_click()
+            check('没有扫描结果也能开弹窗', bool(opened))
+            check('弹窗是**非模态**的', not win._poster_dialog.isModal())
+            win._on_poster_btn_click()
+            check('再点一次按钮 → 不开第二个 (只叫到前面)',
+                  len(opened) == 1, f"opened={len(opened)}")
         finally:
             video_qt.PosterDialog = real
-        check('没有扫描结果也能开弹窗', bool(opened))
+
+        # 先把假弹窗关掉 (它的 close 会清掉引用)
+        win._poster_dialog.close()
+        app.processEvents()
+        check('关掉弹窗 → 引用清空 (下次点按钮重新开一个)',
+              win._poster_dialog is None)
+
+        # ---- 真弹窗: 开着的时候主界面不该被冻住 ----
+        win.open_poster_dialog()
+        app.processEvents()
+        check('真弹窗开着时没有模态窗口挡着主界面',
+              app.activeModalWidget() is None,
+              f"got={app.activeModalWidget()!r}")
+        check('真弹窗是**非模态**的', not win._poster_dialog.isModal())
+        check('主窗口仍然可交互', win.isEnabled())
+        check('路径框仍然能编辑', win.path_edit.isEnabled())
+
+        # 海报弹窗开着的时候, 主窗口照样能扫一遍
+        real_ffprobe = video_qt.run_ffprobe
+        video_qt.run_ffprobe = lambda path: {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264",
+                 "width": 1920, "height": 1080, "r_frame_rate": "30/1",
+                 "bit_rate": "32000000"},
+                {"codec_type": "audio", "codec_name": "aac",
+                 "channels": 2, "sample_rate": "48000"},
+            ],
+            "format": {"duration": "120.0", "size": "100000000",
+                       "format_name": "mp4"},
+        }
+        try:
+            src_dir = mkdtemp()
+            with open(os.path.join(src_dir, 'a.mp4'), 'wb') as f:
+                f.write(b'x')
+            win.path_edit.setText(src_dir)
+            win._start_scan()
+            end = time.time() + 15
+            while win.scanning and time.time() < end:
+                app.processEvents()
+                time.sleep(0.005)
+            app.processEvents()
+            check('海报弹窗开着时, 主窗口照样能扫完', not win.scanning)
+            check('扫描结果进了主表格', win.model.rowCount() == 1,
+                  f"got={win.model.rowCount()}")
+        finally:
+            video_qt.run_ffprobe = real_ffprobe
+        win._poster_dialog.close()
     finally:
         win.close()
 

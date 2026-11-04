@@ -1574,9 +1574,14 @@ class PosterDialog(QDialog):
         self._worker_thread = None
 
         self.setWindowTitle('下载海报')
-        self.setModal(True)
+        # **非模态** (2026-11-04 用户要求): 「下载海报」与「视频检测」是
+        # 两个完全独立的功能 —— 弹窗开着的时候主窗口照样能扫、能看表。
+        # 弹窗只是把入口放在了主界面上, 不该把主界面冻住。
+        self.setModal(False)
         self.resize(1000, 520)
         self._build_widgets()
+        # 主窗口被关掉时 (父窗口析构) 也要停掉下载线程
+        self.destroyed.connect(self._on_destroyed)
 
     # ---- 界面 ----
 
@@ -1960,6 +1965,10 @@ class PosterDialog(QDialog):
         self._cancel.set()
         self._poll_timer.stop()
 
+    def _on_destroyed(self, *_args) -> None:
+        """窗口被销毁 (含父窗口关掉) → 停掉后台下载线程。"""
+        self._cancel.set()
+
     def closeEvent(self, event) -> None:
         self._cancel_download()
         super().closeEvent(event)
@@ -2267,6 +2276,10 @@ class MainWindow(QMainWindow):
         # 截图地址: 主窗口只存**默认值** (真地址在弹窗里可改),
         # 与现状的 snapshot_dest_var 一样。
         self.snapshot_dest = ''
+
+        # 「下载海报」弹窗 (非模态): 保引用, 免得被回收掉;
+        # 已经开着就只把它叫到前面。
+        self._poster_dialog = None
 
         # 全局快捷键: 只绑 <Control-o> → 浏览文件夹
         self._shortcut = QShortcut(QKeySequence('Ctrl+O'), self)
@@ -2666,9 +2679,31 @@ class MainWindow(QMainWindow):
         self.open_poster_dialog()
 
     def open_poster_dialog(self) -> None:
-        """打开下载海报弹窗 (模态)。"""
+        """打开下载海报弹窗 (**非模态**)。
+
+        「下载海报」与「视频检测」是两个**完全独立**的功能 —— 弹窗开着
+        的时候主窗口照样能扫、能看表、能移动文件。弹窗只是个入口,
+        不是主界面的一个步骤。
+
+        已经开着就把它叫到前面 (不开第二个)。
+        """
+        if self._poster_dialog is not None:
+            self._poster_dialog.raise_()
+            self._poster_dialog.activateWindow()
+            return
         dialog = PosterDialog(self)
-        dialog.exec()
+        self._poster_dialog = dialog          # 保住引用 (否则会被回收掉)
+        dialog.finished.connect(self._on_poster_dialog_finished)
+        dialog.show()                         # 非模态: 不冻住主窗口
+
+    def _on_poster_dialog_finished(self, _result: int = 0) -> None:
+        """海报弹窗关掉了 → 丢掉引用, 下次点按钮重新开一个。
+
+        `finished(int)` 带一个结果码 —— 槽**必须**能接这个参数,
+        否则 PySide 报「takes 1 positional argument but 2 were given」,
+        引用就永远清不掉 (断言查出来的)。
+        """
+        self._poster_dialog = None
 
     # ---- 移动文件 ----
 
