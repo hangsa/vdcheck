@@ -27,10 +27,10 @@
 
 | | |
 |---|---|
-| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.2**；分支 `main`，HEAD `ddd5831`） |
+| 主 checkout | `/Users/hail/Codes/vdcheck`（**现在是 Qt 版 v4.2**；分支 `main`，HEAD `929fb1f`） |
 | 重构 worktree | **已删除**（合并后清理掉了） |
 | 分支 | `refactor/qtableview` **已合并并删除**（本地 + 远端都删了） |
-| HEAD | `ddd5831` |
+| HEAD | `929fb1f` |
 | 提交数 | 44（`1d16bc7..HEAD`） |
 | 计划 | `docs/superpowers/plans/2026-10-27-pyside6-qtableview.md` |
 | 设计 spec | `docs/superpowers/specs/2026-10-27-pyside6-qtableview-design.md` |
