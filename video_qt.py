@@ -2311,6 +2311,7 @@ class ScanWorker(QObject):
     def __init__(self, kind: str, payload,
                  bitrate_std: float, sample_rate_std: float,
                  cancel_event: threading.Event, stats: ScanStats,
+                 pause_event: threading.Event | None = None,
                  parent=None):
         super().__init__(parent)
         self._kind = kind                 # 'dir' | 'files'
@@ -2318,6 +2319,9 @@ class ScanWorker(QObject):
         self._bitrate_std = bitrate_std
         self._sample_rate_std = sample_rate_std
         self._cancel = cancel_event
+        # 暂停标志: 没 set = 暂停中 → **停在文件之间** (当前这个测完就停)
+        self._pause = pause_event if pause_event is not None else threading.Event()
+        self._pause.set()
         self._stats = stats
 
     @Slot()
@@ -2342,6 +2346,14 @@ class ScanWorker(QObject):
             return
 
         for i, fp in enumerate(files, 1):
+            if self._cancel.is_set():
+                break
+            # 暂停中 → 停在**文件之间**: 当前这个测完就不再测下一个
+            # (2026-11-04)。继续时从这儿接着往下测, 已测完的**不重测**。
+            while not self._pause.is_set():
+                if self._cancel.is_set():
+                    break
+                time.sleep(0.1)
             if self._cancel.is_set():
                 break
             self.progress.emit(
@@ -2414,6 +2426,16 @@ class MainWindow(QMainWindow):
         self.video_results: list[VideoInfo] = []
         self.scanning = False
         self._cancel = threading.Event()
+        # 暂停 (2026-11-04): 「开始检测」点一下暂停, 再点一下继续 ——
+        # 继续时从暂停处接着测, **已测完的不重测**。
+        self._scan_pause = threading.Event()   # 没 set = 暂停中
+        self._scan_pause.set()
+        self._scan_paused = False
+        self._scan_cleared = False             # 暂停期间记录被清了 → 继续时从头重测
+        self._scan_restart = False             # 目标变了 → 旧 worker 退出后自动起新一轮
+        self._scan_directory = ''              # 这一轮扫的是哪个目录 (继续时比对)
+        self._scan_kind = ''                   # 'dir' | 'files'
+        self._scan_payload: list[str] | None = None
         # 拖拽留下的文件列表 (None = 扫路径框里的整个目录)
         self._selected_files: list[str] | None = None
         # 达标数增量维护 (避免每次插入都全量 sum)
@@ -2717,13 +2739,58 @@ class MainWindow(QMainWindow):
     # ---- 扫描 ----
 
     def _on_scan_btn_click(self) -> None:
-        """扫描按钮点击: 空闲时启动检测, 检测中触发停止。"""
+        """扫描按钮: 空闲时启动; 检测中 → **暂停**; 已暂停 → **继续**。
+
+        (2026-11-04: 以前这里是「点即取消」, 现在改成暂停/继续 ——
+        跟定点截图、「下载海报」那两个按钮一个套路。)
+        """
         if self.scanning:
-            self._cancel.set()
-            self.scan_btn.setText('正在停止...')
-            self.scan_btn.setEnabled(False)
-        else:
-            self._start_scan()
+            if self._scan_paused:
+                self._resume_scan()
+            else:
+                self._pause_scan()
+            return
+        self._start_scan()
+
+    def _pause_scan(self) -> None:
+        """暂停检测 —— 当前这个文件测完就停, 不再测下一个。
+
+        暂停期间**文件路径可以改**; 继续时:
+        - 路径没变 → 唤醒原来那条 worker, **已测完的不重测**, 从暂停处接着测
+        - 路径变了 / 记录被清了 → 从头重测
+        """
+        self._scan_paused = True
+        self._scan_pause.clear()     # worker 在文件之间看到没 set 就停下
+        self.scan_btn.setText('继续检测')
+        self.set_status('已暂停 — 点「继续检测」继续')
+
+    def _resume_scan(self) -> None:
+        """继续检测 —— 从暂停的地方接着测 (已测完的**不重测**)。"""
+        if self._scan_target_unchanged() and not self._scan_cleared:
+            self._scan_paused = False
+            self._scan_pause.set()
+            self.scan_btn.setText('检测中')
+            self.set_status('继续检测...')
+            return
+        # 目标变了 (路径改了 / 记录被清了) → 从头重测: 先让旧 worker 退出,
+        # 它退出后 (_scan_complete) 自动起新一轮 —— 不能直接重起, 旧 worker
+        # 可能正测着某个文件, 两条 worker 会重复出结果。
+        self._scan_restart = True
+        self._cancel.set()
+        self.scan_btn.setText('正在停止...')
+        self.scan_btn.setEnabled(False)
+
+    def _scan_target_unchanged(self) -> bool:
+        """现在要扫的还是不是**同一批**文件 (路径没变、也没换成拖进来的那批)。"""
+        directory = self.path_edit.text().strip()
+        if directory != self._scan_directory:
+            return False
+        kind, payload = self._scan_target(directory)
+        if kind != self._scan_kind:
+            return False
+        if kind == 'files':
+            return list(payload or []) == list(self._scan_payload or [])
+        return True
 
     def _start_scan(self) -> None:
         directory = self.path_edit.text().strip()
@@ -2760,6 +2827,10 @@ class MainWindow(QMainWindow):
                     sample_rate_std: float) -> None:
         """真正把扫描跑起来 (点按钮与拖拽共用这一条路径)。"""
         self._cancel.clear()
+        self._scan_pause.set()            # 新的一轮 → 不在暂停中
+        self._scan_paused = False
+        self._scan_cleared = False
+        self._scan_restart = False
         self.scanning = True
         self.total_files = 0
         self.scan_btn.setText('检测中')
@@ -2788,8 +2859,13 @@ class MainWindow(QMainWindow):
             worker_payload = (payload, self.recursive_check.isChecked())
         else:
             worker_payload = payload
+        # 记下「这一轮扫的是谁」—— 继续时要确认还是**同一批**文件
+        self._scan_directory = self.path_edit.text().strip()
+        self._scan_kind = kind
+        self._scan_payload = list(payload) if kind == 'files' else None
         self._worker = ScanWorker(kind, worker_payload, bitrate_std,
-                                  sample_rate_std, self._cancel, self._stats)
+                                  sample_rate_std, self._cancel, self._stats,
+                                  self._scan_pause)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
@@ -2827,6 +2903,13 @@ class MainWindow(QMainWindow):
         self.scanning = False
         self.scan_btn.setText('开始检测')
         self.scan_btn.setEnabled(True)
+        if self._scan_restart:
+            # 暂停期间改了路径 / 清了记录 → 旧 worker 退出了, 现在**从头
+            # 重测**一轮 (旧的「已测完不重测」作废)
+            self._scan_restart = False
+            self._scan_paused = False
+            self._start_scan()
+            return
 
         # 扫描中途按插入序追加结果; 若已激活排序, 扫描结束统一 reorder 一次
         if self.model.is_sorted():
@@ -2897,9 +2980,12 @@ class MainWindow(QMainWindow):
 
     def _clear_records(self) -> None:
         """清空检测记录与目标路径 (不影响阈值输入)。"""
-        if self.scanning:
+        if self.scanning and not self._scan_paused:
             self._show_info('正在检测中，请等待完成后再清除。')
             return
+        if self._scan_paused:
+            # 暂停期间清了记录 → 继续时**从头重测** (记录没了, 得再测一遍)
+            self._scan_cleared = True
         self.video_results.clear()
         self.model.clear()
         self._passed_count = 0

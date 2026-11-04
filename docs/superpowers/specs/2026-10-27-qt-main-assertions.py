@@ -378,8 +378,8 @@ def _run() -> int:
           win2.scan_btn.text() == '开始检测' and win2.scan_btn.isEnabled(),
           f"got={win2.scan_btn.text()!r} enabled={win2.scan_btn.isEnabled()}")
 
-    # ---- 按钮三态 ----
-    section("按钮状态机: 开始检测 → 检测中 → 正在停止... → 开始检测")
+    # ---- 按钮三态 (2026-11-04: 点按从「取消」改成「暂停/继续」) ----
+    section("按钮状态机: 开始检测 → 检测中 → 继续检测 → 检测中")
     win3 = MainWindow()
     video_qt.run_ffprobe = lambda path: (time.sleep(0.2),
                                          fake_ffprobe_json())[1]
@@ -389,15 +389,135 @@ def _run() -> int:
     check("扫描中: 文案「检测中」", win3.scan_btn.text() == '检测中',
           f"got={win3.scan_btn.text()!r}")
     check("扫描中: 仍可点", win3.scan_btn.isEnabled())
-    win3._on_scan_btn_click()            # 再点一次 = 取消
-    check("取消瞬间: 文案「正在停止...」",
-          win3.scan_btn.text() == '正在停止...',
+    win3._on_scan_btn_click()            # 再点一次 = **暂停**
+    check("暂停瞬间: 文案「继续检测」",
+          win3.scan_btn.text() == '继续检测',
           f"got={win3.scan_btn.text()!r}")
-    check("取消瞬间: 按钮禁用", not win3.scan_btn.isEnabled())
+    check("暂停瞬间: 按钮**仍可点** (再点一下继续)",
+          win3.scan_btn.isEnabled())
+    check("暂停瞬间: 状态行报「已暂停」",
+          '暂停' in win3.status_bar.currentMessage(),
+          f"got={win3.status_bar.currentMessage()!r}")
+    win3._on_scan_btn_click()            # 再点 = 继续
+    check("继续后: 文案「检测中」", win3.scan_btn.text() == '检测中',
+          f"got={win3.scan_btn.text()!r}")
     ok = wait_scan(win3)
-    check("停止后恢复「开始检测」",
+    check("跑完后恢复「开始检测」",
           win3.scan_btn.text() == '开始检测' and win3.scan_btn.isEnabled(),
           f"got={win3.scan_btn.text()!r} enabled={win3.scan_btn.isEnabled()}")
+    video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
+
+    # ---- 暂停 / 继续: 已测完的**不重测**, 从暂停处接着测 ----
+    section("「开始检测」暂停 → 继续: 已测完的不重测")
+    win5 = MainWindow()
+    tested: list[str] = []
+
+    def slow_ffprobe(path):
+        tested.append(os.path.basename(path))
+        time.sleep(0.05)
+        return fake_ffprobe_json()
+
+    video_qt.run_ffprobe = slow_ffprobe
+    win5.path_edit.setText(src)
+    win5._start_scan()
+    # 等第一个文件测完
+    end = time.time() + 10
+    while not tested and time.time() < end:
+        pump(0.02)
+    check("至少测了一个文件", bool(tested), f"got={tested}")
+    win5._on_scan_btn_click()            # 暂停
+    # 等 worker 真的停下 (不再测新文件)
+    last = len(tested)
+    end = time.time() + 10
+    while time.time() < end:
+        pump(0.05)
+        if len(tested) == last:
+            break
+        last = len(tested)
+    n_at_pause = len(tested)
+    check("暂停后不再测新文件", n_at_pause < 3, f"got={n_at_pause}")
+    win5._on_scan_btn_click()            # 继续
+    ok5 = wait_scan(win5)
+    check("继续后跑完了", ok5)
+    check("**没有文件被测两遍** (已测完的不重测)",
+          len(tested) == len(set(tested)),
+          f"got={tested}")
+    check("三个文件都测到了", len(set(tested)) == 3, f"got={set(tested)}")
+    check("结果表里也是 3 行", win5.model.rowCount() == 3,
+          f"got={win5.model.rowCount()}")
+    video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
+
+    # ---- 暂停期间改了路径 → 从头重测 ----
+    section("暂停期间改了路径 → 继续时从头重测")
+    win6 = MainWindow()
+    tested6: list[str] = []
+
+    def slow6(path):
+        tested6.append(os.path.basename(path))
+        time.sleep(0.05)
+        return fake_ffprobe_json()
+
+    video_qt.run_ffprobe = slow6
+    win6.path_edit.setText(src)
+    win6._start_scan()
+    end = time.time() + 10
+    while not tested6 and time.time() < end:
+        pump(0.02)
+    win6._on_scan_btn_click()            # 暂停
+    last = len(tested6)
+    end = time.time() + 10
+    while time.time() < end:
+        pump(0.05)
+        if len(tested6) == last:
+            break
+        last = len(tested6)
+    src_other = mkdtemp(prefix='vdcheck_qt_other_')
+    with open(os.path.join(src_other, 'z.mp4'), 'wb') as f:
+        f.write(b'x')
+    win6.path_edit.setText(src_other)     # 改路径
+    win6._on_scan_btn_click()             # 继续 → 从头重测新目录
+    ok6 = wait_scan(win6)
+    check("改路径后继续 → 重新扫了一遍", ok6)
+    check("扫的是**新目录**的文件",
+          'z.mp4' in set(tested6), f"got={set(tested6)}")
+    video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
+
+    # ---- 暂停期间清了记录 → 继续时从头重测 ----
+    section("暂停期间清了记录 → 继续时从头重测")
+    win7 = MainWindow()
+    tested7: list[str] = []
+
+    def slow7(path):
+        tested7.append(os.path.basename(path))
+        time.sleep(0.05)
+        return fake_ffprobe_json()
+
+    video_qt.run_ffprobe = slow7
+    win7.path_edit.setText(src)
+    win7._start_scan()
+    end = time.time() + 10
+    while not tested7 and time.time() < end:
+        pump(0.02)
+    win7._on_scan_btn_click()            # 暂停
+    last = len(tested7)
+    end = time.time() + 10
+    while time.time() < end:
+        pump(0.05)
+        if len(tested7) == last:
+            break
+        last = len(tested7)
+    n_before_clear = len(tested7)
+    win7._clear_records()                # 暂停中清记录 (现在允许了)
+    check("暂停中点「清除记录」→ 记录没了", len(win7.video_results) == 0,
+          f"got={len(win7.video_results)}")
+    win7._on_scan_btn_click()             # 继续 → 从头重测
+    ok7 = wait_scan(win7)
+    check("清记录后继续 → 重新扫了一遍", ok7)
+    check("清之前的那些 + 重测的一遍 (每个文件都测到了)",
+          len(tested7) == n_before_clear + 3,
+          f"got={len(tested7)} (清之前 {n_before_clear}) {tested7}")
+    check("结果表里是 3 行", win7.model.rowCount() == 3,
+          f"got={win7.model.rowCount()}")
     video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
 
     # ================================================================
