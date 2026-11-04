@@ -912,19 +912,37 @@ def read_tabular_document(path: str, has_header: bool = True) -> TabularDocument
     return TabularDocument(headers=headers, rows=body)
 
 
-def guess_link_column(headers: list[str], rows: list[list[str]]) -> int:
-    """猜哪一列是海报链接: 先看列名, 再看值像不像链接, 都不像 → 第一列。"""
-    for i, header in enumerate(headers):
-        low = str(header).strip().lower()
-        if any(k in low for k in POSTER_URL_HINTS):
-            return i
-    for i in range(len(headers)):
+# 什么算「像个链接」—— 认海报链接字段时看的就是这个
+_URL_PREFIXES = ('http://', 'https://', 'file://', 'ftp://', '//')
+
+
+def _looks_like_url(value: str) -> bool:
+    return str(value).strip().lower().startswith(_URL_PREFIXES)
+
+
+def guess_link_columns(headers: list[str], rows: list[list[str]]) -> list[int]:
+    """猜哪些列是海报链接 —— **可能有多列** (2026-11-04 用户要求)。
+
+    判定:
+      1. 列名像链接 (url/link/海报/图片/封面/poster/image…) **且**值里确实
+         有链接 → 认
+      2. 值像链接 (不看列名) → 认
+      3. 一列都不像 → 返回空表 (界面里一个都不勾, 让用户自己挑) ——
+         宁可让用户勾, 也不偷偷拿一列错的当链接去下载
+    """
+    def looks_like_link(col: int) -> bool:
         for row in rows[:20]:
-            if i < len(row):
-                value = str(row[i]).strip().lower()
-                if value.startswith(('http://', 'https://')):
-                    return i
-    return 0
+            if col < len(row):
+                if _looks_like_url(row[col]):
+                    return True
+        return False
+
+    by_name = [i for i, header in enumerate(headers)
+               if any(k in str(header).strip().lower() for k in POSTER_URL_HINTS)
+               and looks_like_link(i)]
+    if by_name:
+        return by_name
+    return [i for i in range(len(headers)) if looks_like_link(i)]
 
 
 def guess_partname_column(headers: list[str], rows: list[list[str]]) -> int:
@@ -973,18 +991,25 @@ def poster_default_dir(doc_path: str, partname: str) -> str:
     return os.path.join(folder, (name or 'poster') + '-poster')
 
 
-def build_poster_jobs(rows: list[list[str]], part_index: int, link_index: int,
-                       template: str, imgcol_name: str) -> list[tuple[str, str]]:
-    """表格 → 一串 (链接, 文件名) —— 链接为空的行跳过。"""
+def build_poster_jobs(rows: list[list[str]], part_index: int,
+                      links: list[tuple[int, str]], template: str
+                      ) -> list[tuple[str, str]]:
+    """表格 → 一串 (链接, 文件名)。
+
+    links: [(列号, 列名), ...] —— **可以有多个链接字段**: 每一行 × 每一个
+    链接字段 = 一个任务, 文件名里的 {imgcol} 取**该列的列名**。
+    链接为空的格子跳过。
+    """
     jobs: list[tuple[str, str]] = []
     for row in rows:
-        if link_index >= len(row):
-            continue
-        url = str(row[link_index]).strip()
-        if not url:
-            continue
-        part = str(row[part_index]).strip() if part_index < len(row) else ''
-        jobs.append((url, render_filename(template, part, imgcol_name)))
+        part = str(row[part_index]).strip() if 0 <= part_index < len(row) else ''
+        for col_index, col_name in links:
+            if col_index >= len(row):
+                continue
+            url = str(row[col_index]).strip()
+            if not url:
+                continue
+            jobs.append((url, render_filename(template, part, col_name)))
     return jobs
 
 

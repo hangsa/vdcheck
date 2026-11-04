@@ -299,8 +299,8 @@ def test_guess_columns():
     headers = CSV_HEADERS
     rows = CSV_ROWS
     check('海报链接字段: 按列名猜',
-          video_core.guess_link_column(headers, rows) == 1,
-          f"got={video_core.guess_link_column(headers, rows)}")
+          video_core.guess_link_columns(headers, rows) == [1],
+          f"got={video_core.guess_link_columns(headers, rows)}")
     check('命名来源字段: 按列名猜',
           video_core.guess_partname_column(headers, rows) == 0,
           f"got={video_core.guess_partname_column(headers, rows)}")
@@ -309,14 +309,15 @@ def test_guess_columns():
     h2 = ['甲', '乙']
     r2 = [['x', 'http://x.test/1.jpg']]
     check('海报链接字段: 按值猜',
-          video_core.guess_link_column(h2, r2) == 1,
-          f"got={video_core.guess_link_column(h2, r2)}")
+          video_core.guess_link_columns(h2, r2) == [1],
+          f"got={video_core.guess_link_columns(h2, r2)}")
 
-    # 全无线索 → 退回第一列
+    # 全无线索 → 一列都不认 (让用户自己勾, 不偷偷拿错的列去下载)
     h3 = ['甲', '乙']
     r3 = [['x', 'y']]
-    check('海报链接字段: 无线索退回第一列',
-          video_core.guess_link_column(h3, r3) == 0)
+    check('海报链接字段: 无线索 → 一个都不认',
+          video_core.guess_link_columns(h3, r3) == [],
+          f"got={video_core.guess_link_columns(h3, r3)}")
     check('命名来源字段: 无线索退回第一列',
           video_core.guess_partname_column(h3, r3) == 0)
 
@@ -324,11 +325,44 @@ def test_guess_columns():
     h4 = ['剧名', '海报']
     r4 = [['甲', 'http://x.test/1.jpg']]
     check('海报链接字段: 中文列名「海报」',
-          video_core.guess_link_column(h4, r4) == 1,
-          f"got={video_core.guess_link_column(h4, r4)}")
+          video_core.guess_link_columns(h4, r4) == [1],
+          f"got={video_core.guess_link_columns(h4, r4)}")
     check('命名来源字段: 中文列名「剧名」',
           video_core.guess_partname_column(h4, r4) == 0,
           f"got={video_core.guess_partname_column(h4, r4)}")
+
+    # **多个链接字段** (2026-11-04 用户要求)
+    h5 = ['partname', '竖版海报', '横版海报', '时长']
+    r5 = [['甲', 'http://x.test/v.jpg', 'http://x.test/h.jpg', '90']]
+    check('海报链接字段: 多个都认出来',
+          video_core.guess_link_columns(h5, r5) == [1, 2],
+          f"got={video_core.guess_link_columns(h5, r5)}")
+    h6 = ['甲', '乙', '丙']
+    r6 = [['x', 'http://x.test/1.jpg', 'http://x.test/2.jpg']]
+    check('海报链接字段: 按值认出多列',
+          video_core.guess_link_columns(h6, r6) == [1, 2],
+          f"got={video_core.guess_link_columns(h6, r6)}")
+    # 列名像但值不是链接 → 不认 (免得把「图片说明」当下图链接)
+    h7 = ['海报', '备注']
+    r7 = [['这是一段说明', 'x']]
+    check('海报链接字段: 列名像但值不是链接 → 不认',
+          video_core.guess_link_columns(h7, r7) == [],
+          f"got={video_core.guess_link_columns(h7, r7)}")
+
+
+def test_multi_link_jobs():
+    section('多个链接字段 → 多个任务')
+    rows = [['甲', 'http://x/v.jpg', 'http://x/h.jpg'],
+            ['乙', 'http://x/v2.jpg', '']]
+    jobs = video_core.build_poster_jobs(
+        rows, 0, [(1, '竖版海报'), (2, '横版海报')], '{partname}-{imgcol}')
+    check('每个 (行, 链接字段) 一个任务', len(jobs) == 3, f"got={len(jobs)}")
+    check('文件名里的 imgcol 取**列名**',
+          jobs[0] == ('http://x/v.jpg', '甲-竖版海报')
+          and jobs[1] == ('http://x/h.jpg', '甲-横版海报'),
+          f"got={jobs[:2]!r}")
+    check('空链接的格子跳过',
+          jobs[2] == ('http://x/v2.jpg', '乙-竖版海报'), f"got={jobs[2]!r}")
 
 
 def test_render_filename():
@@ -395,13 +429,14 @@ def test_default_dir():
                           '星穹计划-poster')
     check('= 文档所在目录/<partname>-poster', got == expect, f"got={got!r}")
 
-    jobs = video_core.build_poster_jobs(CSV_ROWS, 0, 1, '{partname}-{imgcol}',
-                                        '海报链接')
+    jobs = video_core.build_poster_jobs(
+        CSV_ROWS, 0, [(1, '海报链接')], '{partname}-{imgcol}')
     check('jobs: 数量', len(jobs) == 8, f"got={len(jobs)}")
     check('jobs: 文件名按模板', jobs[0] == ('http://x.test/a.jpg', '星穹计划-海报链接'),
           f"got={jobs[0]!r}")
     check('jobs: 空链接的行跳过',
-          video_core.build_poster_jobs([['a', '']], 0, 1, '{partname}', 'c') == [])
+          video_core.build_poster_jobs([['a', '']], 0, [(1, 'c')],
+                                       '{partname}') == [])
 
 
 # ---------------------------------------------------------------- 界面
@@ -411,20 +446,35 @@ def test_dialog():
     d = mkdtemp()
     csv_path = write_csv(os.path.join(d, '清单.csv'))
     dlg = video_qt.PosterDialog(None)
+    dlg.show()
+    app.processEvents()
     try:
         check('未分析前「开始下载」禁用', not dlg.download_btn.isEnabled())
         check('模板默认 {partname}-{imgcol}',
               dlg.template_edit.text() == '{partname}-{imgcol}',
               f"got={dlg.template_edit.text()!r}")
 
+        # ---- 版面 (2026-11-04 用户要求) ----
+        check('「开始分析」在「文档」这一行、「浏览」之后',
+              abs(dlg.analyze_btn.y() - dlg.doc_browse_btn.y()) < 5
+              and dlg.analyze_btn.x() > dlg.doc_browse_btn.x(),
+              f"analyze=({dlg.analyze_btn.x()},{dlg.analyze_btn.y()}) "
+              f"browse=({dlg.doc_browse_btn.x()},{dlg.doc_browse_btn.y()})")
+        check('「命名来源字段」在「海报地址」前面 (同一行)',
+              abs(dlg.part_combo.y() - dlg.out_edit.y()) < 5
+              and dlg.part_combo.x() < dlg.out_edit.x(),
+              f"part=({dlg.part_combo.x()},{dlg.part_combo.y()}) "
+              f"out=({dlg.out_edit.x()},{dlg.out_edit.y()})")
+
         dlg.doc_edit.setText(csv_path)
         dlg._on_analyze()
         check('分析后「开始下载」可用', dlg.download_btn.isEnabled())
-        check('海报链接字段下拉: 项数', dlg.link_combo.count() == 3,
-              f"got={dlg.link_combo.count()}")
-        check('海报链接字段下拉: 默认选中「海报链接」',
-              dlg.link_combo.currentText() == '海报链接',
-              f"got={dlg.link_combo.currentText()!r}")
+        check('海报链接字段: 所有列都列出来',
+              [name for name, _ in dlg.link_checks] == CSV_HEADERS,
+              f"got={[name for name, _ in dlg.link_checks]!r}")
+        checked = [name for name, cb in dlg.link_checks if cb.isChecked()]
+        check('海报链接字段: 自动认出「海报链接」并勾上',
+              checked == ['海报链接'], f"got={checked!r}")
         check('命名来源字段下拉: 默认选中「partname」',
               dlg.part_combo.currentText() == 'partname',
               f"got={dlg.part_combo.currentText()!r}")
@@ -440,11 +490,29 @@ def test_dialog():
         check('状态行报出分析结果',
               '8' in dlg.status_label.text(), f"got={dlg.status_label.text()!r}")
 
+        # ---- 改了命名来源 → 海报地址同步跟着变 ----
+        dlg.part_combo.setCurrentIndex(2)          # '时长' → 首行值 '90'
+        check('改「命名来源字段」→ 海报地址**同步**跟着变',
+              dlg.out_edit.text() == os.path.join(d, '90-poster'),
+              f"got={dlg.out_edit.text()!r}")
+        dlg.part_combo.setCurrentIndex(0)
+        check('改回「partname」→ 地址也跟着回来',
+              dlg.out_edit.text() == os.path.join(d, '星穹计划-poster'),
+              f"got={dlg.out_edit.text()!r}")
+
+        # ---- 勾多个链接字段 ----
+        dlg.link_checks[2][1].setChecked(True)      # 把「时长」也勾上
+        check('可以勾多个海报链接字段',
+              [n for n, cb in dlg.link_checks if cb.isChecked()]
+              == ['海报链接', '时长'])
+
         # 改了文档路径 → 之前的分析作废 (否则拿旧文档去下载)
         dlg.doc_edit.setText(csv_path + '.csv')
         check('手改文档路径 → 分析作废 (开始下载禁用)',
               not dlg.download_btn.isEnabled())
         check('手改文档路径 → 预览清空', dlg.model.rowCount() == 0)
+        check('手改文档路径 → 勾选框清空',
+              dlg.link_checks == [], f"got={dlg.link_checks!r}")
 
         # 改「首行为字段名」→ 读法变了 → 分析作废
         dlg.doc_edit.setText(csv_path)
@@ -463,17 +531,21 @@ def test_dialog_download():
     out = mkdtemp()
     img1 = make_jpeg(os.path.join(d, 'a.jpg'), b'AAA' + b'x' * 50)
     img2 = make_jpeg(os.path.join(d, 'b.jpg'), b'BBB' + b'x' * 50)
+    img3 = make_jpeg(os.path.join(d, 'c.jpg'), b'CCC' + b'x' * 50)
     from pathlib import Path
     csv_path = os.path.join(d, '清单.csv')
     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-        f.write('partname,海报链接\n')
-        f.write('星穹计划,%s\n' % Path(img1).as_uri())
-        f.write('天启纪元,%s\n' % Path(img2).as_uri())
+        f.write('partname,竖版海报,横版海报\n')
+        f.write('星穹计划,%s,%s\n' % (Path(img1).as_uri(), Path(img3).as_uri()))
+        f.write('天启纪元,%s,\n' % Path(img2).as_uri())
 
     dlg = video_qt.PosterDialog(None)
     try:
         dlg.doc_edit.setText(csv_path)
         dlg._on_analyze()
+        checked = [n for n, cb in dlg.link_checks if cb.isChecked()]
+        check('两个海报链接字段都自动认出并勾上',
+              checked == ['竖版海报', '横版海报'], f"got={checked!r}")
         dlg.out_edit.setText(out)
         dlg._on_download()
         # 等下载线程跑完
@@ -482,12 +554,14 @@ def test_dialog_download():
             app.processEvents()
             time.sleep(0.02)
         check('下载结束', not dlg._downloading)
-        check('成功 2 张', dlg._download_ok == 2, f"got={dlg._download_ok}")
+        check('成功 3 张 (2 行 × 2 字段, 有一个空格跳过)',
+              dlg._download_ok == 3, f"got={dlg._download_ok}")
         check('失败 0 张', dlg._download_failed == 0,
               f"got={dlg._download_failed}")
         names = sorted(os.listdir(out))
-        check('落盘文件名按命名规则',
-              names == ['天启纪元-海报链接.jpg', '星穹计划-海报链接.jpg'],
+        check('落盘文件名按命名规则 (imgcol = 各列自己的列名)',
+              names == ['天启纪元-竖版海报.jpg', '星穹计划-横版海报.jpg',
+                        '星穹计划-竖版海报.jpg'],
               f"got={names!r}")
         check('状态行报成功数', '成功' in dlg.status_label.text(),
               f"got={dlg.status_label.text()!r}")
@@ -541,6 +615,7 @@ def main() -> int:
         test_read_xlsx()
         test_bad_format()
         test_guess_columns()
+        test_multi_link_jobs()
         test_render_filename()
         test_extension()
         test_download_poster()

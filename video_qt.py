@@ -27,9 +27,9 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog,
     QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QStatusBar, QStyle,
-    QStyleOptionViewItem, QStyledItemDelegate, QTableView, QVBoxLayout,
-    QWidget,
+    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QStatusBar, QStyle, QStyleOptionViewItem, QStyledItemDelegate, QTableView,
+    QVBoxLayout, QWidget,
 )
 
 from video_core import (
@@ -37,7 +37,7 @@ from video_core import (
     VIDEO_EXTENSIONS, DocumentFormatError, VideoInfo, _cell_fg,
     _extract_sort_key, _header_text_with_arrow, _next_sort_state,
     build_poster_jobs, download_poster, extract_frame, format_title,
-    guess_link_column, guess_partname_column, match_snapshots,
+    guess_link_columns, guess_partname_column, match_snapshots,
     parse_threshold, parse_time_token, parse_video_info, poster_default_dir,
     read_tabular_document, run_ffprobe, scan_existing_snapshots,
     scan_video_files, time_token_sort_key, time_token_to_string, truncate_text,
@@ -1570,7 +1570,7 @@ class PosterDialog(QDialog):
         root.setContentsMargins(5, 5, 5, 5)
         root.setSpacing(4)
 
-        # === 第一行: 文档 ===
+        # === 第一行: 文档 + 浏览 + 开始分析 ===
         row1 = QHBoxLayout()
         row1.addWidget(QLabel('文档:'))
         self.doc_edit = QLineEdit()
@@ -1579,55 +1579,64 @@ class PosterDialog(QDialog):
         # 「浏览」选完 setText 的路径就漏掉了。
         self.doc_edit.textChanged.connect(self._on_doc_edited)
         row1.addWidget(self.doc_edit, 1)
-        doc_browse_btn = QPushButton('浏览')
-        doc_browse_btn.clicked.connect(self._on_browse_doc)
-        row1.addWidget(doc_browse_btn)
+        self.doc_browse_btn = QPushButton('浏览')
+        self.doc_browse_btn.clicked.connect(self._on_browse_doc)
+        row1.addWidget(self.doc_browse_btn)
+        # 「开始分析」放在「文档」这一行、「浏览」后面 (2026-11-04 用户要求)
+        self.analyze_btn = QPushButton('开始分析')
+        self.analyze_btn.clicked.connect(self._on_analyze)
+        row1.addWidget(self.analyze_btn)
         root.addLayout(row1)
 
-        # === 第二行: 海报地址 ===
+        # === 第二行: 命名来源字段 + 海报地址 ===
+        # 「命名来源字段」在「海报地址」**前面** (2026-11-04 用户要求) ——
+        # 换了命名来源, 海报地址要**同步**跟着变 (见 _on_part_changed)。
         row2 = QHBoxLayout()
+        row2.addWidget(QLabel('命名来源字段:'))
+        self.part_combo = QComboBox()
+        self.part_combo.currentIndexChanged.connect(self._on_part_changed)
+        row2.addWidget(self.part_combo)
         row2.addWidget(QLabel('海报地址:'))
         self.out_edit = QLineEdit()
         # textEdited **只在用户手改时**才发 —— 程序 setText 不会触发,
         # 正好用来分辨「自动填的」与「用户改过的」
         self.out_edit.textEdited.connect(self._on_out_edited)
         row2.addWidget(self.out_edit, 1)
-        out_browse_btn = QPushButton('浏览')
-        out_browse_btn.clicked.connect(self._on_browse_out)
-        row2.addWidget(out_browse_btn)
+        self.out_browse_btn = QPushButton('浏览')
+        self.out_browse_btn.clicked.connect(self._on_browse_out)
+        row2.addWidget(self.out_browse_btn)
         root.addLayout(row2)
 
-        # === 第三行: 命名规则 + 两个字段 ===
+        # === 第三行: 命名规则 + 海报链接字段(可多选) + 开始下载 ===
         row3 = QHBoxLayout()
         row3.addWidget(QLabel('命名规则:'))
         self.template_edit = QLineEdit('{partname}-{imgcol}')
         self.template_edit.setFixedWidth(220)
         row3.addWidget(self.template_edit)
-        row3.addWidget(QLabel('命名来源字段:'))
-        self.part_combo = QComboBox()
-        row3.addWidget(self.part_combo)
-        row3.addWidget(QLabel('海报链接字段:'))
-        self.link_combo = QComboBox()
-        row3.addWidget(self.link_combo)
         self.header_check = QCheckBox('首行为字段名')
         self.header_check.setChecked(True)
         # 改了这个 → 读法变了 → 之前的分析作废, 要重新「开始分析」
         self.header_check.toggled.connect(self._on_header_toggled)
         row3.addWidget(self.header_check)
-        row3.addStretch(1)
-        root.addLayout(row3)
-
-        # === 第四行: 开始分析 / 开始下载 ===
-        row4 = QHBoxLayout()
-        row4.addStretch(1)
-        self.analyze_btn = QPushButton('开始分析')
-        self.analyze_btn.clicked.connect(self._on_analyze)
-        row4.addWidget(self.analyze_btn)
+        row3.addWidget(QLabel('海报链接字段:'))
+        # 海报链接字段**可以有好几个** (2026-11-04 用户要求) → 用一排
+        # 勾选框, 而不是单选下拉。列多的时候横向滚动。
+        self.link_scroll = QScrollArea()
+        self.link_scroll.setWidgetResizable(True)
+        self.link_scroll.setFixedHeight(32)
+        self.link_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.link_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._link_widget = QWidget()
+        self._link_layout = QHBoxLayout(self._link_widget)
+        self._link_layout.setContentsMargins(0, 0, 0, 0)
+        self._link_layout.setSpacing(8)
+        self.link_scroll.setWidget(self._link_widget)
+        row3.addWidget(self.link_scroll, 1)
         self.download_btn = QPushButton('开始下载')
         self.download_btn.clicked.connect(self._on_download)
         self.download_btn.setEnabled(False)   # 没分析过不许下载
-        row4.addWidget(self.download_btn)
-        root.addLayout(row4)
+        row3.addWidget(self.download_btn)
+        root.addLayout(row3)
 
         # === 中间: 预览 ===
         self.model = PosterPreviewModel([], [])
@@ -1647,6 +1656,9 @@ class PosterDialog(QDialog):
         self.progress.setRange(0, 1)
         root.addWidget(self.progress)
 
+        # 海报链接字段的勾选框: [(列名, 勾选框), ...], 顺序与列号一致
+        self.link_checks: list[tuple[str, QCheckBox]] = []
+
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(100)
         self._poll_timer.timeout.connect(self._poll_queue)
@@ -1664,6 +1676,7 @@ class PosterDialog(QDialog):
         self._out_manual = False
         self.download_btn.setEnabled(False)
         self.model.set_document([], [])
+        self._rebuild_link_checks([], set())
         self.status_label.setText('已选文档 — 点「开始分析」看前 5 条')
 
     def _on_doc_edited(self) -> None:
@@ -1671,6 +1684,7 @@ class PosterDialog(QDialog):
         self._doc = None
         self.download_btn.setEnabled(False)
         self.model.set_document([], [])
+        self._rebuild_link_checks([], set())
         self.status_label.setText('文档已改 — 点「开始分析」重新读')
 
     def _on_header_toggled(self) -> None:
@@ -1680,6 +1694,7 @@ class PosterDialog(QDialog):
         self._doc = None
         self.download_btn.setEnabled(False)
         self.model.set_document([], [])
+        self._rebuild_link_checks([], set())
         self.status_label.setText('读法已改 — 点「开始分析」重新读')
 
     def _on_browse_out(self) -> None:
@@ -1691,10 +1706,61 @@ class PosterDialog(QDialog):
     def _on_out_edited(self) -> None:
         self._out_manual = True
 
+    def _on_part_changed(self) -> None:
+        """改了「命名来源字段」→ 海报地址**同步**跟着变 (用户要求)。
+
+        force=True: 连用户手填的地址一起换掉 —— 用户要求两者同步。
+        """
+        self._sync_out_dir(force=True)
+
+    def _sync_out_dir(self, force: bool = False) -> None:
+        """海报地址 = <文档所在目录>/<命名来源字段首行值>-poster。
+
+        force=False (刚分析完): 用户手改过地址就不覆盖。
+        force=True  (用户改了「命名来源字段」): 无条件覆盖。
+        """
+        if self._doc is None:
+            return
+        if self._out_manual and not force:
+            return
+        path = self.doc_edit.text().strip()
+        if not path:
+            return
+        part_idx = self.part_combo.currentIndex()
+        part_value = ''
+        if part_idx >= 0 and self._doc.rows and part_idx < len(self._doc.rows[0]):
+            part_value = str(self._doc.rows[0][part_idx]).strip()
+        self.out_edit.setText(poster_default_dir(path, part_value))
+        self._out_manual = False
+
+    def _rebuild_link_checks(self, headers: list[str], detected: set[int]) -> None:
+        """把**所有列**列成勾选框, 自动认出的那些勾上。
+
+        海报链接字段**可以有好几个** —— 每列一个勾选框, 用户自己挑。
+        """
+        while self._link_layout.count():
+            item = self._link_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.link_checks = []
+        for i, name in enumerate(headers):
+            check = QCheckBox(name)
+            check.setChecked(i in detected)
+            check.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self._link_layout.addWidget(check)
+            self.link_checks.append((name, check))
+        self._link_layout.addStretch(1)
+
+    def _checked_links(self) -> list[tuple[int, str]]:
+        """当前勾上的链接字段 → [(列号, 列名), ...]。"""
+        return [(i, name) for i, (name, check) in enumerate(self.link_checks)
+                if check.isChecked()]
+
     # ---- 开始分析 ----
 
     def _on_analyze(self) -> None:
-        """读文档 → 预览前 5 条 → 猜出两个字段 (用户可改)。"""
+        """读文档 → 预览前 5 条 → 猜出字段 (用户可改)。"""
         path = self.doc_edit.text().strip()
         if not path:
             QMessageBox.warning(self, '提示', '请先选择清单文档。')
@@ -1713,28 +1779,30 @@ class PosterDialog(QDialog):
         self._doc = doc
         self.model.set_document(doc.headers, doc.rows[:self.PREVIEW_ROWS])
 
-        self.part_combo.clear()
-        self.link_combo.clear()
-        self.part_combo.addItems(doc.headers)
-        self.link_combo.addItems(doc.headers)
-        link_idx = guess_link_column(doc.headers, doc.rows)
+        # 命名来源字段: 猜一个, 用户可改
         part_idx = guess_partname_column(doc.headers, doc.rows)
+        self.part_combo.blockSignals(True)      # 重建下拉别触发同步
+        self.part_combo.clear()
+        self.part_combo.addItems(doc.headers)
         if doc.headers:
-            self.link_combo.setCurrentIndex(min(link_idx, len(doc.headers) - 1))
-            self.part_combo.setCurrentIndex(min(part_idx, len(doc.headers) - 1))
+            self.part_combo.setCurrentIndex(
+                min(part_idx, len(doc.headers) - 1))
+        self.part_combo.blockSignals(False)
+
+        # 海报链接字段: 所有列都列出来, 自动认出的勾上 (可能有好几个)
+        detected = set(guess_link_columns(doc.headers, doc.rows))
+        self._rebuild_link_checks(doc.headers, detected)
 
         # 海报地址默认值: 文档所在目录/<命名来源字段首行值>-poster
-        if not self._out_manual:
-            part_value = ''
-            if doc.rows and part_idx < len(doc.rows[0]):
-                part_value = str(doc.rows[0][part_idx]).strip()
-            self.out_edit.setText(poster_default_dir(path, part_value))
+        self._sync_out_dir()
 
         self.download_btn.setEnabled(True)
         shown = min(len(doc.rows), self.PREVIEW_ROWS)
-        self.status_label.setText(
-            f'已分析：共 {len(doc.rows)} 行 · {len(doc.headers)} 个字段'
-            f' (显示前 {shown} 行)')
+        text = (f'已分析：共 {len(doc.rows)} 行 · {len(doc.headers)} 个字段'
+                f' · 认出 {len(detected)} 个海报链接字段 (显示前 {shown} 行)')
+        if not detected:
+            text += ' — 没认出来, 请自己勾'
+        self.status_label.setText(text)
 
     # ---- 开始下载 ----
 
@@ -1749,10 +1817,13 @@ class PosterDialog(QDialog):
             QMessageBox.warning(self, '提示', '请先设置海报地址。')
             return
         part_idx = max(self.part_combo.currentIndex(), 0)
-        link_idx = max(self.link_combo.currentIndex(), 0)
-        jobs = build_poster_jobs(self._doc.rows, part_idx, link_idx,
-                                 self.template_edit.text(),
-                                 self.link_combo.currentText())
+        links = self._checked_links()
+        if not links:
+            QMessageBox.warning(self, '提示',
+                                '请在「海报链接字段」里勾选至少一个字段。')
+            return
+        jobs = build_poster_jobs(self._doc.rows, part_idx, links,
+                                 self.template_edit.text())
         if not jobs:
             QMessageBox.warning(self, '提示', '海报链接字段里没有可下载的链接。')
             return
