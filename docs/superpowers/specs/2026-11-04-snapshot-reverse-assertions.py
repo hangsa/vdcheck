@@ -154,6 +154,15 @@ def test_dialog_defaults():
         check('每个时间点都带一个删除按钮',
               sum(1 for b in dlg.findChildren(QPushButton) if b.text() == '×') == 3,
               f"got={[b.text() for b in dlg.findChildren(QPushButton)]}")
+        # 正时间点**不加**标记; 逆的标记是 'R' (2026-11-04 用户要求)
+        check('正时间点前面没有标记 (不加「正」字)',
+              dlg._tp_groups[0].label is None
+              and dlg._tp_groups[1].label is None,
+              f"got={[g.label.text() if g.label else None for g in dlg._tp_groups]}")
+        check('逆时间点前面的标记是「R」',
+              dlg._tp_groups[2].label is not None
+              and dlg._tp_groups[2].label.text() == 'R',
+              f"got={dlg._tp_groups[2].label.text() if dlg._tp_groups[2].label else None!r}")
     finally:
         dlg.close()
 
@@ -224,8 +233,10 @@ def test_header_marker():
         head2 = model.headerData(2, Qt.Horizontal)
         head3 = model.headerData(3, Qt.Horizontal)
         check('正时间点的表头', '00-00-07-24' in head2, f"got={head2!r}")
-        check('逆时间点的表头带「逆」', '逆' in head3, f"got={head3!r}")
-        check('逆时间点的表头不含 R', 'R' not in head3, f"got={head3!r}")
+        check('逆时间点的表头带「R」', 'R' in head3, f"got={head3!r}")
+        check('逆时间点的表头不含「逆」', '逆' not in head3, f"got={head3!r}")
+        check('逆时间点的表头 = R + 时间点 (与文件名同形)',
+              head3.endswith('R00-01-00-00'), f"got={head3!r}")
     finally:
         dlg.close()
 

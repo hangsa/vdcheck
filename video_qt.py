@@ -568,7 +568,8 @@ class SnapshotGridModel(QAbstractTableModel):
             token = self._tokens[c]
             if is_reverse_token(token):
                 # 逆时间点: 表头标出来 (用户一眼能看出这一列是片尾往前数)
-                text = '逆 ' + time_token_to_string(strip_reverse_marker(token))
+                # 标记用 'R' —— 与输入框前的标记、文件名一致 (2026-11-04)
+                text = 'R' + time_token_to_string(strip_reverse_marker(token))
             else:
                 text = time_token_to_string(token)
             return f"T{c + 1}: {text}"
@@ -800,11 +801,18 @@ class TimePointGroup:
 
     类型在**添加的时候**就定下 (2026-11-04 用户要求) —— 所以这里存的是
     一个静态标记标签, 不是下拉框。
+
+    **正时间点没有标记标签** (2026-11-04 用户要求: 不用加「正」字);
+    逆时间点有个 `R` 的标记 (标签 + 文件名 + 表头都用 R)。
     """
-    kind: str                 # '正' | '逆'
-    label: QLabel             # 类型标记
-    edit: TimeTokenEdit       # 时间点输入框
-    delete_btn: QPushButton   # 删除这一组
+    kind: str                       # '正' | '逆'
+    label: QLabel | None            # 类型标记 (只有逆时间点有)
+    edit: TimeTokenEdit             # 时间点输入框
+    delete_btn: QPushButton         # 删除这一组
+
+    def first_widget(self):
+        """这一组最左边的控件 (标记标签, 没有就是输入框)。"""
+        return self.label if self.label is not None else self.edit
 
 
 class EnlargeDialog(QDialog):
@@ -1108,17 +1116,21 @@ class SnapshotDialog(QDialog):
 
         类型在**添加的时候**定下 —— 之后只有「删掉重来」能换类型。
         """
-        label = QLabel(kind)
-        label.setFixedWidth(18)
-        label.setAlignment(Qt.AlignCenter)
+        label = None
         if kind == '逆':
+            # 只有逆时间点有标记 —— 正的不加「正」字 (2026-11-04 用户要求);
+            # 标记用 'R' (与文件名、表头一致)
+            label = QLabel('R')
+            label.setFixedWidth(12)
+            label.setAlignment(Qt.AlignCenter)
             label.setStyleSheet('font-weight: bold;')
         edit = TimeTokenEdit(default)
         edit.setFixedWidth(110)
         delete_btn = QPushButton('×')
         delete_btn.setFixedWidth(24)
         delete_btn.setToolTip('删除这个时间点')
-        self._tp_layout.addWidget(label)
+        if label is not None:
+            self._tp_layout.addWidget(label)
         self._tp_layout.addWidget(edit)
         self._tp_layout.addWidget(delete_btn)
         self._tp_groups.append(
@@ -1132,6 +1144,8 @@ class SnapshotDialog(QDialog):
             if group.edit is not edit:
                 continue
             for widget in (group.label, group.edit, group.delete_btn):
+                if widget is None:
+                    continue
                 self._tp_layout.removeWidget(widget)
                 widget.setParent(None)
                 widget.deleteLater()

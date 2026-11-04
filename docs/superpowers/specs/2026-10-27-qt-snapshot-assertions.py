@@ -386,8 +386,9 @@ def _run() -> int:
     # 2026-11-04: 每个时间点是一**组** [类型标记][输入框][删除按钮],
     # 所以「紧挨标签」看的是**组** (类型标记), 组与组之间看的是
     # 「上一个组的删除按钮 → 下一个组的类型标记」。
-    _gx = _dp._tp_groups[0].label.mapTo(
-        _dp, _dp._tp_groups[0].label.rect().topLeft()).x()
+    # 正时间点没有标记标签, 逆的才有 → 组的左边缘取 first_widget()
+    _gx = _dp._tp_groups[0].first_widget().mapTo(
+        _dp, _dp._tp_groups[0].first_widget().rect().topLeft()).x()
     check("第一个时间点组紧挨「时间点:」标签 (间距 ≤ 12px)",
           0 <= _gx - _lx <= 12,
           f"标签右边={_lx}px 组左边={_gx}px 间距={_gx - _lx}px")
@@ -396,8 +397,8 @@ def _run() -> int:
         left = _dp._tp_groups[i].delete_btn.mapTo(
             _dp, _dp._tp_groups[i].delete_btn.rect().topLeft()).x()
         left += _dp._tp_groups[i].delete_btn.width()
-        right = _dp._tp_groups[i + 1].label.mapTo(
-            _dp, _dp._tp_groups[i + 1].label.rect().topLeft()).x()
+        right = _dp._tp_groups[i + 1].first_widget().mapTo(
+            _dp, _dp._tp_groups[i + 1].first_widget().rect().topLeft()).x()
         _gaps.append(right - left)
     check("各时间点组按顺序紧挨排列 (间距 ≤ 12px)",
           all(0 <= g <= 12 for g in _gaps), f"gaps={_gaps}")
