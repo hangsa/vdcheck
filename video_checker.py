@@ -18,7 +18,7 @@ from video_core import (  # noqa: F401
     get_ffprobe_path, guess_link_columns, guess_partname_column,
     parse_threshold, parse_time_token, parse_video_info, poster_default_dir,
     read_tabular_document, run_ffprobe, scan_video_files, time_token_to_string,
-    truncate_text,
+    truncate_text, unique_poster_path,
 )
 
 

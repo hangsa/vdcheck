@@ -46,7 +46,7 @@ Run **every** script before claiming a change is done:
 for f in docs/superpowers/specs/*-assertions.py; do QT_QPA_PLATFORM=offscreen python3 "$f" >/dev/null || echo "FAIL $(basename $f)"; done
 ```
 
-The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `read_tabular_document`, `guess_clipname_column`, `guess_link_columns`, `guess_partname_column`, `render_filename`, `extension_for_url`, `poster_default_dir`, `build_poster_jobs`, `download_poster`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
+The pure functions in `video_core.py` (`parse_video_info`, `parse_threshold`, `format_duration`, `format_file_size`, `format_title`, `truncate_text`, `scan_video_files`, `parse_snapshot_filename`, `scan_existing_snapshots`, `match_snapshots`, `time_token_sort_key`, `read_tabular_document`, `guess_clipname_column`, `guess_link_columns`, `guess_partname_column`, `unique_poster_path`, `render_filename`, `extension_for_url`, `poster_default_dir`, `build_poster_jobs`, `download_poster`, `_cell_fg`, `_extract_sort_key`, `_next_sort_state`, `_header_text_with_arrow`) are the testable seam — import them directly, no fixtures needed. `video_checker.py` re-exports them so older scripts that do `from video_checker import X` still work.
 
 ## Architecture
 
@@ -54,8 +54,8 @@ Three modules, ~4.1k lines total:
 
 | File | Role |
 |---|---|
-| `video_core.py` (1105) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (3083) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_core.py` (1140) | Pure logic. **No Qt, no Tk.** |
+| `video_qt.py` (3087) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
 | `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -131,6 +131,7 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 - **Naming** — `render_filename(template, partname, imgcol)` substitutes `{partname}`/`{imgcol}` (and the `[partname]`/`[imgcol]` bracket spelling), then replaces the illegal filename chars `\ / : * ? " < > |` with `_`. `{imgcol}` is that link column's **name**, not its value — with several link columns each file gets its own column name (`星穹计划-竖版海报.jpg` / `星穹计划-横版海报.jpg`).
 - **Two different sources** (2026-11-04): the **命名来源** combo (user-visible) feeds `{clipname}` → only the **folder** name. The `{partname}` (file name) column is **auto-picked** — no combo (the user asked to drop it): name-ish header **and** values differ per row → else a varying **text** (not numeric) non-link column → else any varying column. It must not be the same column as clipname: a clip name repeats on every row, so using it for file names made every poster land on the same file (later rows overwrote earlier ones). The picked column is reported in the status line (`文件名取自「集名」`).
 - **Extension** — `extension_for_url(url, content_type)`: URL path suffix → `Content-Type` → `.jpg`.
+- **Duplicate names** — `unique_poster_path(output_dir, base_name, ext, taken)` picks the first free `name.ext` / `name_1.ext` / `name_2.ext` (no chained `a_1_1` suffixes) and **claims** the name in `taken`. A name is "taken" if it is on disk **or** another thread in the same batch claimed it — so the check + claim must happen under one lock (`download_poster(..., taken=..., lock=...)` takes the lock; the network fetch stays outside it, so the 3 downloads really run in parallel).
 - **Dialog layout** (2026-11-04, user-specified order): row 1 = 文档 + 浏览 + **开始分析**; row 2 = **命名来源** (combo, 160px wide) + **海报地址** + 浏览; row 3 = **海报命名规则** (template) + 「首行为字段名」 + 开始下载; row 4 = **海报链接字段** (a row of checkboxes, 40px tall, on its own row). Changing 命名来源 **recomputes 海报地址** (`_sync_out_dir(force=True)`) — the two are meant to move together.
 - **The download button has three states** (2026-11-04): `开始下载` → `下载中` → (click) `继续下载` → (click) `下载中` → done → `开始下载`. Pausing is **between files**: the in-flight download finishes, no new one starts. The worker waits on a `threading.Event` between jobs (`_pause`); the cancel event still wins.
 - The download runs on **plain daemon threads** (`_poster_worker`, same family as `_snapshot_worker`): one **job queue** + **`POSTER_PARALLEL` = 3 worker threads** pulling from it (2026-11-04: serial → 3 in parallel). The counters are shared under a `threading.Lock`; the message queue is **bounded (maxsize=20)** so a slow main thread applies back-pressure; the worker blocks on `put(timeout=…)` so a closed dialog can't wedge it forever. Closing the dialog cancels (the in-flight request is *not* killed). One failed row does not abort the batch; the summary is `下载完成：成功 N · 失败 M` plus the first 3 errors.

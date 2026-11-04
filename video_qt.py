@@ -1518,6 +1518,9 @@ def _poster_worker(jobs, output_dir, cancel_event, pause_event, result_queue):
     counter = {'done': 0, 'ok': 0, 'fail': 0}
     errors: list[str] = []
     lock = threading.Lock()
+    # 本批次已经占用的文件名 —— 并行时两条线程可能算出同一个名字,
+    # 靠它让开 (挑名字那一步在锁里做, 见 unique_poster_path)
+    taken: set[str] = set()
 
     def report(msg) -> bool:
         """塞消息 —— 队列满时等一会儿; 期间被取消就放弃。"""
@@ -1543,7 +1546,8 @@ def _poster_worker(jobs, output_dir, cancel_event, pause_event, result_queue):
             if cancel_event.is_set():
                 return
             try:
-                path = download_poster(url, output_dir, base_name)
+                path = download_poster(url, output_dir, base_name,
+                                       taken=taken, lock=lock)
                 ok, err, name = True, '', os.path.basename(path)
             except Exception as exc:
                 ok, err, name = False, f'{base_name}: {exc}', base_name

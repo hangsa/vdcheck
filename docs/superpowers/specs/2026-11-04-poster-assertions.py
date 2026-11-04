@@ -720,16 +720,17 @@ def test_parallel_download():
     barrier = threading.Barrier(3, timeout=5)
     live = []
     peak = {'n': 0}
-    lock = threading.Lock()
+    count_lock = threading.Lock()          # 别跟 fake 的 lock 参数重名
 
-    def fake_download(url, output_dir, base_name, timeout=30.0):
-        with lock:
+    def fake_download(url, output_dir, base_name, timeout=30.0,
+                     taken=None, lock=None):
+        with count_lock:
             live.append(url)
             peak['n'] = max(peak['n'], len(live))
         try:
             barrier.wait()
         finally:
-            with lock:
+            with count_lock:
                 live.remove(url)
         return os.path.join(output_dir, base_name + '.jpg')
 
@@ -760,6 +761,75 @@ def test_parallel_download():
               f"got={sorted(m[1][0] for m in items)}")
     finally:
         video_qt.download_poster = real
+
+
+def test_duplicate_names():
+    """重名自动加后缀 (2026-11-04 用户要求)。"""
+    section('重名加后缀')
+    d = mkdtemp()
+    out = mkdtemp()
+    img = make_jpeg(os.path.join(d, 'a.jpg'), b'D' * 50)
+    from pathlib import Path
+    url = Path(img).as_uri()
+
+    # --- 磁盘上已经有同名文件 → 让开 ---
+    existing = os.path.join(out, '重复-海报链接.jpg')
+    with open(existing, 'wb') as f:
+        f.write(b'old')
+    path = video_core.download_poster(url, out, '重复-海报链接')
+    check('磁盘上已有同名 → 加 _1 后缀',
+          os.path.basename(path) == '重复-海报链接_1.jpg',
+          f"got={os.path.basename(path)!r}")
+    check('原文件没被动过',
+          open(existing, 'rb').read() == b'old')
+
+    # --- 后缀按顺序找**第一个空位** (不链式: a_1 → a_1_1) ---
+    with open(os.path.join(out, '链式-海报链接.jpg'), 'wb') as f:
+        f.write(b'old')
+    with open(os.path.join(out, '链式-海报链接_1.jpg'), 'wb') as f:
+        f.write(b'old')
+    path2 = video_core.download_poster(url, out, '链式-海报链接')
+    check('已有 a 和 a_1 → 用 a_2 (不链式)',
+          os.path.basename(path2) == '链式-海报链接_2.jpg',
+          f"got={os.path.basename(path2)!r}")
+
+    # --- unique_poster_path 会把名字**占住** ---
+    taken: set = set()
+    p1 = video_core.unique_poster_path(out, '占位', '.jpg', taken)
+    p2 = video_core.unique_poster_path(out, '占位', '.jpg', taken)
+    check('同批次里第二个让开',
+          os.path.basename(p1) == '占位.jpg'
+          and os.path.basename(p2) == '占位_1.jpg',
+          f"got={[os.path.basename(p1), os.path.basename(p2)]!r}")
+    check('占用的名字记进了 taken', taken == {'占位.jpg', '占位_1.jpg'},
+          f"got={taken!r}")
+
+    # --- 同一批里两行算出同一个名字 → 落两个文件 (不覆盖) ---
+    csv_path = os.path.join(d, '清单.csv')
+    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+        f.write('剧名,集名,海报链接\n')
+        f.write('星穹计划,第01集,%s\n' % url)
+        f.write('星穹计划,第01集,%s\n' % url)      # 同一个 partname!
+    out2 = mkdtemp()
+    dlg = video_qt.PosterDialog(None)
+    try:
+        dlg.doc_edit.setText(csv_path)
+        dlg._on_analyze()
+        dlg.out_edit.setText(out2)
+        dlg._on_download()
+        deadline = time.time() + 20
+        while dlg._downloading and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        names = sorted(os.listdir(out2))
+        # 两行的集名一样 → 「逐行不同」那一列挑不到 → 退回剧名 →
+        # 两行算出同一个文件名 → 第二个自动加后缀
+        check('同名的两个 → 第二个加后缀, 两个文件都在',
+              names == ['星穹计划-海报链接.jpg', '星穹计划-海报链接_1.jpg'],
+              f"got={names!r}")
+        check('成功 2 张', dlg._download_ok == 2, f"got={dlg._download_ok}")
+    finally:
+        dlg.close()
 
 
 def test_main_window_button():
@@ -870,6 +940,7 @@ def main() -> int:
         test_clipname_vs_partname()
         test_pause_resume()
         test_parallel_download()
+        test_duplicate_names()
         test_main_window_button()
     finally:
         QMessageBox.warning = orig_warning

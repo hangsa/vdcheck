@@ -1090,16 +1090,51 @@ def fetch_bytes(url: str, timeout: float = 30.0) -> tuple[bytes, str]:
     return data, ctype
 
 
+def unique_poster_path(output_dir: str, base_name: str, ext: str,
+                       taken: set[str] | None = None) -> str:
+    """挑一个**没被占用**的落盘路径: `名字.ext`、`名字_1.ext`、`名字_2.ext`…
+
+    被占 = 磁盘上已经有这个文件, **或**本批次已经用过这个名字
+    (taken —— 并行下载时另外一条线程刚占过)。占到的名字会**记进
+    taken**, 所以调用方必须**持着同一把锁**调它 (check + 占位不是
+    原子的, 不加锁两条线程会同时看中同一个名字)。
+
+    按顺序找**第一个空位** —— 不会出现「a_1 → a_1_1」那种链式后缀
+    (app 里移动文件那个老毛病, 见产品文档 §6 #23)。
+    """
+    index = 0
+    while True:
+        name = (f'{base_name}{ext}' if index == 0
+                else f'{base_name}_{index}{ext}')
+        path = os.path.join(output_dir, name)
+        free = (taken is None or name not in taken)
+        if free and not os.path.exists(path):
+            if taken is not None:
+                taken.add(name)
+            return path
+        index += 1
+
+
 def download_poster(url: str, output_dir: str, base_name: str,
-                    timeout: float = 30.0) -> str:
+                    timeout: float = 30.0, taken: set[str] | None = None,
+                    lock=None) -> str:
     """下载一张海报到 output_dir → 落盘路径。
 
-    扩展名按 URL 后缀 / Content-Type 定; 目录不存在会**建**。
+    扩展名按 URL 后缀 / Content-Type 定; 目录不存在会**建**;
+    **重名自动加后缀** (名字、名字_1、名字_2…) —— 磁盘上已有的、
+    或本批次已占用的，都让开。
+
+    taken / lock: 并行下载时共用 —— 只有「挑名字」那一步在锁里,
+    **网络下载在锁外** (不然并行就没意义了)。
     """
     data, ctype = fetch_bytes(url, timeout=timeout)
     ext = extension_for_url(url, ctype)
     os.makedirs(output_dir, exist_ok=True)
-    dest = os.path.join(output_dir, base_name + ext)
+    if lock is None:
+        dest = unique_poster_path(output_dir, base_name, ext, taken)
+    else:
+        with lock:
+            dest = unique_poster_path(output_dir, base_name, ext, taken)
     with open(dest, 'wb') as f:
         f.write(data)
     return dest
