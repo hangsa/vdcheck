@@ -55,7 +55,7 @@ Three modules, ~4.1k lines total:
 | File | Role |
 |---|---|
 | `video_core.py` (1105) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (3058) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_qt.py` (3083) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
 | `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -133,7 +133,7 @@ The 浏览 button picks a **parent** folder and appends the fixed subfolder (`F\
 - **Extension** — `extension_for_url(url, content_type)`: URL path suffix → `Content-Type` → `.jpg`.
 - **Dialog layout** (2026-11-04, user-specified order): row 1 = 文档 + 浏览 + **开始分析**; row 2 = **命名来源** (combo, 160px wide) + **海报地址** + 浏览; row 3 = **海报命名规则** (template) + 「首行为字段名」 + 开始下载; row 4 = **海报链接字段** (a row of checkboxes, 40px tall, on its own row). Changing 命名来源 **recomputes 海报地址** (`_sync_out_dir(force=True)`) — the two are meant to move together.
 - **The download button has three states** (2026-11-04): `开始下载` → `下载中` → (click) `继续下载` → (click) `下载中` → done → `开始下载`. Pausing is **between files**: the in-flight download finishes, no new one starts. The worker waits on a `threading.Event` between jobs (`_pause`); the cancel event still wins.
-- The download runs on a **plain daemon thread** (`_poster_worker`, same shape as `_snapshot_worker`) with a **bounded queue (maxsize=20)**; the worker blocks on `put(timeout=…)` so a closed dialog can't wedge it forever. Closing the dialog cancels (the in-flight request is *not* killed). One failed row does not abort the batch; the summary is `下载完成：成功 N · 失败 M` plus the first 3 errors.
+- The download runs on **plain daemon threads** (`_poster_worker`, same family as `_snapshot_worker`): one **job queue** + **`POSTER_PARALLEL` = 3 worker threads** pulling from it (2026-11-04: serial → 3 in parallel). The counters are shared under a `threading.Lock`; the message queue is **bounded (maxsize=20)** so a slow main thread applies back-pressure; the worker blocks on `put(timeout=…)` so a closed dialog can't wedge it forever. Closing the dialog cancels (the in-flight request is *not* killed). One failed row does not abort the batch; the summary is `下载完成：成功 N · 失败 M` plus the first 3 errors.
 - Changing the document path or the 「首行为字段名」 checkbox **invalidates the analysis** (the download button greys out) — otherwise a stale document would be downloaded.
 
 

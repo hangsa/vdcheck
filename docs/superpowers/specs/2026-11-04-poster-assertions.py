@@ -702,6 +702,66 @@ def test_pause_resume():
         dlg.close()
 
 
+def test_parallel_download():
+    """3 张**并行**下载 (2026-11-04 用户要求: 别再一张一张串行下)。"""
+    section('并行下载 (3 张同时)')
+    import queue as _queue
+    import threading
+    check('并行度是 3', video_qt.POSTER_PARALLEL == 3,
+          f"got={video_qt.POSTER_PARALLEL}")
+
+    out = mkdtemp()
+    jobs = [('http://x.test/1.jpg', 'p1'),
+            ('http://x.test/2.jpg', 'p2'),
+            ('http://x.test/3.jpg', 'p3')]
+
+    # 假下载: 三张**都到齐**才放行 (barrier)。串行的话第一张会等到
+    # 超时炸掉 → 测试红。
+    barrier = threading.Barrier(3, timeout=5)
+    live = []
+    peak = {'n': 0}
+    lock = threading.Lock()
+
+    def fake_download(url, output_dir, base_name, timeout=30.0):
+        with lock:
+            live.append(url)
+            peak['n'] = max(peak['n'], len(live))
+        try:
+            barrier.wait()
+        finally:
+            with lock:
+                live.remove(url)
+        return os.path.join(output_dir, base_name + '.jpg')
+
+    real = video_qt.download_poster
+    video_qt.download_poster = fake_download
+    try:
+        cancel = threading.Event()
+        pause = threading.Event()
+        pause.set()
+        q: _queue.Queue = _queue.Queue(maxsize=20)
+        thread = threading.Thread(
+            target=video_qt._poster_worker,
+            args=(jobs, out, cancel, pause, q), daemon=True)
+        thread.start()
+        thread.join(20)
+        msgs = []
+        while not q.empty():
+            msgs.append(q.get())
+        items = [m for m in msgs if m[0] == 'poster_item']
+        done = [m for m in msgs if m[0] == 'poster_done']
+        check('三张都报告完成', len(items) == 3, f"got={len(items)}")
+        check('有一条 poster_done', len(done) == 1, f"got={len(done)}")
+        check('全部成功', done and done[0][1][0] == 3,
+              f"got={done[0][1] if done else None}")
+        check('**同时**下了 3 张 (barrier 三个都到齐才放行)',
+              peak['n'] == 3, f"peak={peak['n']}")
+        check('进度号是 1..3', sorted(m[1][0] for m in items) == [1, 2, 3],
+              f"got={sorted(m[1][0] for m in items)}")
+    finally:
+        video_qt.download_poster = real
+
+
 def test_main_window_button():
     section('主窗口按钮')
     win = video_qt.MainWindow()
@@ -809,6 +869,7 @@ def main() -> int:
         test_dialog_download()
         test_clipname_vs_partname()
         test_pause_resume()
+        test_parallel_download()
         test_main_window_button()
     finally:
         QMessageBox.warning = orig_warning

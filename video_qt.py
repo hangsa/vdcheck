@@ -1492,20 +1492,32 @@ class PosterPreviewDelegate(TruncatingDelegate):
         painter.restore()
 
 
+# 海报下载的**并行度** (2026-11-04 用户要求): 3 张同时下。
+# 串行下 100 张要 100 个来回, 并行 3 张就是三分之一的时间。
+POSTER_PARALLEL = 3
+
+
 def _poster_worker(jobs, output_dir, cancel_event, pause_event, result_queue):
-    """后台下载海报。
+    """后台下载海报 —— **3 张并行**。
 
     jobs: [(链接, 文件名不含扩展名)]
-    消息: ('poster_item', (done, total, 文件名, ok, 错误信息))
+    消息: ('poster_item', (已完成数, 总数, 文件名, ok, 错误信息))
           ('poster_done', (成功数, 失败数, 错误列表))
 
-    pause_event 没 set = **暂停中** → 两张之间停住 (正在下的那张下完
-    才停, 不半途掐断); set 回来 = 继续。
+    pause_event 没 set = **暂停中** → 不再开始新的下载 (在飞的最多
+    3 张下完就停, 不半途掐断); set 回来 = 继续。
+
+    并行的实现: 一个任务队列 + `POSTER_PARALLEL` 条工作线程, 各自
+    从队列里取任务。计数用一把锁保护 (三条线程都在加)。
     """
-    ok_count = 0
-    fail_count = 0
-    errors: list[str] = []
+    job_queue: queue.Queue = queue.Queue()
+    for job in jobs:
+        job_queue.put(job)
+
     total = len(jobs)
+    counter = {'done': 0, 'ok': 0, 'fail': 0}
+    errors: list[str] = []
+    lock = threading.Lock()
 
     def report(msg) -> bool:
         """塞消息 —— 队列满时等一会儿; 期间被取消就放弃。"""
@@ -1517,30 +1529,42 @@ def _poster_worker(jobs, output_dir, cancel_event, pause_event, result_queue):
                 continue
         return False
 
-    for i, (url, base_name) in enumerate(jobs):
-        if cancel_event.is_set():
-            break
-        # 暂停中 → 在两张之间等着 (正在下的那张已经下完了)
-        while not pause_event.is_set():
+    def one_worker() -> None:
+        while not cancel_event.is_set():
+            try:
+                url, base_name = job_queue.get_nowait()
+            except queue.Empty:
+                return
+            # 暂停中 → 不开始新的下载 (手上这个也先不动)
+            while not pause_event.is_set():
+                if cancel_event.is_set():
+                    return
+                time.sleep(0.1)
             if cancel_event.is_set():
-                break
-            time.sleep(0.1)
-        if cancel_event.is_set():
-            break
-        try:
-            path = download_poster(url, output_dir, base_name)
-            ok_count += 1
-            if not report(('poster_item',
-                           (i + 1, total, os.path.basename(path), True, ''))):
-                break
-        except Exception as exc:
-            fail_count += 1
-            err = f'{base_name}: {exc}'
-            errors.append(err)
-            if not report(('poster_item',
-                           (i + 1, total, base_name, False, err))):
-                break
-    report(('poster_done', (ok_count, fail_count, errors)))
+                return
+            try:
+                path = download_poster(url, output_dir, base_name)
+                ok, err, name = True, '', os.path.basename(path)
+            except Exception as exc:
+                ok, err, name = False, f'{base_name}: {exc}', base_name
+            with lock:
+                counter['done'] += 1
+                done = counter['done']
+                if ok:
+                    counter['ok'] += 1
+                else:
+                    counter['fail'] += 1
+                    errors.append(err)
+            if not report(('poster_item', (done, total, name, ok, err))):
+                return
+
+    threads = [threading.Thread(target=one_worker, daemon=True)
+               for _ in range(min(POSTER_PARALLEL, max(total, 1)))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    report(('poster_done', (counter['ok'], counter['fail'], list(errors))))
 
 
 class PosterDialog(QDialog):
@@ -1914,7 +1938,8 @@ class PosterDialog(QDialog):
         self.analyze_btn.setEnabled(False)
         self.download_btn.setEnabled(True)
         self.download_btn.setText('下载中')
-        self.status_label.setText(f'准备下载 {len(jobs)} 张海报…')
+        self.status_label.setText(
+            f'准备下载 {len(jobs)} 张海报 ({POSTER_PARALLEL} 张并行)…')
         self._result_queue = queue.Queue(maxsize=20)
         self._worker_thread = threading.Thread(
             target=_poster_worker,
