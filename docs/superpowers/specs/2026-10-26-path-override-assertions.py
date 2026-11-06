@@ -140,19 +140,18 @@ def main() -> int:
           app._scan_target(other_dir) == ('dir', other_dir),
           f"got={app._scan_target(other_dir)!r}")
 
-    section("「清除记录」只清结果, 不换扫描目标 (2026-11-04 用户报的坑)")
+    section("「清除记录」后回到目录扫描 (2026-11-04 用户要求)")
     drop(app, drop_files)
     app._clear_records()
-    check("清除记录后 _selected_files **还在** (拖进来的那批文件)",
-          app._selected_files == drop_files, f"got={app._selected_files!r}")
-    kind, payload = app._scan_target(other_dir)
-    check("清除记录后扫描目标仍是拖入的文件 (不是重新枚举目录)",
-          kind == 'files' and tuple(payload) == tuple(drop_files),
-          f"kind={kind!r} payload={payload!r}")
+    check("清除记录后 _selected_files **清空** (拖拽的那批文件不再优先)",
+          app._selected_files is None, f"got={app._selected_files!r}")
+    kind, payload = app._scan_target(app.path_edit.text().strip())
+    check("清除记录后扫描目标是**路径框里的目录** (扫它下面所有视频)",
+          kind == 'dir', f"kind={kind!r} payload={payload!r}")
     calls.clear()
     scan(app)
-    check("「开始检测」扫的还是那批文件 (目录枚举不到也不会说没找到)",
-          calls == [('files', drop_files)], f"got={calls!r}")
+    check("「开始检测」扫的是那个目录 (不是上一次拖拽的那几片)",
+          calls == [('dir', app.path_edit.text().strip())], f"got={calls!r}")
 
     section("拖拽进来的文件本身仍按文件扫 (不受影响)")
     drop(app, drop_files)

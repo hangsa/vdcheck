@@ -578,10 +578,12 @@ def _run() -> int:
     check("拖进来的 2 个文件都测了", sorted(tested9) == ['x.mp4', 'y.mp4'],
           f"got={tested9}")
     win9._clear_records()
+    check("清记录后拖拽的文件列表也清了 (下次扫路径框里的目录)",
+          win9._selected_files is None, f"got={win9._selected_files!r}")
     win9._on_scan_btn_click()             # 再点「开始检测」
     ok9b = wait_scan(win9)
     check("清记录后再点「开始检测」→ 跑完了", ok9b)
-    check("扫的还是**那 2 个文件** (不是重新枚举目录 → 不会说没找到)",
+    check("扫的是**路径框里那个目录的所有视频** (不是上次拖拽的那几片)",
           sorted(tested9) == ['x.mp4', 'x.mp4', 'y.mp4', 'y.mp4'],
           f"got={tested9}")
     check("结果表里是 2 行", win9.model.rowCount() == 2,
@@ -673,13 +675,11 @@ def _run() -> int:
           f"got={win5.dest_edit.text()!r}")
     check("截图地址清空", win5.snapshot_dest == '',
           f"got={win5.snapshot_dest!r}")
-    # 2026-11-04: 「清除记录」改成**只清结果, 不换扫描目标** ——
-    # 之前它把拖拽留下的文件列表也清了, 于是下一次「开始检测」改成重新
-    # 枚举路径框里的目录, 枚举不到就报「未找到视频文件」(用户实测)。
-    # 改路径 / 用「浏览」选目录本来就会清那批文件 (那才是「换目标」)。
-    check("拖拽留下的文件列表**保留** (清除记录不换扫描目标)",
-          win5._selected_files == ['/x/a.mp4'],
-          f"got={win5._selected_files!r}")
+    # 2026-11-04 用户要求: 清除记录后再点「开始检测」要扫**路径框里那个
+    # 目录的所有视频** —— 即使上一次是拖拽进来的。所以拖拽留下的文件
+    # 列表**要清掉**, 让下一次扫描回到目录模式。
+    check("拖拽留下的文件列表清空 (下次扫路径框里那个目录的所有视频)",
+          win5._selected_files is None, f"got={win5._selected_files!r}")
     check("阈值**不清**",
           win5.bitrate_edit.text() == '12345'
           and win5.sample_rate_edit.text() == '44',
