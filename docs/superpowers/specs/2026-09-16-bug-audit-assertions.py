@@ -132,6 +132,30 @@ if __name__ == "__main__":
     check("正常: frame_rate", info.frame_rate == "30.00")
     check("正常: sample_rate_passing", info.sample_rate_passing is True)
 
+    # 1b. NTSC 帧率 (2026-11-04 用户报的: 23.976 被显示成 23.98)
+    def _fps_info(rate):
+        return parse_video_info(make_ffprobe_json(streams=[
+            {"codec_type": "video", "codec_name": "h264",
+             "width": 1920, "height": 1080, "r_frame_rate": rate,
+             "bit_rate": "30000000"},
+        ]), full, base, 30000, 48)
+
+    check("NTSC 23.976 (24000/1001) 显示 23.976 (不是 23.98)",
+          _fps_info("24000/1001").frame_rate == "23.976",
+          f"got={_fps_info('24000/1001').frame_rate!r}")
+    check("NTSC 29.97 (30000/1001) 显示 29.97",
+          _fps_info("30000/1001").frame_rate == "29.97",
+          f"got={_fps_info('30000/1001').frame_rate!r}")
+    check("NTSC 59.94 (60000/1001) 显示 59.94",
+          _fps_info("60000/1001").frame_rate == "59.94",
+          f"got={_fps_info('60000/1001').frame_rate!r}")
+    check("整数帧率仍是两位小数 (25/1 → 25.00)",
+          _fps_info("25/1").frame_rate == "25.00",
+          f"got={_fps_info('25/1').frame_rate!r}")
+    check("23.976 的**排序用原始精度** (frame_rate_fps 不受显示格式影响)",
+          abs(_fps_info("24000/1001").frame_rate_fps - 24000 / 1001) < 1e-9,
+          f"got={_fps_info('24000/1001').frame_rate_fps!r}")
+
     # 2. 无视频流 → 返回 None
     info = parse_video_info({"streams": [
         {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000"},

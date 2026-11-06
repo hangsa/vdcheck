@@ -105,6 +105,24 @@ class VideoInfo:
     duration_seconds: float = 0.0
 
 
+def format_frame_rate(fps: float) -> str:
+    """帧率的显示格式: **3 位小数, 再把末尾的零去掉 (至少留 2 位)**。
+
+    2 位小数会把 NTSC 的 24000/1001 (23.976…) 显示成 **23.98** ——
+    而 23.98 不是一个真实存在的帧率, 看着像另一个速率 (用户 2026-11-04
+    报的)。29.97 / 59.94 用 2 位刚好精确, **只有 23.976 会丢信息**。
+
+    ⇒ 23.976 / 29.97 / 59.94 / 25.00 / 30.00
+    """
+    text = f'{fps:.3f}'.rstrip('0')      # '23.976' / '29.97' / '25.'
+    if text.endswith('.'):
+        return text + '00'                # '25.' → '25.00'
+    frac = text.split('.', 1)[1]
+    if len(frac) < 2:
+        text += '0'                       # '29.5' → '29.50'
+    return text
+
+
 def format_duration(seconds: float) -> str:
     """将秒数格式化为 HH:MM:SS"""
     h = int(seconds // 3600)
@@ -404,7 +422,7 @@ def parse_video_info(
         # 会让用户以为视频真的 0 帧, 而实测这类视频在定点截图弹窗里每个
         # 时间点都抽帧失败 (parse_time_token 对 fps<=0 抛 ValueError)。
         # frame_rate_fps 仍是 0.0, 排序和抽帧的拒绝行为都不变。
-        frame_rate = f"{fps:.2f}" if fps > 0 else "N/A"
+        frame_rate = format_frame_rate(fps) if fps > 0 else "N/A"
     except (ValueError, ZeroDivisionError):
         frame_rate = "N/A"
 
