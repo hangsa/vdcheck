@@ -556,6 +556,41 @@ def _run() -> int:
           f"got={len(tested8)} {tested8}")
     video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
 
+    # ---- 拖拽 → 清除记录 → 开始检测: 还是那批文件 (用户实测的坑) ----
+    section("拖拽 → 清除记录 → 开始检测: 还是那批文件")
+    win9 = MainWindow()
+    tested9: list[str] = []
+
+    def slow9(path):
+        tested9.append(os.path.basename(path))
+        time.sleep(0.01)
+        return fake_ffprobe_json()
+
+    video_qt.run_ffprobe = slow9
+    drop_dir = mkdtemp(prefix='vdcheck_drop_')
+    drop_files = [os.path.join(drop_dir, 'x.mp4'),
+                  os.path.join(drop_dir, 'y.mp4')]
+    for f in drop_files:
+        open(f, 'wb').close()
+    win9._on_file_drop(drop_files)
+    ok9 = wait_scan(win9)
+    check("拖拽扫描跑完了", ok9)
+    check("拖进来的 2 个文件都测了", sorted(tested9) == ['x.mp4', 'y.mp4'],
+          f"got={tested9}")
+    win9._clear_records()
+    win9._on_scan_btn_click()             # 再点「开始检测」
+    ok9b = wait_scan(win9)
+    check("清记录后再点「开始检测」→ 跑完了", ok9b)
+    check("扫的还是**那 2 个文件** (不是重新枚举目录 → 不会说没找到)",
+          sorted(tested9) == ['x.mp4', 'x.mp4', 'y.mp4', 'y.mp4'],
+          f"got={tested9}")
+    check("结果表里是 2 行", win9.model.rowCount() == 2,
+          f"got={win9.model.rowCount()}")
+    check("状态不是「未找到视频文件」",
+          '未找到视频文件' not in win9.status_bar.currentMessage(),
+          f"got={win9.status_bar.currentMessage()!r}")
+    video_qt.run_ffprobe = lambda path: fake_ffprobe_json()
+
     # ================================================================
     section("派生路径 (迁移地址 / 截图地址)")
     win4 = MainWindow()
@@ -638,7 +673,13 @@ def _run() -> int:
           f"got={win5.dest_edit.text()!r}")
     check("截图地址清空", win5.snapshot_dest == '',
           f"got={win5.snapshot_dest!r}")
-    check("拖拽留下的文件列表清空", win5._selected_files is None)
+    # 2026-11-04: 「清除记录」改成**只清结果, 不换扫描目标** ——
+    # 之前它把拖拽留下的文件列表也清了, 于是下一次「开始检测」改成重新
+    # 枚举路径框里的目录, 枚举不到就报「未找到视频文件」(用户实测)。
+    # 改路径 / 用「浏览」选目录本来就会清那批文件 (那才是「换目标」)。
+    check("拖拽留下的文件列表**保留** (清除记录不换扫描目标)",
+          win5._selected_files == ['/x/a.mp4'],
+          f"got={win5._selected_files!r}")
     check("阈值**不清**",
           win5.bitrate_edit.text() == '12345'
           and win5.sample_rate_edit.text() == '44',

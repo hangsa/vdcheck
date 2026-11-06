@@ -55,7 +55,7 @@ Three modules, ~4.6k lines total:
 | File | Role |
 |---|---|
 | `video_core.py` (1192) | Pure logic. **No Qt, no Tk.** |
-| `video_qt.py` (3437) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
+| `video_qt.py` (3448) | The whole Qt GUI: models, main window, snapshot dialog, poster dialog, zoom window. |
 | `video_checker.py` (36) | Entry point + re-exports of `video_core` names. **CRLF line endings.** |
 
 **Video analysis** (`video_core.py`, pure functions, testable in isolation):
@@ -97,9 +97,10 @@ Three modules, ~4.6k lines total:
 - Bottom: 迁移地址 + 浏览 + 移动达标文件 + 移动全部文件
 - Status bar: a single `QStatusBar` line. Terminal states append the tally via `set_status(text, with_counts=True)` → `检测完成：共 10 · 达标 8 · 不达标 2`; intermediate states (就绪 / 正在检测... (3/10) a.mp4) show only the progress text. The "共 N" in the tally counts **results produced**; the M in "已完成 N/M" is the **total files found** — different sources, not a contradiction.
 - `<Control-o>` opens the browse-folder dialog — **the only shortcut in the app**
-- Drag-and-drop: the window `setAcceptDrops(True)` and an `eventFilter` is installed on `view.viewport()` and `view.horizontalHeader()`, so the **whole table area** (header + body) accepts drops. Paths come from `event.mimeData().urls()` → `toLocalFile()`.
+- Drag-and-drop: the window `setAcceptDrops(True)` and an `eventFilter` is installed on `view.viewport()` and `view.horizontalHeader()`, so the **whole table area** (header + body) accepts drops. Paths come from `event.mimeData().urls()` → `toLocalFile()`. The drop fills the path box with `os.path.normpath(dirname(first file))` — **not** `replace('/', '\\')`, which turned `/var/...` into `\var\...` on macOS/Linux and broke the path.
 
 **Scan target precedence** — dragging files records them in `_selected_files`, and 开始检测 then scans that list instead of the path box. Editing the 文件路径 entry (by typing) clears `_selected_files` via `path_edit.textChanged`, so the next scan follows the path box without needing 清除记录 first; 浏览 and drag use `_set_path` (which sets `_suppress_path_trace`) to write the entry without triggering that. `_scan_target(directory)` returns `('files', list)` or `('dir', directory)`.
+- **清除记录 does NOT clear `_selected_files`** (2026-11-04): it wipes the *results*, not *what gets scanned*. It used to clear the dragged list, which made the next 开始检测 re-enumerate the path box's directory instead of scanning the same files — and when that enumeration came up empty the app said 「未找到视频文件」 while the files were right there. Changing the path (typing) or 浏览 still discards the dragged list — that is the "换目标" case.
 
 **Threading** — `ScanWorker(QObject)` lives in a `QThread` and pushes results back with four signals: `progress(str)`, `result_ready(VideoInfo)`, `finished()`, `cancelled()`. There are two modes because their `base_path` semantics differ:
 - directory scan — `base_path = directory` (relative paths anchored to the picked folder)

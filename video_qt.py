@@ -3017,7 +3017,13 @@ class MainWindow(QMainWindow):
         # 截图地址一起清: 两个字段同源, 只清一个会让「清除记录」后截图地址
         # 还指着一个已经跟当前列表无关的目录
         self.snapshot_dest = ''
-        self._selected_files = None
+        # **拖进来的那批文件留着** (2026-11-04 用户报的坑): 「清除记录」
+        # 是「清结果」, 不是「换扫哪些文件」—— 之前这里把 _selected_files
+        # 也清了, 于是下一次「开始检测」改成**重新枚举路径框里的目录**,
+        # 枚举不到就报「未找到视频文件」(用户实测: 拖拽扫描 → 清除记录 →
+        # 开始检测 → 文件明明在, 却说没找到)。
+        # 改路径 / 用「浏览」选目录本来就会清它 (见 _on_path_edited /
+        # _browse_path) —— 那才是「换目标」, 保留它们才对。
         self.set_status('已清除记录', with_counts=True)
 
     # ---- 定点截图 (弹窗本身是 Task 6) ----
@@ -3227,7 +3233,12 @@ class MainWindow(QMainWindow):
         # 跟随该目录。用 _set_path: 拖拽是程序自己填路径框, 不能触发
         # 「用户改过路径 → 丢弃文件列表」那条。
         directory = os.path.dirname(video_files[0])
-        self._set_path(directory.replace('/', '\\'))
+        # 用 os.path.normpath 归一化 (Windows 上给 'D:\work', macOS/Linux
+        # 上给 '/var/...') —— 之前是 `replace('/', '\\')`, 在 Windows 上
+        # 是为了把正斜杠换成反斜杠, 但在 macOS/Linux 上会把 '/var/...'
+        # 改成 '\var\...' —— **路径直接失效** (点开始检测就报
+        # 「请输入有效的文件夹路径」, 拖拽扫描后清记录再扫还会说没找到文件)
+        self._set_path(os.path.normpath(directory))
         self._sync_derived_paths(directory)
         # 记下拖入的具体文件 —— 拖拽是唯一的选文件入口
         self._selected_files = video_files
