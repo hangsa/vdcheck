@@ -455,7 +455,7 @@ def test_version() -> None:
     section("版本号: 窗口标题 ↔ 产品文档 §4.1")
     win = video_qt.MainWindow()
     title = win.windowTitle()
-    check("窗口标题是 v4.3", title == '视频检测v4.3', f"got={title!r}")
+    check("窗口标题是 v4.4", title == '视频检测v4.4', f"got={title!r}")
     with open(os.path.join(_ROOT, 'docs', '产品文档.md'), encoding='utf-8') as f:
         doc = f.read()
     m = re.search(r'窗口标题 `([^`]+)`', doc)
@@ -463,8 +463,8 @@ def test_version() -> None:
           m is not None and m.group(1) == title,
           f"doc={m.group(1) if m else None!r} code={title!r}")
     m2 = re.search(r'^版本: (v[\d.]+)', doc, re.M)
-    check("产品文档版本头是 v4.3",
-          m2 is not None and m2.group(1) == 'v4.3',
+    check("产品文档版本头是 v4.4",
+          m2 is not None and m2.group(1) == 'v4.4',
           f"got={m2.group(1) if m else None!r}")
 
 

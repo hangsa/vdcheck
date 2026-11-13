@@ -42,7 +42,7 @@ from video_core import (
     parse_time_token, parse_video_info, poster_default_dir,
     read_tabular_document, run_ffprobe, scan_existing_snapshots,
     scan_video_files, strip_reverse_marker, time_token_sort_key,
-    time_token_to_string, truncate_text,
+    time_token_to_string, truncate_text, unique_snapshot_paths,
 )
 
 # 着色常量**只从 video_core 取** —— 界面层不持有自己的颜色常量
@@ -609,6 +609,13 @@ class SnapshotGridModel(QAbstractTableModel):
     def mark_failed(self, row: int, col: int) -> None:
         self._set_cell(row, col, CellState(status='failed'))
 
+    def mark_idle(self, row: int, col: int) -> None:
+        """置回「待抽」状态 —— 「清除截图」把已抽好的格子擦掉时用。
+
+        画出来是灰色 '…' (与「还没轮到」同一副样子)。
+        """
+        self._set_cell(row, col, CellState(status='idle'))
+
     def mark_empty(self, row: int, col: int) -> None:
         """留空 —— 「查看已有截图」模式下没有旧图的格子。
 
@@ -693,6 +700,15 @@ class SnapshotDelegate(QStyledItemDelegate):
 
     def clear_thumbnails(self) -> None:
         self._pixmaps.clear()
+
+    def clear_thumbnail(self, row: int, col: int) -> None:
+        """丢掉**某一格**的缩略图缓存 —— 「清除截图」时用。
+
+        逐格丢, 不像 `clear_thumbnails()` 那样全清 —— 全清会把还没轮到的
+        那一格也一起抹掉 (虽然在清除之后也没有别的格子了, 但语义上
+        「清的正是这几格」更准确)。
+        """
+        self._pixmaps.pop((row, col), None)
 
     # ---- 画 ----
 
@@ -1008,6 +1024,12 @@ class SnapshotDialog(QDialog):
         self._failed_count = 0
         self._cells_processed = 0
         self._total = len(self._files) * len(self._tokens)
+        # 「清除截图」用的两个标志:
+        #   _cleared   —— 清除刚执行过。抽帧线程可能**正在抽**某一格, 那一格
+        #                 随后报上来时直接删掉、不往界面上贴 (见 _mark_done)。
+        #   _clear_msg —— 清除的汇总文案, 收尾 (_on_snap_done) 时贴回状态行。
+        self._cleared = False
+        self._clear_msg = ''
         self._closed = False
         self._close_confirmed = False   # 关窗二次确认: 确认过一次就记住
         self._cancel = threading.Event()
@@ -1049,6 +1071,13 @@ class SnapshotDialog(QDialog):
         self.view_existing_btn = QPushButton('查看已有截图')
         self.view_existing_btn.clicked.connect(self._on_view_existing)
         row1.addWidget(self.view_existing_btn)
+        # 「清除截图」: 把界面上的截图抹掉 + 删掉对应的磁盘文件
+        # (2026-11-13 用户要求)。默认灰 —— 界面上没有截图时没什么可清的。
+        self.clear_btn = QPushButton('清除截图')
+        self.clear_btn.setToolTip('清掉界面上的截图, 并删除对应的截图文件')
+        self.clear_btn.clicked.connect(self._on_clear_snapshots)
+        self.clear_btn.setEnabled(False)
+        row1.addWidget(self.clear_btn)
         self.action_btn = QPushButton('开始截图')
         self.action_btn.clicked.connect(self._on_action_btn)
         row1.addWidget(self.action_btn)
@@ -1111,6 +1140,7 @@ class SnapshotDialog(QDialog):
         root.addLayout(row3)
 
         self._sync_columns()
+        self._update_clear_btn()
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(100)
         self._poll_timer.timeout.connect(self._poll_queue)
@@ -1216,6 +1246,7 @@ class SnapshotDialog(QDialog):
         self._existing_cancel.clear()
         self.view_existing_btn.setEnabled(False)
         self.action_btn.setEnabled(False)
+        self._update_clear_btn()   # 加载中不给「清除截图」
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.status_label.setText('分析中 0/0 个文件')
@@ -1230,6 +1261,121 @@ class SnapshotDialog(QDialog):
         )
         self._existing_thread.start()
         self._poll_timer.start()
+
+    # ---- 清除截图 (2026-11-13) ----
+
+    def _update_clear_btn(self) -> None:
+        """「清除截图」的可用性: **界面上确实有截图**且**没有抽帧在进行**。
+
+        「有截图」= 模型里有 status=='done' 的格子。这条规则覆盖:
+          · 抽帧完成
+          · 已暂停 (抽着的这轮还活着, 但可以清)
+          · 中途取消 (状态回了 idle, 画面还留在界面上)
+          · 「查看已有截图」加载完 (状态还是 idle, 画面是从磁盘读来的)
+        抽帧进行中 (worker 正在往目录里写) **不给清** —— 否则会一边删
+        一边写。已有截图在加载中同理 (它正在往网格里贴图)。
+
+        清完按钮自动变灰 —— 界面上没截图了, 没什么可清的。
+        """
+        if self._state == 'running' or self._loading_existing:
+            self.clear_btn.setEnabled(False)
+            return
+        self.clear_btn.setEnabled(bool(self._collect_shown_snapshots()))
+
+    def _collect_shown_snapshots(self) -> list[tuple[int, int, str]]:
+        """网格里**显示着**的截图 → [(行号, 列号, 文件路径)]。
+
+        只收 status=='done' 的格子 —— 失败格 (红 '×') 与 empty 格
+        (空白) 不是截图, 没有对应的文件。
+        """
+        out: list[tuple[int, int, str]] = []
+        tokens = self.model.time_tokens
+        for r in range(self.model.rowCount()):
+            for c in range(len(tokens)):
+                state = self.model.cell_state(r, c + 2)
+                if state is None or state.status != 'done':
+                    continue
+                if not state.image_path:
+                    continue
+                out.append((r, c + 2, state.image_path))
+        return out
+
+    def _on_clear_snapshots(self) -> None:
+        """清除截图: 抹掉界面上的截图 + 删掉对应的磁盘文件。
+
+        **只删界面上显示的那些**截图的文件 —— 截图地址目录里别的图片
+        (别的视频、别的时间点) 看不见, 就不碰 (2026-11-13 用户要求)。
+
+        暂停中点它 → **这一轮抽帧就此结束**。抽帧线程只能往前走, 已经
+        跑过的那几格没法回头重抽 —— 结束掉最干净: 状态回 idle, 按钮回
+        「开始截图」, 可以重新完整跑一轮 (全部重抽、覆盖写)。
+        """
+        if self._state == 'running' or self._loading_existing:
+            return
+        # 先把积压的消息处理掉 —— 「刚抽完还没记进模型」的那一格,
+        # 不然它的文件没被算进要删的清单里 (留下一个孤儿文件)。
+        self._drain_pending()
+        targets = self._collect_shown_snapshots()
+        if not targets:
+            return
+        paths = unique_snapshot_paths([path for _, _, path in targets])
+        paused = self._state == 'paused'
+        extra = '\n\n暂停中的抽帧将结束。' if paused else ''
+        answer = QMessageBox.question(
+            self, '确认清除',
+            f'将删除 {len(paths)} 个截图文件:\n'
+            f'{self.output_edit.text().strip()}{extra}\n\n'
+            '界面上的截图也会一并清除。确定吗?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        failed = self._delete_snapshot_files(paths)
+        self._clear_shown_snapshots(targets)
+        msg = (f'已清除 {len(targets)} 张截图 '
+               f'(删除 {len(paths) - len(failed)} 个文件)')
+        if failed:
+            msg += f', {len(failed)} 个失败'
+        self._clear_msg = msg
+        self.status_label.setText(msg)
+        if paused:
+            # 结束这一轮 —— worker 醒来后发现取消标志, 抽完当前这格就退出。
+            # _cleared 置上: 它随后报上来的那一格直接删掉, 不往界面贴。
+            self._cleared = True
+            self._restart_after_done = False
+            self._cancel.set()
+            self._pause.set()      # 叫醒在暂停等待里的工作线程
+        else:
+            # 没有抽帧线程要收尾 —— 汇总文案直接贴状态行就完了, 别留在
+            # _clear_msg 里 (否则下一轮跑完时会被当成「刚清除过」)。
+            self._clear_msg = ''
+        self._update_clear_btn()
+
+    def _delete_snapshot_files(self, paths: list[str]) -> list[tuple[str, str]]:
+        """删文件 → 返回失败清单 [(路径, 原因)]。
+
+        `FileNotFoundError` **不算失败** —— 那个文件已经被手动删过了
+        (或者被同一个文件的两格重复引用, 已经删过一次)。
+        """
+        failed: list[tuple[str, str]] = []
+        for path in paths:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                failed.append((path, str(e)))
+        return failed
+
+    def _clear_shown_snapshots(self, targets: list[tuple[int, int, str]]) -> None:
+        """把已抽好的格子擦回「待抽」状态 (缩略图缓存 + 单元格状态)。
+
+        失败格 (红 '×') 与 empty 格 (空白) **不动** —— 它们不是截图。
+        """
+        for row, col, _path in targets:
+            self.delegate.clear_thumbnail(row, col)
+            self.model.mark_idle(row, col)
+        self._cells_processed = 0
+        self.progress.setValue(0)
 
     # ---- 状态机 ----
 
@@ -1311,6 +1457,7 @@ class SnapshotDialog(QDialog):
         # 抽帧期间「查看已有截图」也锁掉 —— 它会重建网格, 与正在写入的
         # 抽帧结果打架 (而且那时候看旧的也没意义)。
         self.view_existing_btn.setEnabled(False)
+        self._update_clear_btn()   # 抽帧中不给「清除截图」
 
         self._result_queue = queue.Queue()
         self._worker_thread = threading.Thread(
@@ -1338,6 +1485,7 @@ class SnapshotDialog(QDialog):
         self.action_btn.setText('继续截图')
         self._set_time_points_enabled(True)
         self.status_label.setText('已暂停 — 点「继续截图」继续')
+        self._update_clear_btn()     # 暂停时可以「清除截图」(它会结束这一轮)
 
     def _current_tokens(self) -> list[str]:
         """当前时间点入口里的值 → token 列表 (逆的带 R 前缀, 空的跳过)。"""
@@ -1367,6 +1515,7 @@ class SnapshotDialog(QDialog):
             self.action_btn.setText('截图中')
             self._set_time_points_enabled(False)
             self.status_label.setText('继续抽帧…')
+            self._update_clear_btn()
             return
         # 动了 → 当前这轮跑完, 跑完自动起新一轮
         self._restart_after_done = True
@@ -1375,6 +1524,7 @@ class SnapshotDialog(QDialog):
         self.action_btn.setText('截图中')
         self._set_time_points_enabled(False)
         self.status_label.setText('时间点已改 — 这一轮跑完自动补新的')
+        self._update_clear_btn()
 
     def _collect_done_cells(self) -> dict[tuple[int, str], str]:
         """已截好的格子 → {(行号, 时间点): 图片路径}。
@@ -1511,6 +1661,7 @@ class SnapshotDialog(QDialog):
         self._loading_existing = False
         self.view_existing_btn.setEnabled(True)
         self.action_btn.setEnabled(True)
+        self._update_clear_btn()   # 载入的旧图现在可以清了
         if self._state != 'running':
             self._poll_timer.stop()
         if not found:
@@ -1528,6 +1679,17 @@ class SnapshotDialog(QDialog):
 
     def _mark_done(self, row: int, col: int, path: str) -> None:
         """抽帧成功 → 主线程加载 320px 缩略图 (QPixmap 非线程安全)。"""
+        if self._cleared:
+            # 「清除截图」刚执行过, 这一轮正在收尾 —— 抽帧线程可能**正在抽**
+            # 某一格, 那一格随后报上来。直接把这个文件删掉, 不往界面上贴
+            # (贴上去就是「清完又冒出来一张」)。`_cleared` 在收尾
+            # (_on_snap_done) 时清掉 —— 下一轮不受影响。
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.model.mark_idle(row, col)
+            return
         if not self.delegate.set_thumbnail(row, col, path):
             self._mark_failed(row, col)
             return
@@ -1549,7 +1711,11 @@ class SnapshotDialog(QDialog):
 
     def _on_snap_done(self, done: int, total: int, cancelled: bool) -> None:
         self._poll_timer.stop()
-        if self._restart_after_done and not cancelled:
+        cleared = self._cleared
+        self._cleared = False
+        clear_msg = self._clear_msg
+        self._clear_msg = ''
+        if self._restart_after_done and not cancelled and not cleared:
             # 时间点被改过 → 这一轮跑完了, 自动起新一轮 (新的时间点照常抽,
             # 已经截好的跳过)
             self._restart_after_done = False
@@ -1561,11 +1727,18 @@ class SnapshotDialog(QDialog):
         self._set_time_points_enabled(True)
         self.output_edit.setEnabled(True)
         self.view_existing_btn.setEnabled(True)
-        status = '抽帧已取消' if cancelled else '抽帧完成'
-        self.status_label.setText(
-            f"{status}: {done}/{total} "
-            f"({done - self._failed_count} 成功, {self._failed_count} 失败)")
-        self.progress.setValue(self.progress.maximum())
+        if clear_msg:
+            # 「清除截图」把这一轮收尾了 —— 状态行说清除, 不说「已取消」;
+            # 进度条也归零 (界面上确实一张都不剩了)。
+            self.status_label.setText(clear_msg)
+            self.progress.setValue(0)
+        else:
+            status = '抽帧已取消' if cancelled else '抽帧完成'
+            self.status_label.setText(
+                f"{status}: {done}/{total} "
+                f"({done - self._failed_count} 成功, {self._failed_count} 失败)")
+            self.progress.setValue(self.progress.maximum())
+        self._update_clear_btn()
 
     # ---- 点缩略图 → 放大窗口 ----
 
@@ -2405,9 +2578,10 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         # 版本号: v4.0 抬的 (GUI 层从 Tkinter 换成 PySide6); v4.1 抬的
         # (定点截图新增「查看已有截图」); v4.2 抬的 (新增「下载海报」);
-        # v4.3 抬的 (定点截图新增「删除时间点」与「逆时间点」)。
+        # v4.3 抬的 (定点截图新增「删除时间点」与「逆时间点」);
+        # v4.4 抬的 (定点截图新增「清除截图」)。
         # 改这里要同时改产品文档 §4.1 与 CHANGELOG 的对应条目。
-        self.setWindowTitle('视频检测v4.3')
+        self.setWindowTitle('视频检测v4.4')
         # 1440 而不是 1280: 列宽总和 1347px (45 序号 + 1302 数据列), 1280 的窗口装不下
         # → 主表格会出现横向滚动条。1440 装得下 (可用 ~1428px, 余量 81px)。
         # 代价: 1366px 宽的笔记本屏幕放不下 (用户 2026-10-29 知情选定)。

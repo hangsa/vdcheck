@@ -717,6 +717,31 @@ def match_snapshots(files: list[SnapshotFile], base: str) -> dict[str, SnapshotF
     return out
 
 
+def unique_snapshot_paths(paths: list[str]) -> list[str]:
+    """一批截图路径 → **去重**后的列表 (保持原有顺序)。
+
+    「清除截图」用它算「到底要删哪些文件」—— 同一张图可能被**多个格子**
+    指着: 两个视频的元数据 title 相同时, 抽帧写出的文件名会撞车
+    (生成端拿 `os.path.splitext(info.title)[0]` 当文件名), 于是两格指向
+    同一个文件。删两次会报 FileNotFoundError。
+
+    比较用绝对路径 + `normcase` —— Windows 上大小写不敏感, `normcase`
+    会把大小写和分隔符都归一, 否则 `C:\\a.png` 与 `c:\\a.png` 会被当成
+    两个文件。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path:
+            continue
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
+
+
 def time_token_sort_key(token: str) -> tuple[int, int, int, int]:
     """时间点的排序键 (时, 分, 秒, 帧) —— **按数值比**, 不按字符串。
 
